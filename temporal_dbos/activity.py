@@ -11,6 +11,7 @@ cancellation delivery via heartbeat are Phase 3 (DESIGN §6.1.2).
 """
 
 import inspect
+import logging
 import threading
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -20,6 +21,10 @@ from typing import Any, Callable, List, Optional, Sequence, TypeVar, Union, over
 from ._internal import registry as _registry
 
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+logger = logging.getLogger("temporal_dbos.activity")
+"""Logger that can be used within activities. (Phase 1: a plain logger;
+the context-injecting adapter mirroring temporalio's lands later.)"""
 
 
 @overload

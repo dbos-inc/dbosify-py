@@ -448,6 +448,72 @@ async def execute_activity(
     )
 
 
+def start_local_activity(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    local_retry_threshold: Optional[timedelta] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+) -> ActivityHandle:
+    """Start a local activity. In temporal-dbos, in-process step execution
+    *is* the local path (DESIGN §6.1.2), so this shares machinery with
+    ``start_activity``.
+    """
+    if not start_to_close_timeout and not schedule_to_close_timeout:
+        raise ValueError(
+            "Activity must have start_to_close_timeout or schedule_to_close_timeout"
+        )
+    for key, value in {
+        "schedule_to_start_timeout": schedule_to_start_timeout,
+        "local_retry_threshold": local_retry_threshold,
+        "cancellation_type": cancellation_type,
+    }.items():
+        if value is not None:
+            logger.debug("start_local_activity: ignoring unsupported parameter %r", key)
+    return _runtime().runtime_start_activity(
+        _resolve_activity_name(activity),
+        _resolve_args(arg, args),
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        retry_policy=retry_policy,
+        activity_id=activity_id,
+    )
+
+
+async def execute_local_activity(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    local_retry_threshold: Optional[timedelta] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+) -> Any:
+    """Start a local activity and wait for completion."""
+    return await start_local_activity(
+        activity,
+        arg,
+        args=args,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        retry_policy=retry_policy,
+        local_retry_threshold=local_retry_threshold,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+    )
+
+
 class unsafe:
     """Namespace for unsafe workflow calls, mirroring
     ``temporalio.workflow.unsafe``.

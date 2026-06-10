@@ -20,6 +20,7 @@ Phase 1.
 """
 
 import asyncio
+import dataclasses
 import logging
 import os
 import time as time_mod
@@ -84,6 +85,11 @@ def register_worker(
             _dbos_workflows[defn.name] = _make_dbos_workflow(defn.name)
     for fn in activities:
         activity_defn = registry.activity_definition_of(fn)
+        if activity_defn.fn is not fn:
+            # A bound method: the definition was built at decoration time on
+            # the unbound function; execute the bound callable the user
+            # actually registered (temporalio supports method activities).
+            activity_defn = dataclasses.replace(activity_defn, fn=fn)
         registry.register_activity(activity_defn)
         activities_mod.ensure_attempt_step(activity_defn.name)
 
