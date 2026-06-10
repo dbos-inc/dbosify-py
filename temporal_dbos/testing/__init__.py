@@ -6,7 +6,7 @@ Phase 4 (see DESIGN §6.10).
 """
 
 import asyncio
-from typing import Any, Callable, Coroutine, TypeVar, Union, overload
+from typing import Any, Callable, Coroutine, Optional, TypeVar, Union, overload
 
 from .. import activity as _activity
 
@@ -36,7 +36,9 @@ class ActivityEnvironment:
         on_heartbeat: Called with the details of each ``activity.heartbeat``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, client: Optional[Any] = None) -> None:
+        # `client` is accepted for temporalio parity (used there for async
+        # activity completion heartbeats); not yet meaningful here.
         self.info: _activity.Info = _default_info
         self.on_heartbeat: Callable[..., None] = lambda *args: None
         self._context = _activity._Context(

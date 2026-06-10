@@ -35,6 +35,36 @@ from typing import (
 from ._internal import registry as _registry
 from .common import RetryPolicy
 
+__all__ = [
+    "ActivityHandle",
+    "Info",
+    "defn",
+    "execute_activity",
+    "execute_activity_method",
+    "execute_local_activity",
+    "execute_local_activity_method",
+    "in_workflow",
+    "info",
+    "init",
+    "logger",
+    "now",
+    "query",
+    "random",
+    "run",
+    "signal",
+    "sleep",
+    "start_activity",
+    "start_activity_method",
+    "start_local_activity",
+    "start_local_activity_method",
+    "time",
+    "time_ns",
+    "unsafe",
+    "update",
+    "uuid4",
+    "wait_condition",
+]
+
 logger = logging.getLogger("temporal_dbos.workflow")
 
 _F = TypeVar("_F", bound=Callable[..., Any])
@@ -184,12 +214,12 @@ def update(
     return decorator
 
 
-def init(fn: _F) -> _F:
+def init(init_fn: _F) -> _F:
     """Decorator for ``__init__`` to receive the same arguments as run."""
-    if fn.__name__ != "__init__":
+    if init_fn.__name__ != "__init__":
         raise ValueError("@workflow.init may only be used on __init__")
-    setattr(fn, _registry.INIT_ATTR, True)
-    return fn
+    setattr(init_fn, _registry.INIT_ATTR, True)
+    return init_fn
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +399,7 @@ def start_activity(
     *,
     args: Sequence[Any] = [],
     task_queue: Optional[str] = None,
+    result_type: Optional[type] = None,
     schedule_to_close_timeout: Optional[timedelta] = None,
     schedule_to_start_timeout: Optional[timedelta] = None,
     start_to_close_timeout: Optional[timedelta] = None,
@@ -382,9 +413,11 @@ def start_activity(
 ) -> ActivityHandle:
     """Start an activity and return its handle.
 
-    Phase 0 honors arg/args, ``start_to_close_timeout``,
+    Phase 1 honors arg/args, ``start_to_close_timeout``,
     ``schedule_to_close_timeout``, ``retry_policy``, and ``activity_id``;
     the remaining parameters are accepted and ignored (debug-logged).
+    ``result_type`` is a no-op: payloads round-trip through the DBOS
+    serializer, so no type hint is needed to reconstruct them.
     """
     if not start_to_close_timeout and not schedule_to_close_timeout:
         raise ValueError(
@@ -418,6 +451,7 @@ async def execute_activity(
     *,
     args: Sequence[Any] = [],
     task_queue: Optional[str] = None,
+    result_type: Optional[type] = None,
     schedule_to_close_timeout: Optional[timedelta] = None,
     schedule_to_start_timeout: Optional[timedelta] = None,
     start_to_close_timeout: Optional[timedelta] = None,
@@ -435,6 +469,7 @@ async def execute_activity(
         arg,
         args=args,
         task_queue=task_queue,
+        result_type=result_type,
         schedule_to_close_timeout=schedule_to_close_timeout,
         schedule_to_start_timeout=schedule_to_start_timeout,
         start_to_close_timeout=start_to_close_timeout,
@@ -448,11 +483,79 @@ async def execute_activity(
     )
 
 
-# Method variants: in temporalio these exist for typing (binding `self` for
-# activities defined as instance methods); resolution and execution are
-# identical — the worker registered the bound method under the same name.
-start_activity_method = start_activity
-execute_activity_method = execute_activity
+# Method variants: identical resolution/execution (the worker registered the
+# bound method under the same name). Mirroring temporalio, these lack
+# ``result_type`` — the return type is inferred from the method.
+def start_activity_method(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    task_queue: Optional[str] = None,
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    heartbeat_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+    versioning_intent: Optional[Any] = None,
+    summary: Optional[str] = None,
+    priority: Optional[Any] = None,
+) -> ActivityHandle:
+    """Start an activity from a method reference. See ``start_activity``."""
+    return start_activity(
+        activity,
+        arg,
+        args=args,
+        task_queue=task_queue,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        heartbeat_timeout=heartbeat_timeout,
+        retry_policy=retry_policy,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+        versioning_intent=versioning_intent,
+        summary=summary,
+        priority=priority,
+    )
+
+
+async def execute_activity_method(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    task_queue: Optional[str] = None,
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    heartbeat_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+    versioning_intent: Optional[Any] = None,
+    summary: Optional[str] = None,
+    priority: Optional[Any] = None,
+) -> Any:
+    """Run an activity from a method reference. See ``execute_activity``."""
+    return await start_activity_method(
+        activity,
+        arg,
+        args=args,
+        task_queue=task_queue,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        heartbeat_timeout=heartbeat_timeout,
+        retry_policy=retry_policy,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+        versioning_intent=versioning_intent,
+        summary=summary,
+        priority=priority,
+    )
 
 
 def start_local_activity(
@@ -460,6 +563,7 @@ def start_local_activity(
     arg: Any = _arg_unset,
     *,
     args: Sequence[Any] = [],
+    result_type: Optional[type] = None,
     schedule_to_close_timeout: Optional[timedelta] = None,
     schedule_to_start_timeout: Optional[timedelta] = None,
     start_to_close_timeout: Optional[timedelta] = None,
@@ -467,6 +571,7 @@ def start_local_activity(
     local_retry_threshold: Optional[timedelta] = None,
     cancellation_type: Optional[Any] = None,
     activity_id: Optional[str] = None,
+    summary: Optional[str] = None,
 ) -> ActivityHandle:
     """Start a local activity. In temporal-dbos, in-process step execution
     *is* the local path (DESIGN §6.1.2), so this shares machinery with
@@ -480,6 +585,7 @@ def start_local_activity(
         "schedule_to_start_timeout": schedule_to_start_timeout,
         "local_retry_threshold": local_retry_threshold,
         "cancellation_type": cancellation_type,
+        "summary": summary,
     }.items():
         if value is not None:
             logger.debug("start_local_activity: ignoring unsupported parameter %r", key)
@@ -498,6 +604,7 @@ async def execute_local_activity(
     arg: Any = _arg_unset,
     *,
     args: Sequence[Any] = [],
+    result_type: Optional[type] = None,
     schedule_to_close_timeout: Optional[timedelta] = None,
     schedule_to_start_timeout: Optional[timedelta] = None,
     start_to_close_timeout: Optional[timedelta] = None,
@@ -505,9 +612,42 @@ async def execute_local_activity(
     local_retry_threshold: Optional[timedelta] = None,
     cancellation_type: Optional[Any] = None,
     activity_id: Optional[str] = None,
+    summary: Optional[str] = None,
 ) -> Any:
     """Start a local activity and wait for completion."""
     return await start_local_activity(
+        activity,
+        arg,
+        args=args,
+        result_type=result_type,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        retry_policy=retry_policy,
+        local_retry_threshold=local_retry_threshold,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+        summary=summary,
+    )
+
+
+def start_local_activity_method(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    local_retry_threshold: Optional[timedelta] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+    summary: Optional[str] = None,
+) -> ActivityHandle:
+    """Start a local activity from a method reference (no ``result_type``,
+    mirroring temporalio: the return type is inferred from the method)."""
+    return start_local_activity(
         activity,
         arg,
         args=args,
@@ -518,11 +658,38 @@ async def execute_local_activity(
         local_retry_threshold=local_retry_threshold,
         cancellation_type=cancellation_type,
         activity_id=activity_id,
+        summary=summary,
     )
 
 
-start_local_activity_method = start_local_activity
-execute_local_activity_method = execute_local_activity
+async def execute_local_activity_method(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    local_retry_threshold: Optional[timedelta] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+    summary: Optional[str] = None,
+) -> Any:
+    """Run a local activity from a method reference."""
+    return await start_local_activity_method(
+        activity,
+        arg,
+        args=args,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        retry_policy=retry_policy,
+        local_retry_threshold=local_retry_threshold,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+        summary=summary,
+    )
 
 
 class unsafe:

@@ -20,6 +20,17 @@ from typing import Any, Callable, List, Optional, Sequence, TypeVar, Union, over
 
 from ._internal import registry as _registry
 
+__all__ = [
+    "Info",
+    "defn",
+    "heartbeat",
+    "in_activity",
+    "info",
+    "is_cancelled",
+    "logger",
+    "wait_for_cancelled_sync",
+]
+
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 logger = logging.getLogger("temporal_dbos.activity")
@@ -57,18 +68,21 @@ def defn(
 @dataclass(frozen=True)
 class Info:
     """Information about the running activity (Phase 1 subset of
-    temporalio's ``activity.Info``).
+    temporalio's ``activity.Info``; field order matches theirs).
+
+    Constructed by the SDK, never by users — the defaults exist only for
+    construction convenience.
     """
 
-    activity_id: str
-    activity_type: str
-    attempt: int
-    task_queue: str
-    workflow_id: str
-    workflow_run_id: str
-    workflow_type: str
-    is_local: bool = False
+    activity_id: str = ""
+    activity_type: str = ""
+    attempt: int = 1
     heartbeat_details: Sequence[Any] = ()
+    is_local: bool = False
+    task_queue: str = ""
+    workflow_id: str = ""
+    workflow_run_id: str = ""
+    workflow_type: str = ""
 
 
 @dataclass

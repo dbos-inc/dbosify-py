@@ -79,16 +79,19 @@ class WorkflowUpdateFailedError(exceptions.TemporalError):
 
 @dataclass(frozen=True)
 class WorkflowExecution:
-    """Info for a single workflow execution run (Phase 1 subset)."""
+    """Info for a single workflow execution run (Phase 1 subset of
+    temporalio's; field order matches theirs). Constructed by the SDK,
+    never by users.
+    """
 
-    id: str
-    run_id: str
-    workflow_type: str
-    task_queue: Optional[str]
-    status: Optional[WorkflowExecutionStatus]
-    start_time: Optional[datetime]
-    close_time: Optional[datetime]
+    close_time: Optional[datetime] = None
+    id: str = ""
     parent_id: Optional[str] = None
+    run_id: str = ""
+    start_time: Optional[datetime] = None
+    status: Optional[WorkflowExecutionStatus] = None
+    task_queue: Optional[str] = None
+    workflow_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -153,6 +156,17 @@ def _to_datetime(epoch_ms: Optional[int]) -> Optional[datetime]:
     return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
 
 
+def _ignore_rpc_options(
+    where: str, rpc_metadata: Mapping[str, Any], rpc_timeout: Optional[timedelta]
+) -> None:
+    """RPC transport options have no temporal-dbos equivalent; accept and
+    debug-log them (DESIGN convention for tuning parameters)."""
+    if rpc_metadata:
+        logger.debug("%s: ignoring rpc_metadata", where)
+    if rpc_timeout is not None:
+        logger.debug("%s: ignoring rpc_timeout", where)
+
+
 class Client:
     """Client for accessing temporal-dbos, wrapping a ``dbos.DBOSClient``.
 
@@ -186,6 +200,7 @@ class Client:
         args: Sequence[Any] = [],
         id: str,
         task_queue: str,
+        result_type: Optional[type] = None,
         execution_timeout: Optional[timedelta] = None,
         run_timeout: Optional[timedelta] = None,
         task_timeout: Optional[timedelta] = None,
@@ -195,11 +210,16 @@ class Client:
         cron_schedule: str = "",
         memo: Optional[Mapping[str, Any]] = None,
         search_attributes: Optional[Any] = None,
+        static_summary: Optional[str] = None,
+        static_details: Optional[str] = None,
         start_delay: Optional[timedelta] = None,
         start_signal: Optional[str] = None,
         start_signal_args: Sequence[Any] = [],
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
         request_eager_start: bool = False,
         priority: Optional[Any] = None,
+        request_id: Optional[str] = None,
         **unsupported: Any,
     ) -> "WorkflowHandle":
         """Start a workflow and return its handle.
@@ -211,14 +231,20 @@ class Client:
         cron_schedule are Phase 3.
         """
         for key, value in {
+            "result_type": result_type,
             "execution_timeout": execution_timeout,
             "task_timeout": task_timeout,
             "retry_policy": retry_policy,
             "cron_schedule": cron_schedule or None,
             "memo": memo,
             "search_attributes": search_attributes,
+            "static_summary": static_summary,
+            "static_details": static_details,
+            "rpc_metadata": rpc_metadata or None,
+            "rpc_timeout": rpc_timeout,
             "request_eager_start": request_eager_start or None,
             "priority": priority,
+            "request_id": request_id,
             **unsupported,
         }.items():
             if value is not None:
@@ -294,11 +320,54 @@ class Client:
         args: Sequence[Any] = [],
         id: str,
         task_queue: str,
-        **kwargs: Any,
+        result_type: Optional[type] = None,
+        execution_timeout: Optional[timedelta] = None,
+        run_timeout: Optional[timedelta] = None,
+        task_timeout: Optional[timedelta] = None,
+        id_reuse_policy: WorkflowIDReusePolicy = WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        id_conflict_policy: WorkflowIDConflictPolicy = WorkflowIDConflictPolicy.UNSPECIFIED,
+        retry_policy: Optional[RetryPolicy] = None,
+        cron_schedule: str = "",
+        memo: Optional[Mapping[str, Any]] = None,
+        search_attributes: Optional[Any] = None,
+        static_summary: Optional[str] = None,
+        static_details: Optional[str] = None,
+        start_delay: Optional[timedelta] = None,
+        start_signal: Optional[str] = None,
+        start_signal_args: Sequence[Any] = [],
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+        request_eager_start: bool = False,
+        priority: Optional[Any] = None,
+        **unsupported: Any,
     ) -> Any:
         """Start a workflow and wait for completion. See ``start_workflow``."""
         handle = await self.start_workflow(
-            workflow, arg, args=args, id=id, task_queue=task_queue, **kwargs
+            workflow,
+            arg,
+            args=args,
+            id=id,
+            task_queue=task_queue,
+            result_type=result_type,
+            execution_timeout=execution_timeout,
+            run_timeout=run_timeout,
+            task_timeout=task_timeout,
+            id_reuse_policy=id_reuse_policy,
+            id_conflict_policy=id_conflict_policy,
+            retry_policy=retry_policy,
+            cron_schedule=cron_schedule,
+            memo=memo,
+            search_attributes=search_attributes,
+            static_summary=static_summary,
+            static_details=static_details,
+            start_delay=start_delay,
+            start_signal=start_signal,
+            start_signal_args=start_signal_args,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+            request_eager_start=request_eager_start,
+            priority=priority,
+            **unsupported,
         )
         return await handle.result()
 
@@ -376,13 +445,13 @@ class WorkflowHandle:
     def __init__(
         self,
         client: Client,
-        workflow_id: str,
+        id: str,
         *,
         run_id: Optional[str] = None,
         first_execution_run_id: Optional[str] = None,
     ) -> None:
         self._client = client
-        self._id = workflow_id
+        self._id = id
         self._run_id = run_id
         self._first_execution_run_id = first_execution_run_id
 
@@ -407,20 +476,20 @@ class WorkflowHandle:
     async def result(
         self,
         *,
-        timeout: Optional[Union[timedelta, float]] = None,
         follow_runs: bool = True,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
     ) -> Any:
         """Wait for and return the result; raises
         :py:class:`WorkflowFailureError` on workflow failure with the exact
-        cause reconstructed.
+        cause reconstructed. (rpc_timeout bounds a single RPC in temporalio,
+        not the total wait, so it is accepted and ignored here.)
         """
+        _ignore_rpc_options("result", rpc_metadata, rpc_timeout)
         dbos_id = await self._target()
         runtime_client = self._client._dbos_client
         handle: Any = await runtime_client.retrieve_workflow_async(dbos_id)
-        seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
         try:
-            if seconds is not None:
-                return await asyncio.wait_for(handle.get_result(), seconds)
             return await handle.get_result()
         except SerializedWorkflowFailure as failure:
             # NOTE: `raise ... from X` overwrites __cause__, which the
@@ -438,9 +507,16 @@ class WorkflowHandle:
             raise WorkflowFailureError(cause=converted) from converted
 
     async def signal(
-        self, signal: Any, arg: Any = _arg_unset, *, args: Sequence[Any] = []
+        self,
+        signal: Any,
+        arg: Any = _arg_unset,
+        *,
+        args: Sequence[Any] = [],
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
     ) -> None:
         """Send a signal to the workflow."""
+        _ignore_rpc_options("signal", rpc_metadata, None)
         await self._client._dbos_client.send_async(
             await self._target(),
             inbox.signal_envelope(_signal_name(signal), _resolve_args(arg, args)),
@@ -453,9 +529,12 @@ class WorkflowHandle:
         arg: Any = _arg_unset,
         *,
         args: Sequence[Any] = [],
+        result_type: Optional[type] = None,
+        rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> Any:
         """Query the workflow (v1: requires a RUNNING workflow)."""
+        _ignore_rpc_options("query", rpc_metadata, None)
         request_id = str(uuid_mod.uuid4())
         client = self._client._dbos_client
         target = await self._target()
@@ -486,11 +565,14 @@ class WorkflowHandle:
         *,
         args: Sequence[Any] = [],
         id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> Any:
         """Send an update and wait for its result; raises
         :py:class:`WorkflowUpdateFailedError` on rejection or failure.
         """
+        _ignore_rpc_options("execute_update", rpc_metadata, None)
         update_id = id or str(uuid_mod.uuid4())
         client = self._client._dbos_client
         target = await self._target()
@@ -512,9 +594,15 @@ class WorkflowHandle:
             return reply["result"]
         raise WorkflowUpdateFailedError(deserialize_failure(reply["failure"]))
 
-    async def describe(self) -> WorkflowExecutionDescription:
+    async def describe(
+        self,
+        *,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> WorkflowExecutionDescription:
         """Get the current description of this workflow's latest (or bound)
         run."""
+        _ignore_rpc_options("describe", rpc_metadata, rpc_timeout)
         dbos_id = await self._target()
         status = await self._client._status_of(dbos_id)
         workflow_type = status.name or ""
@@ -531,12 +619,24 @@ class WorkflowHandle:
             parent_id=status.parent_workflow_id,
         )
 
-    async def cancel(self) -> None:
+    async def cancel(
+        self,
+        *,
+        reason: str = "",
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
         """Cooperative cancellation: Phase 2 (see DESIGN §6.5)."""
         raise NotImplementedError(
             "handle.cancel() lands in Phase 2 (cooperative cancellation)"
         )
 
-    async def terminate(self, reason: str = "", details: Sequence[Any] = ()) -> None:
+    async def terminate(
+        self,
+        *args: Any,
+        reason: Optional[str] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
         """Forceful termination: Phase 2 (see DESIGN §6.5)."""
         raise NotImplementedError("handle.terminate() lands in Phase 2")
