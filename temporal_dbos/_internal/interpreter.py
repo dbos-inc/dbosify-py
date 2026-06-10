@@ -248,7 +248,6 @@ class Interpreter(_Runtime):
         self._commands: List[Tuple[str, int]] = []
         self._outbox: List[Tuple[str, Any]] = []
         self._waiters: List[_Waiter] = []
-        self._immediate_fires: List[_TimerHandle] = []
         self._buffered_signals: Dict[str, List[inbox.Envelope]] = {}
         self._seen_update_ids: Set[str] = set()
         self._handlers_running = 0
