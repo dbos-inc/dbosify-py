@@ -19,6 +19,25 @@ from .. import exceptions
 FailureEnvelope = Dict[str, Any]
 
 
+class SerializedWorkflowFailure(Exception):
+    """The form a workflow failure takes in the DBOS ledger.
+
+    The dispatcher wraps workflow ``FailureError`` outcomes in this before
+    they reach DBOS's error recording, because pickling exception objects
+    drops ``__cause__`` chains. Clients catch it from ``get_result`` and
+    reconstruct the exact failure via ``deserialize_failure``.
+    """
+
+    def __init__(self, envelope: FailureEnvelope) -> None:
+        # The envelope is the sole constructor arg so default exception
+        # pickling round-trips it.
+        super().__init__(envelope)
+        self.envelope = envelope
+
+    def __str__(self) -> str:
+        return str(self.envelope.get("message", "workflow failed"))
+
+
 def serialize_failure(exc: BaseException) -> FailureEnvelope:
     env: FailureEnvelope
     if isinstance(exc, exceptions.ApplicationError):

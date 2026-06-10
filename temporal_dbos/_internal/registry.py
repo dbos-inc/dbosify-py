@@ -16,6 +16,7 @@ logger = logging.getLogger("temporal_dbos")
 
 WORKFLOW_DEFN_ATTR = "__temporal_workflow_definition"
 RUN_ATTR = "__temporal_workflow_run"
+WORKFLOW_NAME_ATTR = "__temporal_workflow_name"
 SIGNAL_ATTR = "__temporal_signal_definition"
 QUERY_ATTR = "__temporal_query_definition"
 INIT_ATTR = "__temporal_workflow_init"
@@ -62,6 +63,19 @@ class ActivityDefinition:
 
 _workflows: Dict[str, WorkflowDefinition] = {}
 _activities: Dict[str, ActivityDefinition] = {}
+
+# Worker-level failure exception types (Worker(workflow_failure_exception_types=...)),
+# merged across workers in this process; checked by the interpreter alongside
+# each definition's own list.
+worker_failure_exception_types: Tuple[Type[BaseException], ...] = ()
+
+
+def add_worker_failure_exception_types(
+    types: Sequence[Type[BaseException]],
+) -> None:
+    global worker_failure_exception_types
+    merged = dict.fromkeys(worker_failure_exception_types + tuple(types))
+    worker_failure_exception_types = tuple(merged)
 
 
 def workflow_definition_of(cls: Type[Any]) -> WorkflowDefinition:
@@ -163,6 +177,10 @@ def build_workflow_definition(
         raise ValueError("@workflow.run method must be an async function")
 
     init_takes_args = getattr(cls.__init__, INIT_ATTR, False)
+
+    # Stamp the run method with the type name so client code can reference
+    # workflows the temporalio way: client.execute_workflow(MyWorkflow.run, ...)
+    setattr(run_fn, WORKFLOW_NAME_ATTR, workflow_name)
 
     return WorkflowDefinition(
         name=workflow_name,

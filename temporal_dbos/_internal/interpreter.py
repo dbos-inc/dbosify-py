@@ -361,10 +361,13 @@ class Interpreter(_Runtime):
             self._outcome = outcome
 
     def _is_failure_exception(self, err: BaseException) -> bool:
+        from . import registry
+
         return (
             isinstance(err, exceptions.FailureError)
             or isinstance(err, asyncio.TimeoutError)
             or isinstance(err, self._defn.failure_exception_types)
+            or isinstance(err, registry.worker_failure_exception_types)
         )
 
     async def _drain_outside_task(self) -> None:
@@ -543,8 +546,16 @@ class Interpreter(_Runtime):
     def _launch_attempt(self, exec_state: _ActivityExec) -> None:
         step_fn = activities_mod.attempt_step_for(exec_state.activity_name)
         exec_state.in_backoff = False
+        meta = {
+            "activity_id": exec_state.activity_id,
+            "activity_type": exec_state.activity_name,
+            "attempt": exec_state.attempt,
+            "workflow_id": self._workflow_id,
+            "workflow_run_id": self._workflow_id,
+            "workflow_type": self._defn.name,
+        }
         # The step wrapper assigns its function_id synchronously here.
-        coro = step_fn(exec_state.args, exec_state.start_to_close)
+        coro = step_fn(exec_state.args, exec_state.start_to_close, meta)
         self._launch_waiter("activity", exec_state.seq, coro)
 
     def _ensure_inbox_waiter(self) -> None:

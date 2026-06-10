@@ -74,6 +74,18 @@ def dbos_client(dbos: DBOS) -> Generator[DBOSClient, Any, None]:
 
 
 @pytest.fixture()
+def tdb_env(cleanup_test_databases: None) -> Generator[None, Any, None]:
+    """A clean slate for public-API (Client/Worker) tests: fresh database,
+    and the temporal-dbos runtime manages the DBOS lifecycle itself.
+    """
+    from temporal_dbos._internal import runtime
+
+    runtime.get_runtime()._reset_for_tests()
+    yield
+    runtime.get_runtime()._reset_for_tests()
+
+
+@pytest.fixture()
 def tdb(dbos: DBOS) -> DBOS:
     """A launched DBOS plus clean temporal-dbos registries.
 
