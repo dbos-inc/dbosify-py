@@ -267,6 +267,11 @@ class Client:
                 # TOCTOU window here, accepted for v1 (DESIGN §6.4).
                 if id_conflict_policy == WorkflowIDConflictPolicy.USE_EXISTING:
                     return WorkflowHandle(self, id, run_id=current_status.workflow_id)
+                if id_conflict_policy == WorkflowIDConflictPolicy.TERMINATE_EXISTING:
+                    raise NotImplementedError(
+                        "TERMINATE_EXISTING lands with Phase 2 termination "
+                        "(see README compatibility table)"
+                    )
                 raise exceptions.WorkflowAlreadyStartedError(
                     id, type_name, run_id=current_status.workflow_id
                 )
