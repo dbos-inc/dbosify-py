@@ -448,6 +448,13 @@ async def execute_activity(
     )
 
 
+# Method variants: in temporalio these exist for typing (binding `self` for
+# activities defined as instance methods); resolution and execution are
+# identical — the worker registered the bound method under the same name.
+start_activity_method = start_activity
+execute_activity_method = execute_activity
+
+
 def start_local_activity(
     activity: Any,
     arg: Any = _arg_unset,
@@ -512,6 +519,10 @@ async def execute_local_activity(
         cancellation_type=cancellation_type,
         activity_id=activity_id,
     )
+
+
+start_local_activity_method = start_local_activity
+execute_local_activity_method = execute_local_activity
 
 
 class unsafe:
