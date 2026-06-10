@@ -196,7 +196,11 @@ class _VirtualLoop(asyncio.AbstractEventLoop):
     def call_exception_handler(self, context: Dict[str, Any]) -> None:
         # Mirrors temporalio: unhandled errors from non-task callbacks are
         # rare; surface them in logs rather than crashing the host loop.
-        logger.error("Workflow virtual loop exception: %s", context.get("message"))
+        logger.error(
+            "Workflow virtual loop exception: %s",
+            context.get("message"),
+            exc_info=context.get("exception"),
+        )
 
     def default_exception_handler(self, context: Dict[str, Any]) -> None:
         self.call_exception_handler(context)
@@ -282,7 +286,7 @@ class Interpreter(_Runtime):
         self._instantiate()
         try:
             while True:
-                self._drain()
+                await self._drain_outside_task()
                 made_progress = self._process_commands()
                 if made_progress:
                     continue  # immediate timer fires need another drain
@@ -362,6 +366,32 @@ class Interpreter(_Runtime):
             or isinstance(err, asyncio.TimeoutError)
             or isinstance(err, self._defn.failure_exception_types)
         )
+
+    async def _drain_outside_task(self) -> None:
+        """Run ``_drain`` from a plain real-loop callback, not from inside
+        the dispatcher task.
+
+        Since Python 3.14, asyncio tracks the currently-executing task
+        per-thread rather than per-loop, so entering a virtual-loop task
+        while the dispatcher task is mid-step raises "Cannot enter into
+        task ... while another task ... is being executed". A ``call_soon``
+        callback runs after the dispatcher task has suspended (awaiting
+        ``done``), i.e. with no current task on the thread — on every
+        Python version.
+        """
+        loop = asyncio.get_running_loop()
+        done: "asyncio.Future[None]" = loop.create_future()
+
+        def run() -> None:
+            try:
+                self._drain()
+            except BaseException as err:  # pragma: no cover — _drain classifies
+                done.set_exception(err)
+            else:
+                done.set_result(None)
+
+        loop.call_soon(run)
+        await done
 
     def _drain(self) -> None:
         """Run the virtual loop until every coroutine is parked: drain ready
