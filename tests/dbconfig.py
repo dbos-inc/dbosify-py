@@ -1,0 +1,41 @@
+"""Database configuration shared by tests and subprocess worker scripts.
+
+Integration tests need a running Postgres server, provisioned externally (CI
+service container or a local installation). Tests never launch a server; they
+drop and re-create their own databases on the provided one.
+
+Connection configuration, in priority order:
+1. ``TDB_TEST_SYSTEM_DATABASE_URL`` — full SQLAlchemy URL; the database it
+   names is dropped/created by tests, so never point it at a database you
+   care about.
+2. ``PGHOST``/``PGPORT``/``PGUSER``/``PGPASSWORD`` (defaults: localhost,
+   5432, postgres, dbos), with the test database name below.
+"""
+
+import os
+from urllib.parse import quote
+
+from dbos import DBOSConfig
+
+TEST_SYSTEM_DB_NAME = "temporal_dbos_test_dbos_sys"
+
+
+def system_database_url() -> str:
+    url = os.environ.get("TDB_TEST_SYSTEM_DATABASE_URL")
+    if url is not None:
+        return url
+    host = os.environ.get("PGHOST", "localhost")
+    port = os.environ.get("PGPORT", "5432")
+    user = os.environ.get("PGUSER", "postgres")
+    password = quote(os.environ.get("PGPASSWORD", "dbos"), safe="")
+    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{TEST_SYSTEM_DB_NAME}"
+
+
+def default_config() -> DBOSConfig:
+    return {
+        "name": "temporal_dbos_test",
+        "system_database_url": system_database_url(),
+        "run_admin_server": False,
+        # Speeds up recv/event delivery in tests.
+        "notification_listener_polling_interval_sec": 0.01,
+    }
