@@ -2,6 +2,12 @@
 __pycache__/
 *.py[codz]
 *$py.class
+.python-version
+
+# AI
+CLAUDE.md
+DESIGN.md
+.claude/
 
 # C extensions
 *.so
