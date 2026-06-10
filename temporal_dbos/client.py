@@ -1,33 +1,39 @@
 """Client for starting and interacting with workflows, mirroring
-``temporalio.client``.
+``temporalio.client`` in shape while taking DBOS machinery directly: a
+``Client`` wraps a ``dbos.DBOSClient`` (which carries the database URL and
+system schema), rather than parsing a Temporal-style target host.
 
-Phase 1 surface: ``Client.connect`` (lazy — the target is a Postgres URL, or
-host:port shapes fall back to ``DBOS_SYSTEM_DATABASE_URL``), ``start_workflow``
-/ ``execute_workflow`` / ``get_workflow_handle``, and ``WorkflowHandle`` with
-``result``/``signal``/``query``/``execute_update``/``describe``. Parameters
-not yet honored are accepted and ignored with a debug log. ``cancel`` and
-``terminate`` land with the Phase 2 cancellation matrix.
+Phase 1 surface: ``start_workflow`` / ``execute_workflow`` /
+``get_workflow_handle``, and ``WorkflowHandle`` with ``result``/``signal``/
+``query``/``execute_update``/``describe``. Parameters not yet honored are
+accepted and ignored with a debug log. ``cancel`` and ``terminate`` land with
+the Phase 2 cancellation matrix.
 """
 
 import asyncio
 import logging
+import os
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Mapping, Optional, Sequence, Type, Union
 
-from dbos import EnqueueOptions, WorkflowStatus
+from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 
 from . import exceptions
 from ._internal import ids, inbox
 from ._internal import registry as _registry
-from ._internal import runtime as _runtime
 from ._internal import status as _status
 from ._internal.payloads import SerializedWorkflowFailure, deserialize_failure
 from ._internal.status import WorkflowExecutionStatus
 from .common import RetryPolicy, WorkflowIDConflictPolicy, WorkflowIDReusePolicy
 from .workflow import _UpdateMethod
+
+# Worst-case latency for client-side get_event when a LISTEN/NOTIFY wakeup is
+# missed (see docs/phase0.md); DBOSClient has no public knob yet.
+CLIENT_POLL_ENV = "TEMPORAL_DBOS_CLIENT_POLL_SECONDS"
+DEFAULT_CLIENT_POLL_SECONDS = 1.0
 
 __all__ = [
     "Client",
@@ -148,50 +154,25 @@ def _to_datetime(epoch_ms: Optional[int]) -> Optional[datetime]:
 
 
 class Client:
-    """Client for accessing temporal-dbos. Connecting is lazy and cheap;
-    nothing touches the database until the first operation.
+    """Client for accessing temporal-dbos, wrapping a ``dbos.DBOSClient``.
+
+    The DBOSClient carries the connection (database URL, system schema), so
+    namespacing rides on its ``dbos_system_schema``. Construct directly or
+    via the async :py:meth:`connect` (kept for temporalio shape).
     """
 
-    def __init__(self, *, namespace: str = "default") -> None:
-        self._namespace = namespace
-        self._runtime = _runtime.get_runtime()
+    def __init__(self, dbos_client: DBOSClient) -> None:
+        self._dbos_client = dbos_client
+        # Bound the LISTEN/NOTIFY-miss latency for get_event-based replies
+        # (updates/queries). Private until DBOS exposes an option.
+        self._dbos_client._sys_db._notification_fallback_polling_interval = float(
+            os.environ.get(CLIENT_POLL_ENV, str(DEFAULT_CLIENT_POLL_SECONDS))
+        )
 
     @classmethod
-    async def connect(
-        cls,
-        target_host: str,
-        *,
-        namespace: str = "default",
-        data_converter: Optional[Any] = None,
-        interceptors: Sequence[Any] = (),
-        tls: Union[bool, Any] = False,
-        lazy: bool = False,
-        **unsupported: Any,
-    ) -> "Client":
-        """Connect: ``target_host`` is a Postgres URL, or any host:port form
-        (e.g. Temporal's ``localhost:7233``) with the database taken from
-        ``DBOS_SYSTEM_DATABASE_URL``. ``namespace`` maps onto a DBOS system
-        schema.
-        """
-        for key, value in {
-            "data_converter": data_converter,
-            "interceptors": interceptors or None,
-            "tls": tls or None,
-            **unsupported,
-        }.items():
-            if value is not None:
-                logger.debug("Client.connect: ignoring unsupported option %r", key)
-        runtime = _runtime.get_runtime()
-        runtime.configure(
-            _runtime.resolve_target(target_host),
-            _runtime.namespace_to_schema(namespace),
-        )
-        return cls(namespace=namespace)
-
-    @property
-    def namespace(self) -> str:
-        """Namespace used in calls by this client."""
-        return self._namespace
+    async def connect(cls, dbos_client: DBOSClient) -> "Client":
+        """Create a client from a ``dbos.DBOSClient``."""
+        return cls(dbos_client)
 
     # ------------------------------------------------------------------
     # Workflow start
@@ -289,10 +270,10 @@ class Client:
             options["workflow_timeout"] = run_timeout.total_seconds()
         if start_delay is not None:
             options["delay_seconds"] = start_delay.total_seconds()
-        await self._runtime.client().enqueue_async(options, workflow_args)
+        await self._dbos_client.enqueue_async(options, workflow_args)
 
         if start_signal is not None:
-            await self._runtime.client().send_async(
+            await self._dbos_client.send_async(
                 dbos_id,
                 inbox.signal_envelope(start_signal, list(start_signal_args)),
                 inbox.INBOX_TOPIC,
@@ -356,7 +337,7 @@ class Client:
         self, workflow_id: str
     ) -> Optional[tuple[int, WorkflowStatus]]:
         """The highest-index run of a Temporal workflow id, if any."""
-        statuses = await self._runtime.client().list_workflows_async(
+        statuses = await self._dbos_client.list_workflows_async(
             workflow_id_prefix=workflow_id
         )
         best: Optional[tuple[int, WorkflowStatus]] = None
@@ -375,9 +356,7 @@ class Client:
         return current[1].workflow_id
 
     async def _status_of(self, dbos_id: str) -> WorkflowStatus:
-        statuses = await self._runtime.client().list_workflows_async(
-            workflow_ids=[dbos_id]
-        )
+        statuses = await self._dbos_client.list_workflows_async(workflow_ids=[dbos_id])
         if not statuses:
             raise RuntimeError(f"Workflow run not found: {dbos_id!r}")
         return statuses[0]
@@ -432,7 +411,7 @@ class WorkflowHandle:
         cause reconstructed.
         """
         dbos_id = await self._target()
-        runtime_client = self._client._runtime.client()
+        runtime_client = self._client._dbos_client
         handle: Any = await runtime_client.retrieve_workflow_async(dbos_id)
         seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
         try:
@@ -458,7 +437,7 @@ class WorkflowHandle:
         self, signal: Any, arg: Any = _arg_unset, *, args: Sequence[Any] = []
     ) -> None:
         """Send a signal to the workflow."""
-        await self._client._runtime.client().send_async(
+        await self._client._dbos_client.send_async(
             await self._target(),
             inbox.signal_envelope(_signal_name(signal), _resolve_args(arg, args)),
             inbox.INBOX_TOPIC,
@@ -474,7 +453,7 @@ class WorkflowHandle:
     ) -> Any:
         """Query the workflow (v1: requires a RUNNING workflow)."""
         request_id = str(uuid_mod.uuid4())
-        client = self._client._runtime.client()
+        client = self._client._dbos_client
         target = await self._target()
         timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
         await client.send_async(
@@ -509,7 +488,7 @@ class WorkflowHandle:
         :py:class:`WorkflowUpdateFailedError` on rejection or failure.
         """
         update_id = id or str(uuid_mod.uuid4())
-        client = self._client._runtime.client()
+        client = self._client._dbos_client
         target = await self._target()
         timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
         await client.send_async(

@@ -1,17 +1,22 @@
 """Worker for running workflows and activities, mirroring
-``temporalio.worker``.
+``temporalio.worker`` in shape while taking DBOS machinery directly: a
+Worker is constructed from a ``dbos.DBOSConfig`` and owns the process's DBOS
+lifecycle outright.
 
-A Worker upgrades the process's shared runtime to full DBOS mode: it
-registers the per-type dispatchers and activity steps, and registers its
-task queue as a DBOS queue (DESIGN §3, §5). ``await worker.run()`` launches
-DBOS — recovering this executor's pending workflows, mirroring Temporal
-worker restart semantics — and blocks until ``shutdown()``. ``async with``
-is supported and is what tests use constantly.
+Exactly **one Worker per process** is supported for now: DBOS's launchable
+runtime (queue listeners, notification listener, recovery) is process-global,
+so multiple in-process Workers would share lifecycle and registrations in
+ways that diverge from Temporal's worker-isolation model (see README
+deviations). One worker per process is also the dominant production layout.
 
-Parameter mapping (DESIGN §5): ``max_concurrent_workflow_tasks`` -> queue
-``worker_concurrency``; ``build_id`` -> DBOS ``application_version``;
-``graceful_shutdown_timeout`` -> ``DBOS.destroy(workflow_completion_timeout_sec)``.
-Tuner/poller/sandbox arguments are accepted and ignored with a debug log.
+``await worker.run()`` launches DBOS — recovering this executor's pending
+workflows, mirroring Temporal worker restart semantics — and blocks until
+``shutdown()``. ``async with`` is supported and is what tests use constantly.
+
+Parameter mapping: ``max_concurrent_workflow_tasks`` -> task queue
+``worker_concurrency``; ``graceful_shutdown_timeout`` ->
+``DBOS.destroy(workflow_completion_timeout_sec)``. Tuner/poller/sandbox
+arguments are accepted and ignored with a debug log.
 """
 
 import asyncio
@@ -19,21 +24,34 @@ import logging
 from datetime import timedelta
 from typing import Any, Callable, Optional, Sequence, Type
 
+from dbos import DBOS, DBOSConfig, Queue
+
 from ._internal import dispatcher as _dispatcher
-from ._internal import runtime as _runtime
-from .client import Client
 
 __all__ = ["Worker"]
 
 logger = logging.getLogger("temporal_dbos.worker")
 
+# The one live Worker in this process (see module docstring).
+_live_worker: Optional["Worker"] = None
+
+
+def _reset_for_tests() -> None:
+    """Clear the per-process worker slot and all temporal-dbos/DBOS state."""
+    global _live_worker
+    _live_worker = None
+    DBOS.destroy(destroy_registry=True)
+    _dispatcher._reset_for_tests()
+
 
 class Worker:
-    """A worker to process workflows and/or activities."""
+    """A worker to process workflows and/or activities, built on a DBOS
+    runtime configured by ``config``.
+    """
 
     def __init__(
         self,
-        client: Client,
+        config: DBOSConfig,
         *,
         task_queue: str,
         workflows: Sequence[Type[Any]] = [],
@@ -42,14 +60,20 @@ class Worker:
         workflow_task_executor: Optional[Any] = None,
         max_concurrent_workflow_tasks: Optional[int] = None,
         max_concurrent_activities: Optional[int] = None,
-        build_id: Optional[str] = None,
         graceful_shutdown_timeout: timedelta = timedelta(),
         workflow_failure_exception_types: Sequence[Type[BaseException]] = [],
         **unsupported: Any,
     ) -> None:
-        """Create a worker for the given task queue. Registration happens at
-        construction; execution (and recovery) starts at :py:meth:`run`.
+        """Create the process's worker. Registration (workflow types,
+        activity types, the task queue) happens at construction; execution
+        and recovery start at :py:meth:`run`.
         """
+        global _live_worker
+        if _live_worker is not None:
+            raise RuntimeError(
+                "Only one Worker per process is supported (an existing "
+                "Worker owns this process's DBOS runtime)"
+            )
         if not workflows and not activities:
             raise ValueError("At least one workflow and/or activity must be specified")
         for key, value in {
@@ -63,18 +87,17 @@ class Worker:
 
         self._task_queue = task_queue
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
-        self._runtime = _runtime.get_runtime()
-        self._runtime.ensure_full_runtime(app_version=build_id)
+        DBOS(config=config)
         _dispatcher.register_worker(
             workflows=workflows,
             activities=activities,
             failure_exception_types=workflow_failure_exception_types,
         )
-        self._runtime.register_queue(
-            task_queue, worker_concurrency=max_concurrent_workflow_tasks
-        )
+        Queue(task_queue, worker_concurrency=max_concurrent_workflow_tasks)
         self._shutdown_event: Optional["asyncio.Event"] = None
         self._run_task: Optional["asyncio.Task[None]"] = None
+        self._finished = False
+        _live_worker = self
 
     @property
     def task_queue(self) -> str:
@@ -86,22 +109,27 @@ class Worker:
         return self._shutdown_event is not None
 
     async def run(self) -> None:
-        """Launch the runtime (recovering pending workflows for this
-        executor) and block until :py:meth:`shutdown` is called.
+        """Launch DBOS (recovering pending workflows for this executor) and
+        block until :py:meth:`shutdown` is called. One run per worker.
         """
+        global _live_worker
         if self._shutdown_event is not None:
             raise RuntimeError("Already running")
+        if self._finished:
+            raise RuntimeError("Worker already shut down; create a new one")
         self._shutdown_event = asyncio.Event()
-        self._runtime.launch()
+        DBOS.launch()
         try:
             await self._shutdown_event.wait()
         finally:
             self._shutdown_event = None
-            self._runtime.release(
+            self._finished = True
+            DBOS.destroy(
                 workflow_completion_timeout_sec=int(
                     self._graceful_shutdown_timeout.total_seconds()
                 )
             )
+            _live_worker = None
 
     async def shutdown(self) -> None:
         """Initiate shutdown and wait for :py:meth:`run` to return."""

@@ -1,12 +1,14 @@
-"""Phase 1 public-API tests: the hello-world quad and friends, written
-exactly as a Temporal app would be (imports aside): Client.connect, Worker
-in ``async with``, execute_workflow by run-method reference.
+"""Phase 1 public-API tests: the hello-world quad and friends, written the
+way a temporal-dbos app is: a Worker built from a DBOSConfig (owning the
+process's DBOS lifecycle), a Client wrapping a DBOSClient.
 """
 
+from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import List, Optional
+from typing import Any, AsyncIterator, List, Optional
 
 import pytest
+from dbos import DBOSClient
 
 from temporal_dbos import activity, workflow
 from temporal_dbos.client import (
@@ -20,7 +22,7 @@ from temporal_dbos.exceptions import (
     WorkflowAlreadyStartedError,
 )
 from temporal_dbos.worker import Worker
-from tests.dbconfig import system_database_url
+from tests.dbconfig import default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("tdb_env")
 
@@ -99,13 +101,13 @@ class SignalStartWorkflow:
         return self.greetings
 
 
-async def _connect() -> Client:
-    return await Client.connect(system_database_url())
-
-
-def _worker(client: Client) -> Worker:
-    return Worker(
-        client,
+@asynccontextmanager
+async def _env() -> AsyncIterator[Client]:
+    """A running Worker plus a Client against the same database. The client
+    is created after the worker launches (launch creates the database).
+    """
+    worker = Worker(
+        default_config(),
         task_queue=TASK_QUEUE,
         workflows=[
             GreetingWorkflow,
@@ -115,11 +117,16 @@ def _worker(client: Client) -> Worker:
         ],
         activities=[compose_greeting],
     )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            yield await Client.connect(dbos_client)
+        finally:
+            dbos_client.destroy()
 
 
 async def test_hello_world_quad() -> None:
-    client = await _connect()
-    async with _worker(client):
+    async with _env() as client:
         result = await client.execute_workflow(
             GreetingWorkflow.run, "World", id="hello-wf", task_queue=TASK_QUEUE
         )
@@ -127,8 +134,7 @@ async def test_hello_world_quad() -> None:
 
 
 async def test_handle_signal_query_update() -> None:
-    client = await _connect()
-    async with _worker(client):
+    async with _env() as client:
         handle = await client.start_workflow(
             AccumulatorWorkflow.run, id="acc-wf", task_queue=TASK_QUEUE
         )
@@ -149,8 +155,7 @@ async def test_handle_signal_query_update() -> None:
 
 
 async def test_workflow_failure_reconstructed() -> None:
-    client = await _connect()
-    async with _worker(client):
+    async with _env() as client:
         handle = await client.start_workflow(
             FailingWorkflow.run, id="fail-wf", task_queue=TASK_QUEUE
         )
@@ -165,8 +170,7 @@ async def test_workflow_failure_reconstructed() -> None:
 
 
 async def test_id_conflict_and_reuse() -> None:
-    client = await _connect()
-    async with _worker(client):
+    async with _env() as client:
         handle = await client.start_workflow(
             AccumulatorWorkflow.run, id="reuse-wf", task_queue=TASK_QUEUE
         )
@@ -192,8 +196,7 @@ async def test_id_conflict_and_reuse() -> None:
 
 
 async def test_signal_with_start() -> None:
-    client = await _connect()
-    async with _worker(client):
+    async with _env() as client:
         handle = await client.start_workflow(
             SignalStartWorkflow.run,
             id="sws-wf",
@@ -205,9 +208,19 @@ async def test_signal_with_start() -> None:
         assert await handle.result() == ["first", "second"]
 
 
+async def test_one_worker_per_process() -> None:
+    async with _env():
+        with pytest.raises(RuntimeError, match="one Worker per process"):
+            Worker(
+                default_config(),
+                task_queue="another-queue",
+                workflows=[GreetingWorkflow],
+            )
+
+
 async def test_workflow_id_validation() -> None:
-    client = await _connect()
-    with pytest.raises(ValueError, match="--r"):
-        await client.start_workflow(
-            GreetingWorkflow.run, "x", id="bad--r1", task_queue=TASK_QUEUE
-        )
+    async with _env() as client:
+        with pytest.raises(ValueError, match="--r"):
+            await client.start_workflow(
+                GreetingWorkflow.run, "x", id="bad--r1", task_queue=TASK_QUEUE
+            )

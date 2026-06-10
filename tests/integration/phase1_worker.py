@@ -11,10 +11,12 @@ import sys
 from datetime import timedelta
 from typing import List
 
+from dbos import DBOSClient
+
 from temporal_dbos import activity, workflow
 from temporal_dbos.client import Client
 from temporal_dbos.worker import Worker
-from tests.dbconfig import system_database_url
+from tests.dbconfig import default_config, system_database_url
 
 TASK_QUEUE = "phase1-recovery-tq"
 
@@ -54,23 +56,27 @@ class TwoStageWorkflow:
 
 async def main() -> None:
     mode, workflow_id = sys.argv[1], sys.argv[2]
-    client = await Client.connect(system_database_url())
     async with Worker(
-        client,
+        default_config(),
         task_queue=TASK_QUEUE,
         workflows=[TwoStageWorkflow],
         activities=[record],
     ):
-        if mode == "start":
-            handle = await client.start_workflow(
-                TwoStageWorkflow.run, id=workflow_id, task_queue=TASK_QUEUE
-            )
-        else:
-            assert mode == "resume"
-            handle = client.get_workflow_handle(workflow_id)
-        print("STARTED", flush=True)
-        result = await handle.result()
-        print("RESULT " + json.dumps(result), flush=True)
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)
+            if mode == "start":
+                handle = await client.start_workflow(
+                    TwoStageWorkflow.run, id=workflow_id, task_queue=TASK_QUEUE
+                )
+            else:
+                assert mode == "resume"
+                handle = client.get_workflow_handle(workflow_id)
+            print("STARTED", flush=True)
+            result = await handle.result()
+            print("RESULT " + json.dumps(result), flush=True)
+        finally:
+            dbos_client.destroy()
 
 
 if __name__ == "__main__":
