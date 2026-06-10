@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# AI
+CLAUDE.md
+DESIGN.md
+.claude/
+
 # C extensions
 *.so
 
