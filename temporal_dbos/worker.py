@@ -24,7 +24,7 @@ import logging
 from datetime import timedelta
 from typing import Any, Callable, Optional, Sequence, Type
 
-from dbos import DBOS, DBOSConfig, Queue
+from dbos import DBOS, DBOSConfig
 
 from ._internal import dispatcher as _dispatcher
 
@@ -86,6 +86,7 @@ class Worker:
                 logger.debug("Worker: ignoring unsupported option %r", key)
 
         self._task_queue = task_queue
+        self._max_concurrent_workflow_tasks = max_concurrent_workflow_tasks
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
         DBOS(config=config)
         _dispatcher.register_worker(
@@ -93,7 +94,11 @@ class Worker:
             activities=activities,
             failure_exception_types=workflow_failure_exception_types,
         )
-        Queue(task_queue, worker_concurrency=max_concurrent_workflow_tasks)
+        # The task queue is a database-backed DBOS queue; this process
+        # dequeues only from its declared listen set (plus DBOS's internal
+        # queue). The queue itself is registered in run(), after launch,
+        # since persisting its config needs the system database.
+        DBOS.listen_queues([task_queue])
         self._shutdown_event: Optional["asyncio.Event"] = None
         self._run_task: Optional["asyncio.Task[None]"] = None
         self._finished = False
@@ -120,6 +125,13 @@ class Worker:
         self._shutdown_event = asyncio.Event()
         DBOS.launch()
         try:
+            # Persist this worker's queue configuration. The default
+            # conflict policy (update_if_latest_version) keeps an older
+            # worker in a rolling deploy from clobbering newer queue config.
+            await DBOS.register_queue_async(
+                self._task_queue,
+                worker_concurrency=self._max_concurrent_workflow_tasks,
+            )
             await self._shutdown_event.wait()
         finally:
             self._shutdown_event = None
