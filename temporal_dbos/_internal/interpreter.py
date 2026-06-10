@@ -167,9 +167,16 @@ class _VirtualLoop(asyncio.AbstractEventLoop):
         return asyncio.Future(loop=self)
 
     def create_task(
-        self, coro: Any, *, name: Optional[str] = None, context: Any = None
+        self,
+        coro: Any,
+        *,
+        name: Optional[str] = None,
+        context: Any = None,
+        eager_start: Optional[bool] = None,
     ) -> "asyncio.Task[Any]":
         self._interpreter._assert_not_read_only("create task")
+        # eager_start (3.14+) is ignored: a task on the virtual loop must not
+        # run any code until the interpreter drains the ready queue.
         task: asyncio.Task[Any] = asyncio.Task(coro, loop=self, name=name)
         self._interpreter._tasks.add(task)
         task.add_done_callback(self._interpreter._tasks.discard)
