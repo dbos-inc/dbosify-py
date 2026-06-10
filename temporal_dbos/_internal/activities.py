@@ -1,0 +1,88 @@
+"""Activity execution: one single-attempt DBOS step per activity type.
+
+Each registered activity gets its own step function named ``act:{type}``
+(decision §10.1: per-type naming keeps DBOS-native step listings readable
+and makes replay-mismatch detection precise). The step body resolves the
+activity from the registry at execution time, so re-registering an activity
+implementation takes effect without re-decoration.
+
+The step *always returns an envelope* — user exceptions are caught inside
+the step body and serialized through the failure serializer — so checkpoint
+contents are fully under our control and the interpreter's retry machinery
+(not DBOS's) decides what happens next. ``ended_at`` rides in the envelope
+to advance the workflow's virtual clock deterministically.
+"""
+
+import asyncio
+import time as time_mod
+from typing import Any, Callable, Coroutine, Dict, List, Optional
+
+from dbos import DBOS
+
+from .. import exceptions
+from . import registry
+from .payloads import serialize_failure
+
+AttemptStep = Callable[
+    [List[Any], Optional[float]], Coroutine[Any, Any, Dict[str, Any]]
+]
+
+_attempt_steps: Dict[str, AttemptStep] = {}
+
+
+def ensure_attempt_step(activity_name: str) -> None:
+    if activity_name in _attempt_steps:
+        return
+    _attempt_steps[activity_name] = _make_attempt_step(activity_name)
+
+
+def attempt_step_for(activity_name: str) -> AttemptStep:
+    step = _attempt_steps.get(activity_name)
+    if step is None:
+        raise KeyError(
+            f"Activity type {activity_name!r} is not registered with this worker. "
+            f"Registered types: {sorted(_attempt_steps)}"
+        )
+    return step
+
+
+def _make_attempt_step(activity_name: str) -> AttemptStep:
+    async def attempt(
+        args: List[Any], start_to_close: Optional[float]
+    ) -> Dict[str, Any]:
+        defn = registry.lookup_activity(activity_name)
+
+        async def call_user_activity() -> Dict[str, Any]:
+            try:
+                if defn.is_async:
+                    result = await defn.fn(*args)
+                else:
+                    result = await asyncio.to_thread(defn.fn, *args)
+            except Exception as err:  # noqa: BLE001 — serialized, not swallowed
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(err),
+                    "ended_at": time_mod.time(),
+                }
+            return {"ok": True, "result": result, "ended_at": time_mod.time()}
+
+        try:
+            # User exceptions (including user-raised TimeoutError) are
+            # converted inside call_user_activity, so a TimeoutError here is
+            # unambiguously the start-to-close enforcement firing.
+            return await asyncio.wait_for(call_user_activity(), timeout=start_to_close)
+        except (asyncio.TimeoutError, TimeoutError):
+            timeout_failure = exceptions.TimeoutError(
+                "activity Start-To-Close timeout",
+                type=exceptions.TimeoutType.START_TO_CLOSE,
+                last_heartbeat_details=[],
+            )
+            return {
+                "ok": False,
+                "failure": serialize_failure(timeout_failure),
+                "ended_at": time_mod.time(),
+            }
+
+    attempt.__name__ = attempt.__qualname__ = f"act:{activity_name}"
+    decorated: AttemptStep = DBOS.step(name=f"act:{activity_name}")(attempt)
+    return decorated

@@ -8,6 +8,7 @@ __pycache__/
 CLAUDE.md
 DESIGN.md
 .claude/
+docs/
 
 # C extensions
 *.so
