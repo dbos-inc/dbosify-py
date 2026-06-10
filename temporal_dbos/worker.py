@@ -69,6 +69,8 @@ class Worker:
         and recovery start at :py:meth:`run`.
         """
         global _live_worker
+        if not task_queue or not isinstance(task_queue, str):
+            raise ValueError("task_queue must be a non-empty string")
         if _live_worker is not None:
             raise RuntimeError(
                 "Only one Worker per process is supported (an existing "

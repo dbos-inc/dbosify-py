@@ -224,6 +224,10 @@ class Client:
             if value is not None:
                 logger.debug("start_workflow: ignoring unsupported option %r", key)
 
+        if not task_queue or not isinstance(task_queue, str):
+            # Without this, a None/empty queue name would enqueue a workflow
+            # no worker can ever dequeue — a silent black hole.
+            raise ValueError("task_queue must be a non-empty string")
         type_name = _workflow_type_name(workflow)
         workflow_args = _resolve_args(arg, args)
         ids.validate_workflow_id(id)

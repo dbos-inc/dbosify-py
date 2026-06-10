@@ -218,6 +218,25 @@ async def test_one_worker_per_process() -> None:
             )
 
 
+async def test_task_queue_validation() -> None:
+    # Worker: validated before any DBOS state is touched (and before the
+    # one-worker-per-process check, so bad args always read as bad args).
+    with pytest.raises(ValueError, match="task_queue"):
+        Worker(default_config(), task_queue="", workflows=[GreetingWorkflow])
+    async with _env() as client:
+        with pytest.raises(ValueError, match="task_queue"):
+            await client.start_workflow(
+                GreetingWorkflow.run,
+                "x",
+                id="tq-none",
+                task_queue=None,  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError, match="task_queue"):
+            await client.start_workflow(
+                GreetingWorkflow.run, "x", id="tq-empty", task_queue=""
+            )
+
+
 async def test_workflow_id_validation() -> None:
     async with _env() as client:
         with pytest.raises(ValueError, match="--r"):
