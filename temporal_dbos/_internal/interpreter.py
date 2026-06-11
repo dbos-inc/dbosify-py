@@ -70,6 +70,15 @@ class WorkflowTaskFailure(Exception):
         self.cause = cause
 
 
+class WorkflowCancelled(Exception):
+    """Internal: the workflow ended via cooperative cancellation. The
+    dispatcher converts this into the cancelled marker (DESIGN §6.5)."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(repr(cause))
+        self.cause = cause
+
+
 class _AbortDrain(Exception):
     """Internal: an exception escaped a non-task callback (e.g. a
     wait_condition predicate) during a virtual-loop drain.
@@ -232,6 +241,7 @@ class _ActivityExec:
     activity_id: str
     scheduled_at: float  # virtual time when scheduled
     future: "asyncio.Future[Any]"  # on the virtual loop
+    cancellation_type: int = 0  # ActivityCancellationType; 2 = ABANDON
     attempt: int = 1
     in_backoff: bool = False
     last_failure: Optional[FailureEnvelope] = None
@@ -263,6 +273,10 @@ class Interpreter(_Runtime):
         self._seen_update_ids: Set[str] = set()
         self._handlers_running = 0
         self._read_only = False
+        self._cancel_requested = False
+        self._cancel_reason: Optional[str] = None
+        self._cancelled_activity_seqs: List[int] = []
+        self._abandoned_tasks: Set["asyncio.Task[Any]"] = set()
         self._random = Random(0)
         self._workflow_id = ""
         self._start_time = 0.0
@@ -287,6 +301,7 @@ class Interpreter(_Runtime):
         try:
             while True:
                 await self._drain_outside_task()
+                self._sweep_cancelled_activities()
                 made_progress = self._process_commands()
                 if made_progress:
                     continue  # immediate timer fires need another drain
@@ -326,6 +341,8 @@ class Interpreter(_Runtime):
         kind, value = self._outcome
         if kind == "ok":
             return value
+        if kind == "cancelled":
+            raise WorkflowCancelled(value)
         assert kind == "failure"
         raise value  # a FailureError; recorded by DBOS as the workflow error
 
@@ -346,11 +363,21 @@ class Interpreter(_Runtime):
         try:
             result = await self._defn.run_fn(self._instance, *self._args)
             self._set_outcome(("ok", result))
+        except asyncio.CancelledError:
+            cancelled = exceptions.CancelledError("Workflow cancelled")
+            if self._cancel_requested:
+                self._set_outcome(("cancelled", cancelled))
+            else:
+                # Cancellation nobody requested (e.g. user code cancelling
+                # its own task): a workflow failure with a cancelled cause.
+                self._set_outcome(("failure", cancelled))
         except BaseException as err:  # noqa: BLE001 — classified below
             self._record_workflow_error(err)
 
     def _record_workflow_error(self, err: BaseException) -> None:
-        if self._is_failure_exception(err):
+        if self._cancel_requested and exceptions.is_cancelled_exception(err):
+            self._set_outcome(("cancelled", err))
+        elif self._is_failure_exception(err):
             self._set_outcome(("failure", err))
         else:
             self._set_outcome(("task_failure", err))
@@ -485,6 +512,7 @@ class Interpreter(_Runtime):
         start_to_close_timeout: Optional[timedelta],
         retry_policy: Optional[RetryPolicy],
         activity_id: Optional[str],
+        cancellation_type: int = 0,
     ) -> ActivityHandle:
         self._assert_not_read_only("start an activity")
         activities_mod.attempt_step_for(activity_name)  # raise early if unknown
@@ -509,9 +537,20 @@ class Interpreter(_Runtime):
             activity_id=activity_id or f"{seq}",
             scheduled_at=self._vloop.time(),
             future=self._vloop.create_future(),
+            cancellation_type=cancellation_type,
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
+        # If the awaiting coroutine is cancelled (workflow cancel, wait_for
+        # timeout, explicit handle cancel), the future enters cancelled state
+        # during a drain; queue the seq for the deterministic real-side sweep.
+        exec_state.future.add_done_callback(
+            lambda fut: (
+                self._cancelled_activity_seqs.append(seq)
+                if fut.cancelled() and seq in self._pending_activities
+                else None
+            )
+        )
         return ActivityHandle(exec_state.future)
 
     def _process_commands(self) -> bool:
@@ -538,6 +577,35 @@ class Interpreter(_Runtime):
             elif kind == "activity":
                 self._launch_attempt(self._pending_activities[seq])
         return progressed
+
+    def _sweep_cancelled_activities(self) -> None:
+        """Retire activities whose virtual-loop futures were cancelled during
+        the drain. Cancellation decisions are deterministic workflow state,
+        so this sweep replays identically; a cancelled in-flight step records
+        nothing, which replays like a crash (re-execute — at-least-once).
+
+        TRY_CANCEL (default) cancels the real task. ABANDON detaches it.
+        WAIT_CANCELLATION_COMPLETED is approximated as TRY_CANCEL until the
+        Phase 3 activity-side cancellation observation lands.
+        """
+        seqs, self._cancelled_activity_seqs = self._cancelled_activity_seqs, []
+        for seq in seqs:
+            exec_state = self._pending_activities.pop(seq, None)
+            if exec_state is None:
+                continue
+            for waiter in list(self._waiters):
+                if waiter.kind == "activity" and waiter.seq == seq:
+                    self._waiters.remove(waiter)
+                    if exec_state.cancellation_type == 2:  # ABANDON
+                        self._abandoned_tasks.add(waiter.task)
+                        waiter.task.add_done_callback(self._discard_abandoned)
+                    else:
+                        waiter.task.cancel()
+
+    def _discard_abandoned(self, task: "asyncio.Task[Any]") -> None:
+        self._abandoned_tasks.discard(task)
+        if not task.cancelled():
+            task.exception()  # retrieve, suppressing the unretrieved warning
 
     def _launch_waiter(self, kind: str, seq: int, coro: Any) -> None:
         task = asyncio.ensure_future(coro)
@@ -600,7 +668,11 @@ class Interpreter(_Runtime):
         self._vloop.ready.append(handle)
 
     def _deliver_activity_event(self, waiter: _Waiter) -> None:
-        exec_state = self._pending_activities[waiter.seq]
+        exec_state = self._pending_activities.get(waiter.seq)
+        if exec_state is None or exec_state.future.cancelled():
+            # Cancelled between completion and delivery; drop the result.
+            self._pending_activities.pop(waiter.seq, None)
+            return
         if exec_state.in_backoff:
             # Backoff sleep finished -> next attempt.
             exec_state.attempt += 1
@@ -693,15 +765,27 @@ class Interpreter(_Runtime):
         elif kind == "query":
             self._apply_query(envelope)
         elif kind == "cancel":
-            logger.warning(
-                "Workflow %s: cancellation requested but cooperative cancel "
-                "is not implemented until Phase 2; ignoring",
-                self._workflow_id,
-            )
+            self._apply_cancel(envelope)
         else:
             logger.warning(
                 "Workflow %s: unknown inbox envelope kind %r", self._workflow_id, kind
             )
+
+    def _apply_cancel(self, envelope: inbox.Envelope) -> None:
+        """Cooperative cancellation (§6.5): raise CancelledError into the
+        primary task at the next event boundary. Cleanup code runs — and may
+        still execute activities, because the outer loop keeps servicing
+        events until the unwind produces an outcome.
+        """
+        if self._cancel_requested:
+            # Temporal dedups cancel requests server-side: a second cancel
+            # must not re-interrupt cleanup code mid-unwind.
+            return
+        self._cancel_requested = True
+        reason = envelope.get("reason")
+        self._cancel_reason = str(reason) if reason else None
+        if self._primary_task is not None and not self._primary_task.done():
+            self._vloop.call_soon(self._primary_task.cancel)
 
     def _apply_signal(self, envelope: inbox.Envelope) -> None:
         defn = self._defn.signals.get(envelope["name"])
@@ -846,6 +930,9 @@ class Interpreter(_Runtime):
 
     def runtime_random(self) -> Random:
         return self._random
+
+    def runtime_cancellation_reason(self) -> Optional[str]:
+        return self._cancel_reason
 
     def runtime_is_replaying(self) -> bool:
         # TODO(phase 2): derive from checkpoint-cursor position to back

@@ -47,6 +47,16 @@ def update_envelope(name: str, args: Sequence[Any], update_id: str) -> Envelope:
     }
 
 
+def cancel_envelope(reason: str = "") -> Envelope:
+    return {
+        "kind": "cancel",
+        "name": "",
+        "args": [],
+        "reason": reason,
+        "sent_at": time.time(),
+    }
+
+
 def query_envelope(name: str, args: Sequence[Any], request_id: str) -> Envelope:
     return {
         "kind": "query",

@@ -25,19 +25,27 @@ class WorkflowExecutionStatus(IntEnum):
 _OPEN_DBOS_STATUSES = ("PENDING", "ENQUEUED", "DELAYED")
 
 
-def to_execution_status(dbos_status: Optional[str]) -> WorkflowExecutionStatus:
-    """Map a DBOS status string per the DESIGN §6.2 table.
+def to_execution_status(
+    dbos_status: Optional[str], *, error: Optional[BaseException] = None
+) -> WorkflowExecutionStatus:
+    """Map a DBOS status string per the DESIGN §6.2 table. For ERROR, the
+    recorded error distinguishes cooperative cancellation (CANCELED) from
+    failure; pass it when available.
 
-    Phase 1 notes: SUCCESS continue-as-new markers (-> CONTINUED_AS_NEW) and
-    ERROR cancel/timeout markers (-> CANCELED / TIMED_OUT) land with their
-    features in Phases 2-3. MAX_RECOVERY_ATTEMPTS_EXCEEDED maps to RUNNING:
-    the workflow is stuck, not closed (documented deviation).
+    Notes: SUCCESS continue-as-new markers (-> CONTINUED_AS_NEW) and ERROR
+    timeout markers (-> TIMED_OUT) land with their Phase 3 features.
+    MAX_RECOVERY_ATTEMPTS_EXCEEDED maps to RUNNING: the workflow is stuck,
+    not closed (documented deviation).
     """
+    from .payloads import SerializedWorkflowCancellation
+
     if dbos_status in _OPEN_DBOS_STATUSES:
         return WorkflowExecutionStatus.RUNNING
     if dbos_status == "SUCCESS":
         return WorkflowExecutionStatus.COMPLETED
     if dbos_status == "ERROR":
+        if isinstance(error, SerializedWorkflowCancellation):
+            return WorkflowExecutionStatus.CANCELED
         return WorkflowExecutionStatus.FAILED
     if dbos_status == "CANCELLED":
         # Native DBOS cancel is reserved for terminate (decision §10.4).

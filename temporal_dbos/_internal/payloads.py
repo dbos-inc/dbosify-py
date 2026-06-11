@@ -65,6 +65,15 @@ class SerializedWorkflowFailure(Exception):
         return str(self.envelope.get("message", "workflow failed"))
 
 
+class SerializedWorkflowCancellation(SerializedWorkflowFailure):
+    """The ``_TemporalCancelledMarker`` of DESIGN §6.2: a workflow that ended
+    via *cooperative cancellation* records this subclass, so status mapping
+    can distinguish CANCELED (this, recorded by the dispatcher) from FAILED
+    (plain SerializedWorkflowFailure) and TERMINATED (native DBOS cancel,
+    which records nothing because no workflow code runs).
+    """
+
+
 def serialize_failure(exc: BaseException) -> FailureEnvelope:
     env: FailureEnvelope
     if isinstance(exc, exceptions.ApplicationError):

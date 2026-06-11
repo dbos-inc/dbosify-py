@@ -37,8 +37,13 @@ from .. import exceptions
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from . import activities as activities_mod
 from . import inbox, registry
-from .interpreter import Interpreter, WorkflowTaskFailure
-from .payloads import SerializedWorkflowFailure, deserialize_failure, serialize_failure
+from .interpreter import Interpreter, WorkflowCancelled, WorkflowTaskFailure
+from .payloads import (
+    SerializedWorkflowCancellation,
+    SerializedWorkflowFailure,
+    deserialize_failure,
+    serialize_failure,
+)
 
 logger = logging.getLogger("temporal_dbos.dispatcher")
 
@@ -100,6 +105,13 @@ def _make_dbos_workflow(
     async def dispatch(args: List[Any]) -> Any:
         try:
             return await _run_workflow_task_loop(type_name, args)
+        except WorkflowCancelled as cancelled:
+            # The _TemporalCancelledMarker: cooperative cancellation maps to
+            # status CANCELED (§6.2), distinct from FAILED below and from
+            # TERMINATED (native DBOS cancel, no record at all).
+            raise SerializedWorkflowCancellation(
+                serialize_failure(cancelled.cause)
+            ) from None
         except exceptions.FailureError as err:
             # Record workflow failures in the stable envelope format so
             # clients reconstruct the exact exception, cause chain included

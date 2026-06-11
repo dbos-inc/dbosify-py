@@ -36,8 +36,10 @@ from ._internal import registry as _registry
 from .common import RetryPolicy
 
 __all__ = [
+    "ActivityCancellationType",
     "ActivityHandle",
     "Info",
+    "cancellation_reason",
     "defn",
     "execute_activity",
     "execute_activity_method",
@@ -227,6 +229,18 @@ def init(init_fn: _F) -> _F:
 # ---------------------------------------------------------------------------
 
 
+class ActivityCancellationType(IntEnum):
+    """How a workflow cancels an activity, mirroring
+    ``temporalio.workflow.ActivityCancellationType``. Phase 2 honors
+    TRY_CANCEL and ABANDON; WAIT_CANCELLATION_COMPLETED is approximated as
+    TRY_CANCEL until Phase 3's activity-side cancellation observation.
+    """
+
+    TRY_CANCEL = 0
+    WAIT_CANCELLATION_COMPLETED = 1
+    ABANDON = 2
+
+
 @dataclass(frozen=True)
 class Info:
     """Information about the running workflow (Phase 0 subset of
@@ -261,6 +275,9 @@ class _Runtime:
     def runtime_is_replaying(self) -> bool:
         raise NotImplementedError
 
+    def runtime_cancellation_reason(self) -> Optional[str]:
+        raise NotImplementedError
+
     def runtime_start_activity(
         self,
         activity_name: str,
@@ -270,6 +287,7 @@ class _Runtime:
         start_to_close_timeout: Optional[timedelta],
         retry_policy: Optional[RetryPolicy],
         activity_id: Optional[str],
+        cancellation_type: int = 0,
     ) -> "ActivityHandle":
         raise NotImplementedError
 
@@ -328,6 +346,11 @@ def in_workflow() -> bool:
 def info() -> Info:
     """Current workflow's info."""
     return _runtime().runtime_info()
+
+
+def cancellation_reason() -> Optional[str]:
+    """The reason for the workflow's cancellation request, if any."""
+    return _runtime().runtime_cancellation_reason()
 
 
 def now() -> datetime:
@@ -427,7 +450,6 @@ def start_activity(
         "task_queue": task_queue,
         "schedule_to_start_timeout": schedule_to_start_timeout,
         "heartbeat_timeout": heartbeat_timeout,
-        "cancellation_type": cancellation_type,
         "versioning_intent": versioning_intent,
         "summary": summary,
         "priority": priority,
@@ -442,6 +464,11 @@ def start_activity(
         start_to_close_timeout=start_to_close_timeout,
         retry_policy=retry_policy,
         activity_id=activity_id,
+        cancellation_type=int(
+            cancellation_type
+            if cancellation_type is not None
+            else ActivityCancellationType.TRY_CANCEL
+        ),
     )
 
 
@@ -584,7 +611,6 @@ def start_local_activity(
     for key, value in {
         "schedule_to_start_timeout": schedule_to_start_timeout,
         "local_retry_threshold": local_retry_threshold,
-        "cancellation_type": cancellation_type,
         "summary": summary,
     }.items():
         if value is not None:
@@ -596,6 +622,11 @@ def start_local_activity(
         start_to_close_timeout=start_to_close_timeout,
         retry_policy=retry_policy,
         activity_id=activity_id,
+        cancellation_type=int(
+            cancellation_type
+            if cancellation_type is not None
+            else ActivityCancellationType.TRY_CANCEL
+        ),
     )
 
 
