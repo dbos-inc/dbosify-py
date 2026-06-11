@@ -65,7 +65,7 @@ class WaitingChild:
 class SlowRecordingChild:
     @workflow.run
     async def run(self, path: str) -> str:
-        await workflow.sleep(1.0)
+        await workflow.sleep(3.0)
         result: str = await workflow.execute_activity(
             record,
             args=[path, "child-done"],
@@ -131,6 +131,29 @@ class ClosingParent:
         return "parent done"
 
 
+@workflow.defn
+class ParkingParent:
+    """Starts one TERMINATE-policy child and one ABANDON-policy child, then
+    parks forever — the target for terminate-applies-parent-close tests."""
+
+    @workflow.run
+    async def run(self, terminate_path: str, abandon_path: str) -> str:
+        await workflow.start_child_workflow(
+            SlowRecordingChild.run,
+            terminate_path,
+            id="parked-child-terminate",
+            parent_close_policy=workflow.ParentClosePolicy.TERMINATE,
+        )
+        await workflow.start_child_workflow(
+            SlowRecordingChild.run,
+            abandon_path,
+            id="parked-child-abandon",
+            parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+        )
+        await workflow.wait_condition(lambda: False)
+        return "unreachable"
+
+
 ALL_WORKFLOWS = [
     ComposeChild,
     FailingChild,
@@ -140,6 +163,7 @@ ALL_WORKFLOWS = [
     CatchingParent,
     SignalingParent,
     ClosingParent,
+    ParkingParent,
 ]
 
 
@@ -201,7 +225,10 @@ async def _wait_for_status(
     deadline = time.monotonic() + 20
     status = None
     while time.monotonic() < deadline:
-        status = (await handle.describe()).status
+        try:
+            status = (await handle.describe()).status
+        except RuntimeError:
+            status = None  # workflow row doesn't exist yet
         if status == expected:
             return status
         await asyncio.sleep(0.2)
@@ -224,6 +251,41 @@ async def test_parent_close_terminate(tmp_path: Path) -> None:
         assert status == WorkflowExecutionStatus.TERMINATED
     # The terminated child never reached its recording activity.
     assert not effects.exists()
+
+
+async def test_terminate_applies_parent_close_policies(tmp_path: Path) -> None:
+    """Terminating a parent runs no workflow code, so the recorded
+    ParentClosePolicy must be applied client-side: TERMINATE children die,
+    ABANDON children survive."""
+    terminate_effects = tmp_path / "terminate-effects"
+    abandon_effects = tmp_path / "abandon-effects"
+    async with _env() as client:
+        handle = await client.start_workflow(
+            ParkingParent.run,
+            args=[str(terminate_effects), str(abandon_effects)],
+            id="parking-parent",
+            task_queue=TASK_QUEUE,
+        )
+        # Wait until both children are durably started and running.
+        assert (
+            await _wait_for_status(
+                client, "parked-child-abandon", WorkflowExecutionStatus.RUNNING
+            )
+            == WorkflowExecutionStatus.RUNNING
+        )
+        await handle.terminate()
+
+        assert (await handle.describe()).status == WorkflowExecutionStatus.TERMINATED
+        status = await _wait_for_status(
+            client, "parked-child-terminate", WorkflowExecutionStatus.TERMINATED
+        )
+        assert status == WorkflowExecutionStatus.TERMINATED
+        status = await _wait_for_status(
+            client, "parked-child-abandon", WorkflowExecutionStatus.COMPLETED
+        )
+        assert status == WorkflowExecutionStatus.COMPLETED
+    assert not terminate_effects.exists()
+    assert abandon_effects.read_text() == "child-done\n"
 
 
 async def test_parent_close_abandon(tmp_path: Path) -> None:

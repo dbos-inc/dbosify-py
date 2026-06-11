@@ -430,6 +430,34 @@ class Client:
             raise RuntimeError(f"Workflow not found: {workflow_id!r}")
         return current[1].workflow_id
 
+    async def _apply_parent_close_policies(
+        self, parent_dbos_id: str, visited: "set[str]"
+    ) -> None:
+        """Apply the ParentClosePolicy recorded in the parent's children
+        event (see inbox.CHILDREN_EVENT_KEY) after a termination."""
+        if parent_dbos_id in visited:
+            return
+        visited.add(parent_dbos_id)
+        children = await self._dbos_client.get_event_async(
+            parent_dbos_id, inbox.CHILDREN_EVENT_KEY, 0
+        )
+        if not children:
+            return
+        child_ids = [c["id"] for c in children]
+        statuses = await self._dbos_client.list_workflows_async(workflow_ids=child_ids)
+        open_ids = {s.workflow_id for s in statuses if _status.is_open(s.status)}
+        for child in children:
+            child_id, policy = child["id"], child.get("policy", 1)
+            if child_id not in open_ids or policy == 2:  # closed, or ABANDON
+                continue
+            if policy == 3:  # REQUEST_CANCEL
+                await self._dbos_client.send_async(
+                    child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                )
+            else:  # TERMINATE / UNSPECIFIED
+                await self._dbos_client.cancel_workflow_async(child_id)
+                await self._apply_parent_close_policies(child_id, visited)
+
     async def _status_of(self, dbos_id: str) -> WorkflowStatus:
         statuses = await self._dbos_client.list_workflows_async(workflow_ids=[dbos_id])
         if not statuses:
@@ -654,4 +682,9 @@ class WorkflowHandle:
         _ignore_rpc_options("terminate", rpc_metadata, rpc_timeout)
         if args or reason:
             logger.debug("terminate: reason/details are not stored")
-        await self._client._dbos_client.cancel_workflow_async(await self._target())
+        target = await self._target()
+        await self._client._dbos_client.cancel_workflow_async(target)
+        # Termination runs no workflow code, so the parent's close sweep
+        # never fires: apply the durably-recorded ParentClosePolicy of each
+        # child (and, recursively, of terminated descendants) from here.
+        await self._client._apply_parent_close_policies(target, set())

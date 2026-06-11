@@ -363,6 +363,7 @@ class Interpreter(_Runtime):
         self._cancelled_activity_seqs: List[int] = []
         self._abandoned_tasks: Set["asyncio.Task[Any]"] = set()
         self._pending_children: Dict[int, _ChildExec] = {}
+        self._children_registry: List[Dict[str, Any]] = []
         self._cancelled_child_seqs: List[int] = []
         self._pending_sends: Dict[int, Tuple[str, Any, "asyncio.Future[Any]"]] = {}
         self._own_queue_name: Optional[str] = None
@@ -729,6 +730,15 @@ class Interpreter(_Runtime):
                 )
             return
         child.started = True
+        # Durably register the child + its ParentClosePolicy so the policy
+        # survives the parent — terminate runs no workflow code, so the
+        # client applies it from this event (checkpointed; replays cleanly).
+        self._children_registry.append(
+            {"id": child.child_id, "policy": child.parent_close_policy}
+        )
+        await DBOS.set_event_async(
+            inbox.CHILDREN_EVENT_KEY, list(self._children_registry)
+        )
         if not child.start_future.cancelled():
             child.start_future.set_result(None)
         self._launch_waiter("child", child.seq, _await_child_result(child.child_id))
@@ -906,9 +916,10 @@ class Interpreter(_Runtime):
     async def _sweep_children_on_close(self) -> None:
         """ParentClosePolicy (§6.5): when the parent reaches a terminal
         outcome, deal with still-running children. TERMINATE (the default)
-        native-cancels them; REQUEST_CANCEL delivers the cooperative
-        envelope; ABANDON leaves them running. Re-running this on replay is
-        idempotent.
+        native-cancels them — recursively, applying *their* recorded
+        policies, since a terminated child runs no code of its own;
+        REQUEST_CANCEL delivers the cooperative envelope; ABANDON leaves
+        them running. Re-running this on replay is idempotent.
         """
         for child in list(self._pending_children.values()):
             if not child.started:
@@ -921,7 +932,31 @@ class Interpreter(_Runtime):
                     child.child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
                 )
             else:  # TERMINATE (1) and UNSPECIFIED (0) default to terminate
-                await asyncio.to_thread(DBOS.cancel_workflow, child.child_id)
+                await self._terminate_child_tree(child.child_id, set())
+
+    async def _terminate_child_tree(self, child_id: str, visited: Set[str]) -> None:
+        """Terminate a child and apply its recorded parent-close policies to
+        its own descendants (it runs no code, so nobody else will)."""
+        if child_id in visited:
+            return
+        visited.add(child_id)
+        status = await asyncio.to_thread(DBOS.get_workflow_status, child_id)
+        if status is None or status.status not in ("PENDING", "ENQUEUED", "DELAYED"):
+            return  # already terminal (or stuck); don't clobber its status
+        await asyncio.to_thread(DBOS.cancel_workflow, child_id)
+        grandchildren = await asyncio.to_thread(
+            DBOS.get_event, child_id, inbox.CHILDREN_EVENT_KEY, 0
+        )
+        for grandchild in grandchildren or []:
+            policy = grandchild.get("policy", 1)
+            if policy == 2:  # ABANDON
+                continue
+            if policy == 3:  # REQUEST_CANCEL
+                await DBOS.send_async(
+                    grandchild["id"], inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                )
+            else:
+                await self._terminate_child_tree(grandchild["id"], visited)
 
     def _retry_decision(
         self, exec_state: _ActivityExec, failure: FailureEnvelope
