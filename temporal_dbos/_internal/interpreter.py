@@ -49,9 +49,9 @@ from dbos._context import get_local_dbos_context  # see docs/phase0.md
 
 from .. import exceptions
 from ..common import RetryPolicy
-from ..workflow import ActivityHandle, Info, _Runtime
+from ..workflow import ActivityHandle, ChildWorkflowHandle, Info, _Runtime
 from . import activities as activities_mod
-from . import inbox
+from . import ids, inbox
 from .payloads import FailureEnvelope, deserialize_failure
 from .registry import WorkflowDefinition
 
@@ -89,9 +89,13 @@ class _AbortDrain(Exception):
         self.cause = cause
 
 
+# How often the child-result step polls for the child's terminal state.
+CHILD_POLL_INTERVAL_SECONDS = 0.25
+
 # Created lazily (not at import) so decoration binds to the live DBOS
 # registry — tests destroy and re-create it between cases.
 _init_step: Optional[Callable[[], Any]] = None
+_child_result_step: Optional[Callable[[str], Any]] = None
 
 
 def _workflow_init_step() -> Any:
@@ -107,6 +111,68 @@ def _workflow_init_step() -> Any:
 
         _init_step = init_step
     return _init_step()
+
+
+def _await_child_result(child_id: str) -> Any:
+    """The child-result waiter: our own step wrapping the *non-recording*
+    wait, returning an envelope.
+
+    DBOS's handle.get_result() is unusable inside racing waiter tasks: its
+    record_get_result claims a function_id at COMPLETION time (completion
+    order = nondeterministic), and it never reads the record back. Wrapping
+    the raw await in our own step claims the function_id at launch (like
+    activity attempts) and records the child's outcome in our slot.
+    """
+    global _child_result_step
+    if _child_result_step is None:
+
+        @DBOS.step(name="__tdb_child_result")
+        async def child_result_step(child_id: str) -> Dict[str, Any]:
+            from dbos._dbos import _get_dbos_instance  # see docs/phase0.md
+            from dbos._error import DBOSAwaitedWorkflowCancelledError
+
+            from .payloads import (
+                SerializedWorkflowCancellation,
+                SerializedWorkflowFailure,
+                serialize_failure,
+            )
+
+            dbos = _get_dbos_instance()
+            try:
+                result = await dbos._sys_db.await_workflow_result_async(
+                    child_id, CHILD_POLL_INTERVAL_SECONDS
+                )
+            except SerializedWorkflowCancellation as cancelled:
+                return {
+                    "ok": False,
+                    "cancelled": True,
+                    "failure": cancelled.envelope,
+                    "ended_at": time_mod.time(),
+                }
+            except SerializedWorkflowFailure as failed:
+                return {
+                    "ok": False,
+                    "failure": failed.envelope,
+                    "ended_at": time_mod.time(),
+                }
+            except DBOSAwaitedWorkflowCancelledError:
+                # Native DBOS cancel == the child was terminated.
+                terminated = exceptions.TerminatedError("Child workflow terminated")
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(terminated),
+                    "ended_at": time_mod.time(),
+                }
+            except Exception as err:  # noqa: BLE001 — FAIL_FAST / legacy errors
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(err),
+                    "ended_at": time_mod.time(),
+                }
+            return {"ok": True, "result": result, "ended_at": time_mod.time()}
+
+        _child_result_step = child_result_step
+    return _child_result_step(child_id)
 
 
 class _TimerHandle(asyncio.TimerHandle):
@@ -247,6 +313,25 @@ class _ActivityExec:
     last_failure: Optional[FailureEnvelope] = None
 
 
+@dataclass
+class _ChildExec:
+    """Per-child-workflow state. The start resolves once the enqueue is
+    durable (Temporal: handles resolve on start); the result arrives through
+    the event race via the child-result step.
+    """
+
+    seq: int
+    type_name: str
+    child_id: str
+    args: List[Any]
+    task_queue: Optional[str]
+    parent_close_policy: int  # ParentClosePolicy
+    cancellation_type: int  # ChildWorkflowCancellationType
+    start_future: "asyncio.Future[Any]"  # on the virtual loop
+    result_future: "asyncio.Future[Any]"  # on the virtual loop
+    started: bool = False
+
+
 class Interpreter(_Runtime):
     """Hosts one workflow execution. Construct fresh for each (re)execution;
     ``execute()`` replays deterministically from whatever checkpoints exist.
@@ -277,6 +362,11 @@ class Interpreter(_Runtime):
         self._cancel_reason: Optional[str] = None
         self._cancelled_activity_seqs: List[int] = []
         self._abandoned_tasks: Set["asyncio.Task[Any]"] = set()
+        self._pending_children: Dict[int, _ChildExec] = {}
+        self._cancelled_child_seqs: List[int] = []
+        self._pending_sends: Dict[int, Tuple[str, Any, "asyncio.Future[Any]"]] = {}
+        self._own_queue_name: Optional[str] = None
+        self._own_queue_resolved = False
         self._random = Random(0)
         self._workflow_id = ""
         self._start_time = 0.0
@@ -301,8 +391,8 @@ class Interpreter(_Runtime):
         try:
             while True:
                 await self._drain_outside_task()
-                self._sweep_cancelled_activities()
-                made_progress = self._process_commands()
+                await self._sweep_cancellations()
+                made_progress = await self._process_commands()
                 if made_progress:
                     continue  # immediate timer fires need another drain
                 if self._outcome is not None and self._outcome[0] == "task_failure":
@@ -323,6 +413,10 @@ class Interpreter(_Runtime):
                 )
                 self._deliver(done)
         finally:
+            if self._outcome is not None and self._outcome[0] != "task_failure":
+                # Terminal outcome (not a retryable task failure): apply
+                # ParentClosePolicy to still-running children.
+                await self._sweep_children_on_close()
             for waiter in self._waiters:
                 waiter.task.cancel()
             if self._waiters:
@@ -553,10 +647,10 @@ class Interpreter(_Runtime):
         )
         return ActivityHandle(exec_state.future)
 
-    def _process_commands(self) -> bool:
+    async def _process_commands(self) -> bool:
         """Turn queued commands into real-loop waiter tasks. Returns True if
         any virtual-loop progress was made without needing a checkpointed
-        wait (expired timers firing immediately).
+        wait (expired timers firing immediately, child starts resolving).
         """
         commands, self._commands = self._commands, []
         progressed = False
@@ -576,17 +670,82 @@ class Interpreter(_Runtime):
                     self._launch_waiter("timer", seq, DBOS.sleep_async(real_delay))
             elif kind == "activity":
                 self._launch_attempt(self._pending_activities[seq])
+            elif kind == "child":
+                await self._start_child(self._pending_children[seq])
+                progressed = True  # the start future resolved either way
+            elif kind == "send":
+                target, envelope, future = self._pending_sends.pop(seq)
+                # send_async is checkpointed; awaited inline so its
+                # function_id claim stays at a deterministic position.
+                try:
+                    await DBOS.send_async(target, envelope, inbox.INBOX_TOPIC)
+                except Exception as err:  # noqa: BLE001
+                    if not future.cancelled():
+                        future.set_exception(
+                            exceptions.ApplicationError(
+                                str(err), type=type(err).__name__
+                            )
+                        )
+                else:
+                    if not future.cancelled():
+                        future.set_result(None)
+                progressed = True
         return progressed
 
-    def _sweep_cancelled_activities(self) -> None:
-        """Retire activities whose virtual-loop futures were cancelled during
-        the drain. Cancellation decisions are deterministic workflow state,
-        so this sweep replays identically; a cancelled in-flight step records
-        nothing, which replays like a crash (re-execute — at-least-once).
+    async def _start_child(self, child: _ChildExec) -> None:
+        """Make the child start durable: enqueue its per-type dispatcher
+        under the deterministic child id. DBOS records in-workflow starts
+        (and SetWorkflowID re-attaches idempotently), so replay re-attaches
+        to the same child instead of spawning a twin.
+        """
+        from dbos import SetWorkflowID
 
-        TRY_CANCEL (default) cancels the real task. ABANDON detaches it.
-        WAIT_CANCELLATION_COMPLETED is approximated as TRY_CANCEL until the
-        Phase 3 activity-side cancellation observation lands.
+        from . import registry
+
+        try:
+            dispatch_fn = registry.dbos_workflow_for(child.type_name)
+            if not self._own_queue_resolved:
+                status = await asyncio.to_thread(
+                    DBOS.get_workflow_status, self._workflow_id
+                )
+                self._own_queue_name = status.queue_name if status else None
+                self._own_queue_resolved = True
+            queue_name = child.task_queue or self._own_queue_name
+            child_queue = None
+            if queue_name is not None:
+                child_queue = await asyncio.to_thread(DBOS.retrieve_queue, queue_name)
+            with SetWorkflowID(child.child_id):
+                if child_queue is not None:
+                    await child_queue.enqueue_async(dispatch_fn, list(child.args))
+                else:
+                    # Parent wasn't queue-dispatched (Phase 0 helpers):
+                    # start the child directly in-process.
+                    await DBOS.start_workflow_async(dispatch_fn, list(child.args))
+        except Exception as err:  # noqa: BLE001
+            del self._pending_children[child.seq]
+            if not child.start_future.cancelled():
+                child.start_future.set_exception(
+                    exceptions.ApplicationError(str(err), type=type(err).__name__)
+                )
+            return
+        child.started = True
+        if not child.start_future.cancelled():
+            child.start_future.set_result(None)
+        self._launch_waiter("child", child.seq, _await_child_result(child.child_id))
+
+    async def _sweep_cancellations(self) -> None:
+        """Retire activities and children whose virtual-loop futures were
+        cancelled during the drain. Cancellation decisions are deterministic
+        workflow state, so this sweep replays identically.
+
+        Activities: TRY_CANCEL (default) cancels the real step task (which
+        records nothing — replays like a crash); ABANDON detaches it; WAIT
+        is approximated as TRY_CANCEL until Phase 3.
+
+        Children: non-ABANDON types deliver the child's cooperative-cancel
+        envelope (a checkpointed send) and retire the waiter; ABANDON just
+        retires the waiter. The WAIT variants are approximated (the awaiter
+        is already gone once the future is cancelled).
         """
         seqs, self._cancelled_activity_seqs = self._cancelled_activity_seqs, []
         for seq in seqs:
@@ -601,6 +760,20 @@ class Interpreter(_Runtime):
                         waiter.task.add_done_callback(self._discard_abandoned)
                     else:
                         waiter.task.cancel()
+
+        child_seqs, self._cancelled_child_seqs = self._cancelled_child_seqs, []
+        for seq in child_seqs:
+            child = self._pending_children.pop(seq, None)
+            if child is None:
+                continue
+            for waiter in list(self._waiters):
+                if waiter.kind == "child" and waiter.seq == seq:
+                    self._waiters.remove(waiter)
+                    waiter.task.cancel()
+            if child.cancellation_type != 0 and child.started:  # not ABANDON
+                await DBOS.send_async(
+                    child.child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                )
 
     def _discard_abandoned(self, task: "asyncio.Task[Any]") -> None:
         self._abandoned_tasks.discard(task)
@@ -659,6 +832,8 @@ class Interpreter(_Runtime):
                 self._deliver_timer(waiter.seq)
             elif waiter.kind == "activity":
                 self._deliver_activity_event(waiter)
+            elif waiter.kind == "child":
+                self._deliver_child_event(waiter)
 
     def _deliver_timer(self, seq: int) -> None:
         handle = self._pending_timers.pop(seq, None)
@@ -705,6 +880,48 @@ class Interpreter(_Runtime):
         )
         error.__cause__ = deserialize_failure(failure)
         exec_state.future.set_exception(error)
+
+    def _deliver_child_event(self, waiter: _Waiter) -> None:
+        child = self._pending_children.pop(waiter.seq, None)
+        if child is None or child.result_future.cancelled():
+            return  # cancelled between completion and delivery
+        envelope: Dict[str, Any] = waiter.task.result()
+        self._advance_time(envelope.get("ended_at"))
+        if envelope["ok"]:
+            child.result_future.set_result(envelope["result"])
+            return
+        error = exceptions.ChildWorkflowError(
+            "Child workflow execution failed",
+            namespace="default",
+            workflow_id=child.child_id,
+            run_id=child.child_id,
+            workflow_type=child.type_name,
+            initiated_event_id=0,
+            started_event_id=0,
+            retry_state=None,
+        )
+        error.__cause__ = deserialize_failure(envelope["failure"])
+        child.result_future.set_exception(error)
+
+    async def _sweep_children_on_close(self) -> None:
+        """ParentClosePolicy (§6.5): when the parent reaches a terminal
+        outcome, deal with still-running children. TERMINATE (the default)
+        native-cancels them; REQUEST_CANCEL delivers the cooperative
+        envelope; ABANDON leaves them running. Re-running this on replay is
+        idempotent.
+        """
+        for child in list(self._pending_children.values()):
+            if not child.started:
+                continue
+            policy = child.parent_close_policy
+            if policy == 2:  # ABANDON
+                continue
+            if policy == 3:  # REQUEST_CANCEL
+                await DBOS.send_async(
+                    child.child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                )
+            else:  # TERMINATE (1) and UNSPECIFIED (0) default to terminate
+                await asyncio.to_thread(DBOS.cancel_workflow, child.child_id)
 
     def _retry_decision(
         self, exec_state: _ActivityExec, failure: FailureEnvelope
@@ -930,6 +1147,53 @@ class Interpreter(_Runtime):
 
     def runtime_random(self) -> Random:
         return self._random
+
+    async def runtime_start_child_workflow(
+        self,
+        type_name: str,
+        args: Sequence[Any],
+        *,
+        child_id: Optional[str],
+        task_queue: Optional[str],
+        parent_close_policy: int,
+        cancellation_type: int,
+    ) -> "ChildWorkflowHandle":
+        self._assert_not_read_only("start a child workflow")
+        seq = self._next_seq("child")
+        resolved_id = child_id or f"{self._workflow_id}_{seq}"
+        ids.validate_workflow_id(resolved_id)
+        child = _ChildExec(
+            seq=seq,
+            type_name=type_name,
+            child_id=resolved_id,
+            args=list(args),
+            task_queue=task_queue,
+            parent_close_policy=parent_close_policy,
+            cancellation_type=cancellation_type,
+            start_future=self._vloop.create_future(),
+            result_future=self._vloop.create_future(),
+        )
+        self._pending_children[seq] = child
+        self._commands.append(("child", seq))
+        child.result_future.add_done_callback(
+            lambda fut: (
+                self._cancelled_child_seqs.append(seq)
+                if fut.cancelled() and seq in self._pending_children
+                else None
+            )
+        )
+        # Parks the caller until the start is durable (Temporal: handles
+        # resolve on start). The outer loop processes the command.
+        await child.start_future
+        return ChildWorkflowHandle(self, resolved_id, child.result_future)
+
+    async def runtime_send_to_workflow(self, workflow_id: str, envelope: Any) -> None:
+        self._assert_not_read_only("send to a workflow")
+        seq = self._next_seq("send")
+        future = self._vloop.create_future()
+        self._pending_sends[seq] = (workflow_id, envelope, future)
+        self._commands.append(("send", seq))
+        await future
 
     def runtime_cancellation_reason(self) -> Optional[str]:
         return self._cancel_reason

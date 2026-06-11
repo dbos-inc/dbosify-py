@@ -1,10 +1,14 @@
-"""Subprocess worker for Phase 2 cancellation recovery tests.
+"""Subprocess worker for Phase 2 recovery tests.
 
-Run as: python phase2_worker.py <start|resume> <workflow_id> <effects_path>
+Run as: python phase2_worker.py <scenario>-<start|resume> <workflow_id> <effects_path>
 
-The workflow parks forever; on cancellation its unwind runs a cleanup
-activity and then parks again awaiting a `go` signal — creating the kill
-window *mid-unwind, after the cleanup checkpoint*.
+Scenarios:
+  cancel  cancellation unwind: parks forever; on cancel the unwind runs a
+          cleanup activity then parks awaiting `go` — the kill window is
+          mid-unwind, after the cleanup checkpoint.
+  child   child re-attach: parent starts a slow recording child and awaits
+          it — the kill window is after the child started, before it
+          completed; recovery must re-attach, not spawn a twin.
 """
 
 import asyncio
@@ -27,6 +31,36 @@ async def record_cleanup(path: str) -> None:
     print("CLEANUP_ACTIVITY_EXECUTED", flush=True)
     with open(path, "a") as f:
         f.write("cleanup\n")
+
+
+@activity.defn
+async def record_child_work(path: str) -> str:
+    print("CHILD_ACTIVITY_EXECUTED", flush=True)
+    with open(path, "a") as f:
+        f.write("child-work\n")
+    return "done"
+
+
+@workflow.defn
+class SlowChild:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        print("CHILD_STARTED", flush=True)
+        await workflow.sleep(3.0)
+        result: str = await workflow.execute_activity(
+            record_child_work, path, start_to_close_timeout=timedelta(seconds=10)
+        )
+        return result
+
+
+@workflow.defn
+class ChildParent:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        result: str = await workflow.execute_child_workflow(
+            SlowChild.run, path, id="reattach-child"
+        )
+        return f"parent saw: {result}"
 
 
 @workflow.defn
@@ -53,29 +87,32 @@ class CleanupHoldWorkflow:
 
 async def main() -> None:
     mode, workflow_id, effects_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    scenario, _, action = mode.partition("-")
+    run_refs = {"cancel": CleanupHoldWorkflow.run, "child": ChildParent.run}
+    run_ref = run_refs[scenario]
     async with Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[CleanupHoldWorkflow],
-        activities=[record_cleanup],
+        workflows=[CleanupHoldWorkflow, ChildParent, SlowChild],
+        activities=[record_cleanup, record_child_work],
     ):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
             client = await Client.connect(dbos_client)
-            if mode == "start":
+            if action == "start":
                 handle = await client.start_workflow(
-                    CleanupHoldWorkflow.run,
+                    run_ref,
                     effects_path,
                     id=workflow_id,
                     task_queue=TASK_QUEUE,
                 )
             else:
-                assert mode == "resume"
+                assert action == "resume"
                 handle = client.get_workflow_handle(workflow_id)
             print("STARTED", flush=True)
             try:
-                await handle.result()
-                outcome = {"result": "completed"}
+                result = await handle.result()
+                outcome = {"result": result}
             except WorkflowFailureError as err:
                 outcome = {"cause": type(err.cause).__name__}
             status = (await handle.describe()).status

@@ -64,6 +64,27 @@ class ActivityDefinition:
 _workflows: Dict[str, WorkflowDefinition] = {}
 _activities: Dict[str, ActivityDefinition] = {}
 
+# Temporal type name -> the registered per-type DBOS workflow (`wf:{type}`),
+# populated by dispatcher.register_worker. Lives here (not in dispatcher) so
+# the interpreter can resolve child-workflow dispatch functions without an
+# import cycle.
+_dbos_workflows: Dict[str, Callable[..., Any]] = {}
+
+
+def register_dbos_workflow(name: str, fn: Callable[..., Any]) -> None:
+    _dbos_workflows[name] = fn
+
+
+def dbos_workflow_for(name: str) -> Callable[..., Any]:
+    fn = _dbos_workflows.get(name)
+    if fn is None:
+        raise KeyError(
+            f"Workflow type {name!r} is not registered with this worker. "
+            f"Registered types: {sorted(_dbos_workflows)}"
+        )
+    return fn
+
+
 # Worker-level failure exception types (Worker(workflow_failure_exception_types=...)),
 # merged across workers in this process; checked by the interpreter alongside
 # each definition's own list.

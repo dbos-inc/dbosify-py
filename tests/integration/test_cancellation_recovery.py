@@ -30,7 +30,7 @@ def test_sigkill_during_cancellation_unwind(tmp_path: Path) -> None:
     effects = tmp_path / "effects"
     wf_id = "cancel-unwind-wf"
 
-    first = PythonProcess(WORKER, "start", wf_id, str(effects), env=ENV)
+    first = PythonProcess(WORKER, "cancel-start", wf_id, str(effects), env=ENV)
     first.start()
     client = None
     try:
@@ -46,7 +46,7 @@ def test_sigkill_during_cancellation_unwind(tmp_path: Path) -> None:
     finally:
         first.terminate_and_wait()
 
-    second = PythonProcess(WORKER, "resume", wf_id, str(effects), env=ENV)
+    second = PythonProcess(WORKER, "cancel-resume", wf_id, str(effects), env=ENV)
     second.start()
     try:
         # Recovery replays the cancel delivery and the unwind; the cleanup

@@ -38,11 +38,15 @@ from .common import RetryPolicy
 __all__ = [
     "ActivityCancellationType",
     "ActivityHandle",
+    "ChildWorkflowCancellationType",
+    "ChildWorkflowHandle",
     "Info",
+    "ParentClosePolicy",
     "cancellation_reason",
     "defn",
     "execute_activity",
     "execute_activity_method",
+    "execute_child_workflow",
     "execute_local_activity",
     "execute_local_activity_method",
     "in_workflow",
@@ -57,6 +61,7 @@ __all__ = [
     "sleep",
     "start_activity",
     "start_activity_method",
+    "start_child_workflow",
     "start_local_activity",
     "start_local_activity_method",
     "time",
@@ -241,6 +246,31 @@ class ActivityCancellationType(IntEnum):
     ABANDON = 2
 
 
+class ParentClosePolicy(IntEnum):
+    """What to do with running children when the parent closes, mirroring
+    ``temporalio.workflow.ParentClosePolicy``.
+    """
+
+    UNSPECIFIED = 0
+    TERMINATE = 1
+    ABANDON = 2
+    REQUEST_CANCEL = 3
+
+
+class ChildWorkflowCancellationType(IntEnum):
+    """How a workflow cancels a child workflow, mirroring
+    ``temporalio.workflow.ChildWorkflowCancellationType``. Cancellation is
+    delivered as the child's cooperative-cancel envelope; the WAIT variants
+    are approximated as TRY_CANCEL while the awaiter is gone (same
+    constraint as activities).
+    """
+
+    ABANDON = 0
+    TRY_CANCEL = 1
+    WAIT_CANCELLATION_COMPLETED = 2
+    WAIT_CANCELLATION_REQUESTED = 3
+
+
 @dataclass(frozen=True)
 class Info:
     """Information about the running workflow (Phase 0 subset of
@@ -296,12 +326,28 @@ class _Runtime:
     ) -> None:
         raise NotImplementedError
 
+    async def runtime_start_child_workflow(
+        self,
+        type_name: str,
+        args: Sequence[Any],
+        *,
+        child_id: Optional[str],
+        task_queue: Optional[str],
+        parent_close_policy: int,
+        cancellation_type: int,
+    ) -> "ChildWorkflowHandle":
+        raise NotImplementedError
+
+    async def runtime_send_to_workflow(self, workflow_id: str, envelope: Any) -> None:
+        raise NotImplementedError
+
 
 class ActivityHandle:
     """Handle to a started activity: awaitable for its result.
 
-    Phase 0: result-awaiting only; ``cancel()`` lands with the Phase 2
-    cancellation matrix.
+    Cancellation reaches it implicitly (workflow cancel, ``wait_for``
+    timeouts); an explicit ``cancel()`` lands with Phase 3's activity-side
+    observation.
     """
 
     def __init__(self, future: "asyncio.Future[Any]") -> None:
@@ -315,6 +361,50 @@ class ActivityHandle:
 
     def result(self) -> Any:
         return self._future.result()
+
+
+class ChildWorkflowHandle:
+    """Handle to a started child workflow: awaitable for its result, plus
+    ``signal`` (checkpointed send from the parent's perspective).
+    """
+
+    def __init__(
+        self, runtime: "_Runtime", workflow_id: str, future: "asyncio.Future[Any]"
+    ) -> None:
+        self._runtime = runtime
+        self._id = workflow_id
+        self._future = future
+
+    @property
+    def id(self) -> str:
+        """ID of the child workflow."""
+        return self._id
+
+    @property
+    def first_execution_run_id(self) -> Optional[str]:
+        """Run ID of the child's first run (its DBOS workflow id)."""
+        return self._id
+
+    def __await__(self) -> Any:
+        return self._future.__await__()
+
+    def done(self) -> bool:
+        return self._future.done()
+
+    async def signal(
+        self, signal: Any, arg: Any = _arg_unset, *, args: Sequence[Any] = []
+    ) -> None:
+        """Send a signal to the child workflow."""
+        from ._internal import inbox as _inbox
+
+        name = (
+            signal
+            if isinstance(signal, str)
+            else getattr(signal, _registry.SIGNAL_ATTR)
+        )
+        await self._runtime.runtime_send_to_workflow(
+            self._id, _inbox.signal_envelope(str(name), _resolve_args(arg, args))
+        )
 
 
 def _runtime() -> _Runtime:
@@ -508,6 +598,129 @@ async def execute_activity(
         summary=summary,
         priority=priority,
     )
+
+
+def _resolve_workflow_type(workflow: Any) -> str:
+    """Resolve a workflow reference: the class, its run method, or a name."""
+    if isinstance(workflow, str):
+        return workflow
+    if isinstance(workflow, type):
+        return _registry.workflow_definition_of(workflow).name
+    name = getattr(workflow, _registry.WORKFLOW_NAME_ATTR, None)
+    if name is not None:
+        return str(name)
+    raise TypeError(
+        f"Cannot resolve a workflow type from {workflow!r}: pass the "
+        "@workflow.defn class, its @workflow.run method, or the type name"
+    )
+
+
+async def start_child_workflow(
+    workflow: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    id: Optional[str] = None,
+    task_queue: Optional[str] = None,
+    result_type: Optional[type] = None,
+    cancellation_type: ChildWorkflowCancellationType = ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
+    parent_close_policy: ParentClosePolicy = ParentClosePolicy.TERMINATE,
+    execution_timeout: Optional[timedelta] = None,
+    run_timeout: Optional[timedelta] = None,
+    task_timeout: Optional[timedelta] = None,
+    id_reuse_policy: Optional[Any] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    cron_schedule: str = "",
+    memo: Optional[Any] = None,
+    search_attributes: Optional[Any] = None,
+    versioning_intent: Optional[Any] = None,
+    static_summary: Optional[str] = None,
+    static_details: Optional[str] = None,
+    priority: Optional[Any] = None,
+) -> ChildWorkflowHandle:
+    """Start a child workflow; returns its handle once the start is durable
+    (Temporal semantics: resolves on start, not completion).
+
+    Phase 2 honors arg/args, id (default: ``{parent_id}_{seq}`` — README
+    deviation #5), task_queue, parent_close_policy, and cancellation_type;
+    the remaining parameters are accepted and ignored (debug-logged).
+    """
+    for key, value in {
+        "result_type": result_type,
+        "execution_timeout": execution_timeout,
+        "run_timeout": run_timeout,
+        "task_timeout": task_timeout,
+        "id_reuse_policy": id_reuse_policy,
+        "retry_policy": retry_policy,
+        "cron_schedule": cron_schedule or None,
+        "memo": memo,
+        "search_attributes": search_attributes,
+        "versioning_intent": versioning_intent,
+        "static_summary": static_summary,
+        "static_details": static_details,
+        "priority": priority,
+    }.items():
+        if value is not None:
+            logger.debug("start_child_workflow: ignoring unsupported option %r", key)
+    return await _runtime().runtime_start_child_workflow(
+        _resolve_workflow_type(workflow),
+        _resolve_args(arg, args),
+        child_id=id,
+        task_queue=task_queue,
+        parent_close_policy=int(parent_close_policy),
+        cancellation_type=int(cancellation_type),
+    )
+
+
+async def execute_child_workflow(
+    workflow: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    id: Optional[str] = None,
+    task_queue: Optional[str] = None,
+    result_type: Optional[type] = None,
+    cancellation_type: ChildWorkflowCancellationType = ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
+    parent_close_policy: ParentClosePolicy = ParentClosePolicy.TERMINATE,
+    execution_timeout: Optional[timedelta] = None,
+    run_timeout: Optional[timedelta] = None,
+    task_timeout: Optional[timedelta] = None,
+    id_reuse_policy: Optional[Any] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    cron_schedule: str = "",
+    memo: Optional[Any] = None,
+    search_attributes: Optional[Any] = None,
+    versioning_intent: Optional[Any] = None,
+    static_summary: Optional[str] = None,
+    static_details: Optional[str] = None,
+    priority: Optional[Any] = None,
+) -> Any:
+    """Start a child workflow and wait for its result. See
+    ``start_child_workflow``.
+    """
+    handle = await start_child_workflow(
+        workflow,
+        arg,
+        args=args,
+        id=id,
+        task_queue=task_queue,
+        result_type=result_type,
+        cancellation_type=cancellation_type,
+        parent_close_policy=parent_close_policy,
+        execution_timeout=execution_timeout,
+        run_timeout=run_timeout,
+        task_timeout=task_timeout,
+        id_reuse_policy=id_reuse_policy,
+        retry_policy=retry_policy,
+        cron_schedule=cron_schedule,
+        memo=memo,
+        search_attributes=search_attributes,
+        versioning_intent=versioning_intent,
+        static_summary=static_summary,
+        static_details=static_details,
+        priority=priority,
+    )
+    return await handle
 
 
 # Method variants: identical resolution/execution (the worker registered the
