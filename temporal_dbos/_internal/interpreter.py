@@ -706,15 +706,13 @@ class Interpreter(_Runtime):
         try:
             dispatch_fn = registry.dbos_workflow_for(child.type_name)
             if not self._own_queue_resolved:
-                status = await asyncio.to_thread(
-                    DBOS.get_workflow_status, self._workflow_id
-                )
+                status = await DBOS.get_workflow_status_async(self._workflow_id)
                 self._own_queue_name = status.queue_name if status else None
                 self._own_queue_resolved = True
             queue_name = child.task_queue or self._own_queue_name
             child_queue = None
             if queue_name is not None:
-                child_queue = await asyncio.to_thread(DBOS.retrieve_queue, queue_name)
+                child_queue = await DBOS.retrieve_queue_async(queue_name)
             # Record intent BEFORE the start commits (claim-then-start): any
             # child that exists is guaranteed to be in the registry, closing
             # the terminate-races-child-start orphan window. The reverse
@@ -943,12 +941,12 @@ class Interpreter(_Runtime):
         if child_id in visited:
             return
         visited.add(child_id)
-        status = await asyncio.to_thread(DBOS.get_workflow_status, child_id)
+        status = await DBOS.get_workflow_status_async(child_id)
         if status is None or status.status not in ("PENDING", "ENQUEUED", "DELAYED"):
             return  # already terminal (or stuck); don't clobber its status
-        await asyncio.to_thread(DBOS.cancel_workflow, child_id)
-        grandchildren = await asyncio.to_thread(
-            DBOS.get_event, child_id, inbox.CHILDREN_EVENT_KEY, 0
+        await DBOS.cancel_workflow_async(child_id)
+        grandchildren = await DBOS.get_event_async(
+            child_id, inbox.CHILDREN_EVENT_KEY, 0
         )
         for grandchild in grandchildren or []:
             policy = grandchild.get("policy", 1)
