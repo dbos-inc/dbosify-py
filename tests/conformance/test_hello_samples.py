@@ -40,7 +40,10 @@ EXPECTATIONS = {
     "hello_async_activity_completion": Expectation(
         xfail="async activity completion is Phase 3"
     ),
-    "hello_cancellation": Expectation(xfail="workflow cancellation is Phase 2"),
+    "hello_cancellation": Expectation(
+        xfail="its sync activity observes cancellation via heartbeat "
+        "(Phase 3); until then the activity thread never exits"
+    ),
     "hello_change_log_level": Expectation(
         skip="never exits by design: awaits a workflow whose task fails "
         "forever (identical behavior on a real Temporal server)"

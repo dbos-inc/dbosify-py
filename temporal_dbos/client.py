@@ -3,11 +3,10 @@
 ``Client`` wraps a ``dbos.DBOSClient`` (which carries the database URL and
 system schema), rather than parsing a Temporal-style target host.
 
-Phase 1 surface: ``start_workflow`` / ``execute_workflow`` /
-``get_workflow_handle``, and ``WorkflowHandle`` with ``result``/``signal``/
-``query``/``execute_update``/``describe``. Parameters not yet honored are
-accepted and ignored with a debug log. ``cancel`` and ``terminate`` land with
-the Phase 2 cancellation matrix.
+Surface: ``start_workflow`` / ``execute_workflow`` / ``get_workflow_handle``,
+and ``WorkflowHandle`` with ``result``/``signal``/``query``/``execute_update``/
+``describe``/``cancel`` (cooperative, §6.5) / ``terminate`` (forceful).
+Parameters not yet honored are accepted and ignored with a debug log.
 """
 
 import asyncio
@@ -267,14 +266,17 @@ class Client:
                 # TOCTOU window here, accepted for v1 (DESIGN §6.4).
                 if id_conflict_policy == WorkflowIDConflictPolicy.USE_EXISTING:
                     return WorkflowHandle(self, id, run_id=current_status.workflow_id)
-                if id_conflict_policy == WorkflowIDConflictPolicy.TERMINATE_EXISTING:
-                    raise NotImplementedError(
-                        "TERMINATE_EXISTING lands with Phase 2 termination "
-                        "(see README compatibility table)"
+                if (
+                    id_conflict_policy == WorkflowIDConflictPolicy.TERMINATE_EXISTING
+                    or id_reuse_policy == WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
+                ):
+                    await self._dbos_client.cancel_workflow_async(
+                        current_status.workflow_id
                     )
-                raise exceptions.WorkflowAlreadyStartedError(
-                    id, type_name, run_id=current_status.workflow_id
-                )
+                else:
+                    raise exceptions.WorkflowAlreadyStartedError(
+                        id, type_name, run_id=current_status.workflow_id
+                    )
             # Reuse policies (vs a closed run).
             if id_reuse_policy == WorkflowIDReusePolicy.REJECT_DUPLICATE:
                 raise exceptions.WorkflowAlreadyStartedError(
@@ -287,11 +289,6 @@ class Client:
             ):
                 raise exceptions.WorkflowAlreadyStartedError(
                     id, type_name, run_id=current_status.workflow_id
-                )
-            if id_reuse_policy == WorkflowIDReusePolicy.TERMINATE_IF_RUNNING:
-                raise NotImplementedError(
-                    "TERMINATE_IF_RUNNING lands in Phase 3 (see README "
-                    "compatibility table)"
                 )
             run_index = current_index + 1
 
@@ -502,8 +499,10 @@ class WorkflowHandle:
             # itself.
             cause = deserialize_failure(failure.envelope)
             raise WorkflowFailureError(cause=cause) from cause
-        except (asyncio.TimeoutError, DBOSAwaitedWorkflowCancelledError):
-            raise
+        except DBOSAwaitedWorkflowCancelledError:
+            # Native DBOS cancel == terminate in our scheme (§6.5).
+            terminated = exceptions.TerminatedError("Workflow terminated")
+            raise WorkflowFailureError(cause=terminated) from terminated
         except Exception as err:
             # FAIL_FAST mode or infrastructure errors: surface with a
             # converted cause rather than a raw pickled exception.
@@ -618,7 +617,7 @@ class WorkflowHandle:
             run_id=status.workflow_id,
             workflow_type=workflow_type,
             task_queue=status.queue_name,
-            status=_status.to_execution_status(status.status),
+            status=_status.to_execution_status(status.status, error=status.error),
             start_time=_to_datetime(status.created_at),
             close_time=_to_datetime(status.completed_at),
             parent_id=status.parent_workflow_id,
@@ -631,9 +630,14 @@ class WorkflowHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Cooperative cancellation: Phase 2 (see DESIGN §6.5)."""
-        raise NotImplementedError(
-            "handle.cancel() lands in Phase 2 (cooperative cancellation)"
+        """Request cooperative cancellation (§6.5): the workflow's primary
+        coroutine gets CancelledError at its next event boundary; cleanup
+        code runs and may still execute activities. The workflow may also
+        swallow the cancel and complete normally.
+        """
+        _ignore_rpc_options("cancel", rpc_metadata, rpc_timeout)
+        await self._client._dbos_client.send_async(
+            await self._target(), inbox.cancel_envelope(reason), inbox.INBOX_TOPIC
         )
 
     async def terminate(
@@ -643,5 +647,11 @@ class WorkflowHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Forceful termination: Phase 2 (see DESIGN §6.5)."""
-        raise NotImplementedError("handle.terminate() lands in Phase 2")
+        """Forcefully terminate (§6.5): native DBOS cancellation. No
+        workflow code runs; status becomes TERMINATED. ``reason``/details
+        are accepted but not stored (DBOS cancellation has no reason field).
+        """
+        _ignore_rpc_options("terminate", rpc_metadata, rpc_timeout)
+        if args or reason:
+            logger.debug("terminate: reason/details are not stored")
+        await self._client._dbos_client.cancel_workflow_async(await self._target())
