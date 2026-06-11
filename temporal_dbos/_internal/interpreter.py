@@ -777,6 +777,10 @@ class Interpreter(_Runtime):
         still execute activities, because the outer loop keeps servicing
         events until the unwind produces an outcome.
         """
+        if self._cancel_requested:
+            # Temporal dedups cancel requests server-side: a second cancel
+            # must not re-interrupt cleanup code mid-unwind.
+            return
         self._cancel_requested = True
         reason = envelope.get("reason")
         self._cancel_reason = str(reason) if reason else None
