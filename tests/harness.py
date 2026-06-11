@@ -33,6 +33,8 @@ class PythonProcess:
         self.args = args
         self.env = {**os.environ, **(env or {})}
         self.lines: list[str] = []
+        # Full output history; unlike `lines`, never consumed by wait_for_line.
+        self.transcript: list[str] = []
         self._proc: Optional[subprocess.Popen[str]] = None
         self._cond = threading.Condition()
         self._reader: Optional[threading.Thread] = None
@@ -54,6 +56,7 @@ class PythonProcess:
         for line in self._proc.stdout:
             with self._cond:
                 self.lines.append(line)
+                self.transcript.append(line)
                 self._cond.notify_all()
 
     def wait_for_line(self, needle: str, timeout: float = 30.0) -> str:

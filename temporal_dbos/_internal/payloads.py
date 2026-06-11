@@ -11,12 +11,58 @@ Arbitrary (non-FailureError) exceptions convert to ``ApplicationError`` with
 failure converter.
 """
 
+import traceback
 from datetime import timedelta
 from typing import Any, Dict, Optional
 
 from .. import exceptions
 
 FailureEnvelope = Dict[str, Any]
+
+
+class FailureView:
+    """Attribute view over a failure envelope, shaped like the commonly-used
+    fields of temporalio's protobuf ``Failure`` (``message``,
+    ``stack_trace``, ``cause``). Exposed via ``FailureError.failure``.
+    """
+
+    def __init__(self, envelope: FailureEnvelope) -> None:
+        self._envelope = envelope
+
+    @property
+    def message(self) -> str:
+        return str(self._envelope.get("message", ""))
+
+    @property
+    def stack_trace(self) -> str:
+        return str(self._envelope.get("stack_trace", ""))
+
+    @property
+    def cause(self) -> Optional["FailureView"]:
+        cause = self._envelope.get("cause")
+        return FailureView(cause) if cause is not None else None
+
+    def __repr__(self) -> str:
+        return f"FailureView({self._envelope!r})"
+
+
+class SerializedWorkflowFailure(Exception):
+    """The form a workflow failure takes in the DBOS ledger.
+
+    The dispatcher wraps workflow ``FailureError`` outcomes in this before
+    they reach DBOS's error recording, because pickling exception objects
+    drops ``__cause__`` chains. Clients catch it from ``get_result`` and
+    reconstruct the exact failure via ``deserialize_failure``.
+    """
+
+    def __init__(self, envelope: FailureEnvelope) -> None:
+        # The envelope is the sole constructor arg so default exception
+        # pickling round-trips it.
+        super().__init__(envelope)
+        self.envelope = envelope
+
+    def __str__(self) -> str:
+        return str(self.envelope.get("message", "workflow failed"))
 
 
 def serialize_failure(exc: BaseException) -> FailureEnvelope:
@@ -87,6 +133,8 @@ def serialize_failure(exc: BaseException) -> FailureEnvelope:
             "non_retryable": False,
             "next_retry_delay": None,
         }
+    if exc.__traceback__ is not None:
+        env["stack_trace"] = "".join(traceback.format_tb(exc.__traceback__))
     cause = exc.__cause__
     env["cause"] = serialize_failure(cause) if cause is not None else None
     return env
@@ -145,7 +193,7 @@ def deserialize_failure(env: FailureEnvelope) -> exceptions.FailureError:
     cause = env.get("cause")
     if cause is not None:
         exc.__cause__ = deserialize_failure(cause)
-    exc._failure = env  # noqa: SLF001 — our own class; expose the envelope
+    exc._failure = FailureView(env)  # noqa: SLF001 — our own class
     return exc
 
 

@@ -24,7 +24,7 @@ from . import registry
 from .payloads import serialize_failure
 
 AttemptStep = Callable[
-    [List[Any], Optional[float]], Coroutine[Any, Any, Dict[str, Any]]
+    [List[Any], Optional[float], Dict[str, Any]], Coroutine[Any, Any, Dict[str, Any]]
 ]
 
 _attempt_steps: Dict[str, AttemptStep] = {}
@@ -48,11 +48,22 @@ def attempt_step_for(activity_name: str) -> AttemptStep:
 
 def _make_attempt_step(activity_name: str) -> AttemptStep:
     async def attempt(
-        args: List[Any], start_to_close: Optional[float]
+        args: List[Any], start_to_close: Optional[float], meta: Dict[str, Any]
     ) -> Dict[str, Any]:
+        from .. import activity as activity_api
+
         defn = registry.lookup_activity(activity_name)
 
         async def call_user_activity() -> Dict[str, Any]:
+            # The activity context (activity.info()/heartbeat()) rides a
+            # contextvar; asyncio.to_thread copies the context, so sync
+            # activities see it too.
+            token = activity_api._current_context.set(
+                activity_api._Context(
+                    info=activity_api._make_info(meta),
+                    on_heartbeat=lambda *details: None,
+                )
+            )
             try:
                 if defn.is_async:
                     result = await defn.fn(*args)
@@ -64,6 +75,8 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
                     "failure": serialize_failure(err),
                     "ended_at": time_mod.time(),
                 }
+            finally:
+                activity_api._current_context.reset(token)
             return {"ok": True, "result": result, "ended_at": time_mod.time()}
 
         try:

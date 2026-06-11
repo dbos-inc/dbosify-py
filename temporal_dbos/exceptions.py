@@ -66,10 +66,11 @@ class FailureError(TemporalError):
 
     @property
     def failure(self) -> Optional[Any]:
-        """Underlying serialized failure envelope, if any.
+        """Underlying failure, if any.
 
-        In temporalio this is a protobuf ``Failure``; here it is the
-        temporal-dbos failure envelope (a dict).
+        In temporalio this is a protobuf ``Failure``; here it is a
+        ``FailureView`` over the temporal-dbos failure envelope, exposing
+        the commonly-used fields (``message``, ``stack_trace``, ``cause``).
         """
         return self._failure
 

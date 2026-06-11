@@ -22,6 +22,44 @@ roadmap.
 - **Partial support only** for Nexus, multi-namespace isolation, and advanced visibility
   (full query language, custom indexed search attributes).
 
+## Conformance
+
+The conformance suite (`tests/conformance/`) runs the
+[temporalio/samples-python](https://github.com/temporalio/samples-python)
+`hello/` corpus against temporal-dbos. Migration = the mechanical import
+rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
+(`Client.connect` takes a `dbos.DBOSClient`; `Worker` takes a
+`dbos.DBOSConfig`). Workflow and activity code runs unmodified.
+
+Current pass rate: **11 of 19 runnable samples** (the rest are blocked on
+roadmap phases, noted below; 3 samples aren't runnable in any automated
+harness).
+
+| Sample | Status |
+|---|---|
+| hello_activity | ✅ |
+| hello_activity_async | ✅ |
+| hello_activity_choice | ✅ |
+| hello_activity_heartbeat | ✅ |
+| hello_activity_method | ✅ |
+| hello_activity_retry | ✅ |
+| hello_exception | ✅ |
+| hello_local_activity | ✅ |
+| hello_parallel_activity | ✅ |
+| hello_signal | ✅ |
+| hello_update | ✅ |
+| hello_cancellation | ⬜ Phase 2 (cancellation) |
+| hello_child_workflow | ⬜ Phase 2 (child workflows) |
+| hello_async_activity_completion | ⬜ Phase 3 (async completion) |
+| hello_continue_as_new | ⬜ Phase 3 (continue-as-new) |
+| hello_cron | ⬜ Phase 3 (cron) |
+| hello_search_attributes | ⬜ Phase 3 (search attributes) |
+| hello_query | ⬜ Phase 4 (queries on closed workflows — deviation #2) |
+| hello_activity_multiprocess | ⬜ multiprocess activity executors unsupported |
+| hello_change_log_level | — never exits by design (also true on Temporal) |
+| hello_mtls | — needs mTLS infrastructure |
+| hello_patch | — manual multi-invocation walkthrough (Phase 4) |
+
 ## Known deviations from Temporal
 
 This table is maintained as features land; see `DESIGN.md` §8 for details.
@@ -36,6 +74,7 @@ This table is maintained as features land; see `DESIGN.md` §8 for details.
 | 6 | `FAIL` id-conflict policy has a small TOCTOU window in v1. |
 | 7 | Different latency/throughput profile: every effect is a Postgres write. Benchmarks will be published. |
 | 8 | Payloads live in the DBOS system database; Temporal's 2MB/4MB payload caps are not enforced. |
+| 9 | (Temporary, until the Phase 3 data-conversion pipeline) Payloads are serialized with pickle, not JSON: exact objects round-trip even without type hints, where temporalio's default converter would return plain dicts. Checkpoints written under pickle will not survive the switch. |
 
 ## Development
 

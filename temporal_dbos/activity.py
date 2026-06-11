@@ -1,15 +1,41 @@
 """Activity author API, mirroring ``temporalio.activity``.
 
-Phase 0 subset: the ``defn`` decorator. The runtime functions (``info``,
-``heartbeat``, cancellation observation) land in Phases 1-3.
+Phase 1 surface: the ``defn`` decorator plus the runtime context functions
+(``info``, ``heartbeat``, ``is_cancelled``, ``wait_for_cancelled_sync``,
+``in_activity``). The context is set by the worker's attempt step for real
+runs and by ``temporal_dbos.testing.ActivityEnvironment`` for unit tests.
+
+Phase 1 notes: ``heartbeat`` records details in-context (and notifies the
+test environment's ``on_heartbeat``); durable heartbeat details and
+cancellation delivery via heartbeat are Phase 3 (DESIGN §6.1.2).
 """
 
 import inspect
-from typing import Any, Callable, Optional, TypeVar, Union, overload
+import logging
+import threading
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any, Callable, List, Optional, Sequence, TypeVar, Union, overload
 
 from ._internal import registry as _registry
 
+__all__ = [
+    "Info",
+    "defn",
+    "heartbeat",
+    "in_activity",
+    "info",
+    "is_cancelled",
+    "logger",
+    "wait_for_cancelled_sync",
+]
+
 _F = TypeVar("_F", bound=Callable[..., Any])
+
+logger = logging.getLogger("temporal_dbos.activity")
+"""Logger that can be used within activities. (Phase 1: a plain logger;
+the context-injecting adapter mirroring temporalio's lands later.)"""
 
 
 @overload
@@ -37,3 +63,88 @@ def defn(
     if fn is not None:
         return decorator(fn)
     return decorator
+
+
+@dataclass(frozen=True)
+class Info:
+    """Information about the running activity (Phase 1 subset of
+    temporalio's ``activity.Info``; field order matches theirs).
+
+    Constructed by the SDK, never by users — the defaults exist only for
+    construction convenience.
+    """
+
+    activity_id: str = ""
+    activity_type: str = ""
+    attempt: int = 1
+    heartbeat_details: Sequence[Any] = ()
+    is_local: bool = False
+    task_queue: str = ""
+    workflow_id: str = ""
+    workflow_run_id: str = ""
+    workflow_type: str = ""
+
+
+@dataclass
+class _Context:
+    info: Info
+    on_heartbeat: Callable[..., None]
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    last_heartbeat: Sequence[Any] = ()
+
+
+_current_context: ContextVar[Optional[_Context]] = ContextVar(
+    "temporal_dbos_activity", default=None
+)
+
+
+def _context() -> _Context:
+    ctx = _current_context.get()
+    if ctx is None:
+        raise RuntimeError("Not in activity context")
+    return ctx
+
+
+def in_activity() -> bool:
+    """Whether the current code is inside an activity."""
+    return _current_context.get() is not None
+
+
+def info() -> Info:
+    """Current activity's info."""
+    return _context().info
+
+
+def heartbeat(*details: Any) -> None:
+    """Send a heartbeat for the current activity. Phase 1: details are
+    recorded in-context only (durable details and cancellation delivery are
+    Phase 3).
+    """
+    ctx = _context()
+    ctx.last_heartbeat = details
+    ctx.on_heartbeat(*details)
+
+
+def is_cancelled() -> bool:
+    """Whether a cancellation was requested on this activity."""
+    return _context().cancelled.is_set()
+
+
+def wait_for_cancelled_sync(
+    timeout: Optional[Union[timedelta, float]] = None,
+) -> None:
+    """Synchronously block until the activity is cancelled."""
+    seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
+    _context().cancelled.wait(seconds)
+
+
+def _make_info(meta: dict[str, Any]) -> Info:
+    return Info(
+        activity_id=str(meta.get("activity_id", "")),
+        activity_type=str(meta.get("activity_type", "")),
+        attempt=int(meta.get("attempt", 1)),
+        task_queue=str(meta.get("task_queue", "")),
+        workflow_id=str(meta.get("workflow_id", "")),
+        workflow_run_id=str(meta.get("workflow_run_id", "")),
+        workflow_type=str(meta.get("workflow_type", "")),
+    )

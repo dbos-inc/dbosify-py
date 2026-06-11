@@ -20,6 +20,7 @@ Phase 1.
 """
 
 import asyncio
+import dataclasses
 import logging
 import os
 import time as time_mod
@@ -30,10 +31,14 @@ from dbos import DBOS, SetWorkflowID, WorkflowHandle
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
 
 from .. import exceptions
+
+# Re-exported here for the Phase 0 helper API; the canonical home mirrors
+# temporalio.client.WorkflowUpdateFailedError.
+from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from . import activities as activities_mod
 from . import inbox, registry
 from .interpreter import Interpreter, WorkflowTaskFailure
-from .payloads import deserialize_failure
+from .payloads import SerializedWorkflowFailure, deserialize_failure, serialize_failure
 
 logger = logging.getLogger("temporal_dbos.dispatcher")
 
@@ -42,18 +47,6 @@ TASK_RETRY_INITIAL_ENV = "TEMPORAL_DBOS_TASK_RETRY_INITIAL_SECONDS"
 TASK_RETRY_MAX_SECONDS = 60.0
 
 _dbos_workflows: Dict[str, Callable[[List[Any]], Coroutine[Any, Any, Any]]] = {}
-
-
-class WorkflowUpdateFailedError(exceptions.TemporalError):
-    """The update was rejected by its validator or failed in its handler.
-
-    Phase 0 home; moves to the client module with the Phase 1 facade
-    (mirroring ``temporalio.client.WorkflowUpdateFailedError``).
-    """
-
-    def __init__(self, cause: BaseException) -> None:
-        super().__init__("Workflow update failed")
-        self.__cause__ = cause
 
 
 def _reset_for_tests() -> None:
@@ -66,6 +59,7 @@ def _reset_for_tests() -> None:
     _dbos_workflows.clear()
     registry._workflows.clear()
     registry._activities.clear()
+    registry.worker_failure_exception_types = ()
     activities_mod._attempt_steps.clear()
     interpreter._init_step = None
 
@@ -74,6 +68,7 @@ def register_worker(
     *,
     workflows: Sequence[Type[Any]] = (),
     activities: Sequence[Callable[..., Any]] = (),
+    failure_exception_types: Sequence[Type[BaseException]] = (),
 ) -> None:
     """Register workflow classes and activity functions with this process.
 
@@ -81,6 +76,8 @@ def register_worker(
     dispatchers. Re-registering a workflow type replaces its implementation
     — in-flight executions pick it up on their next workflow-task retry.
     """
+    if failure_exception_types:
+        registry.add_worker_failure_exception_types(failure_exception_types)
     for cls in workflows:
         defn = registry.workflow_definition_of(cls)
         registry.register_workflow(defn)
@@ -88,6 +85,11 @@ def register_worker(
             _dbos_workflows[defn.name] = _make_dbos_workflow(defn.name)
     for fn in activities:
         activity_defn = registry.activity_definition_of(fn)
+        if activity_defn.fn is not fn:
+            # A bound method: the definition was built at decoration time on
+            # the unbound function; execute the bound callable the user
+            # actually registered (temporalio supports method activities).
+            activity_defn = dataclasses.replace(activity_defn, fn=fn)
         registry.register_activity(activity_defn)
         activities_mod.ensure_attempt_step(activity_defn.name)
 
@@ -96,7 +98,13 @@ def _make_dbos_workflow(
     type_name: str,
 ) -> Callable[[List[Any]], Coroutine[Any, Any, Any]]:
     async def dispatch(args: List[Any]) -> Any:
-        return await _run_workflow_task_loop(type_name, args)
+        try:
+            return await _run_workflow_task_loop(type_name, args)
+        except exceptions.FailureError as err:
+            # Record workflow failures in the stable envelope format so
+            # clients reconstruct the exact exception, cause chain included
+            # (pickle would drop __cause__).
+            raise SerializedWorkflowFailure(serialize_failure(err)) from None
 
     dispatch.__name__ = dispatch.__qualname__ = f"wf:{type_name}"
     decorated: Callable[[List[Any]], Coroutine[Any, Any, Any]] = DBOS.workflow(
@@ -118,7 +126,9 @@ async def _run_workflow_task_loop(type_name: str, args: List[Any]) -> Any:
             return await Interpreter(defn, args).execute()
         except WorkflowTaskFailure as failure:
             if os.environ.get(FAIL_FAST_ENV):
-                raise failure.cause from None
+                # Bare raise: `from None` would clobber the user exception's
+                # own __cause__ chain.
+                raise failure.cause
             logger.error(
                 "Workflow task failed for %s (workflow %s); workflow stays "
                 "RUNNING, retrying in %.1fs. Fix the workflow code and "
