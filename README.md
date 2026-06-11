@@ -74,6 +74,7 @@ This table is maintained as features land; see `DESIGN.md` §8 for details.
 | 6 | `FAIL` id-conflict policy has a small TOCTOU window in v1. |
 | 7 | Different latency/throughput profile: every effect is a Postgres write. Benchmarks will be published. |
 | 8 | Payloads live in the DBOS system database; Temporal's 2MB/4MB payload caps are not enforced. |
+| 9 | (Temporary, until the Phase 3 data-conversion pipeline) Payloads are serialized with pickle, not JSON: exact objects round-trip even without type hints, where temporalio's default converter would return plain dicts. Checkpoints written under pickle will not survive the switch. |
 
 ## Development
 
