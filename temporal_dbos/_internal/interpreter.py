@@ -715,6 +715,18 @@ class Interpreter(_Runtime):
             child_queue = None
             if queue_name is not None:
                 child_queue = await asyncio.to_thread(DBOS.retrieve_queue, queue_name)
+            # Record intent BEFORE the start commits (claim-then-start): any
+            # child that exists is guaranteed to be in the registry, closing
+            # the terminate-races-child-start orphan window. The reverse
+            # anomaly — a registry entry whose enqueue never happened — is
+            # harmless: policy sweeps skip nonexistent workflows, and
+            # recovery re-runs the enqueue anyway.
+            self._children_registry.append(
+                {"id": child.child_id, "policy": child.parent_close_policy}
+            )
+            await DBOS.set_event_async(
+                inbox.CHILDREN_EVENT_KEY, list(self._children_registry)
+            )
             with SetWorkflowID(child.child_id):
                 if child_queue is not None:
                     await child_queue.enqueue_async(dispatch_fn, list(child.args))
@@ -730,15 +742,6 @@ class Interpreter(_Runtime):
                 )
             return
         child.started = True
-        # Durably register the child + its ParentClosePolicy so the policy
-        # survives the parent — terminate runs no workflow code, so the
-        # client applies it from this event (checkpointed; replays cleanly).
-        self._children_registry.append(
-            {"id": child.child_id, "policy": child.parent_close_policy}
-        )
-        await DBOS.set_event_async(
-            inbox.CHILDREN_EVENT_KEY, list(self._children_registry)
-        )
         if not child.start_future.cancelled():
             child.start_future.set_result(None)
         self._launch_waiter("child", child.seq, _await_child_result(child.child_id))
