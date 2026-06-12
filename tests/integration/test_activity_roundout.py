@@ -85,6 +85,33 @@ def stalls_after_one_heartbeat() -> Sequence[Any]:
     return list(info.heartbeat_details)
 
 
+@activity.defn
+async def slow_writer(path: str) -> None:
+    for i in range(100):
+        with open(path, "a") as f:
+            f.write(f"{i}\n")
+        await asyncio.sleep(0.05)
+
+
+@workflow.defn
+class CancelStopsAsyncFnWorkflow:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        handle = workflow.start_activity(
+            slow_writer,
+            path,
+            start_to_close_timeout=timedelta(seconds=60),
+            heartbeat_timeout=timedelta(seconds=30),  # watchdog armed, idle
+        )
+        await workflow.sleep(0.4)
+        handle.cancel()
+        try:
+            await handle
+        except asyncio.CancelledError:
+            pass
+        return "done"
+
+
 @workflow.defn
 class CancellationWorkflow:
     @workflow.run
@@ -261,9 +288,11 @@ async def _env() -> AsyncIterator[Client]:
             AsyncCustomIdWorkflow,
             DuplicateIdWorkflow,
             AsyncCanWorkflow,
+            CancelStopsAsyncFnWorkflow,
         ],
         activities=[
             heartbeating_forever,
+            slow_writer,
             record,
             flaky_with_heartbeat,
             complete_externally,
@@ -641,3 +670,22 @@ async def test_async_completion_does_not_cross_continue_as_new() -> None:
         # The old run's activity is marked gone for its completer.
         with pytest.raises(AsyncActivityCancelledError):
             await old_handle.heartbeat("anyone?")
+
+
+async def test_cancel_stops_async_activity_function(tmp_path: Path) -> None:
+    """TRY_CANCEL must actually cancel an async activity function even when
+    the heartbeat watchdog wraps it (asyncio.wait does not propagate
+    cancellation to what it waits on — the attempt must)."""
+    effects = tmp_path / "effects"
+    async with _env() as client:
+        result = await client.execute_workflow(
+            CancelStopsAsyncFnWorkflow.run,
+            str(effects),
+            id="cancel-stops-fn",
+            task_queue=TASK_QUEUE,
+        )
+        assert result == "done"
+        lines_at_done = len(effects.read_text().splitlines())
+        await asyncio.sleep(0.8)
+        # An orphaned function would still be appending (~16 more lines).
+        assert len(effects.read_text().splitlines()) <= lines_at_done + 2

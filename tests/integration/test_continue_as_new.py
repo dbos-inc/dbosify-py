@@ -4,7 +4,7 @@ message carryover, and child chains.
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Awaitable, Callable, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, List, Optional
 
 import pytest
 from dbos import DBOSClient
@@ -15,6 +15,7 @@ from temporal_dbos.client import (
     Client,
     WorkflowContinuedAsNewError,
     WorkflowExecutionStatus,
+    WorkflowFailureError,
 )
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
@@ -187,6 +188,31 @@ class TypeSwitchWorkflow:
 
 
 @workflow.defn
+class CanThenChildWorkflow:
+    @workflow.run
+    async def run(self, hopped: bool) -> List[Any]:
+        if not hopped:
+            workflow.continue_as_new(True)
+        # This run is --r1: its auto child id embeds "--r1" (the shape that
+        # would mis-parse without the digit guard), and the child itself
+        # continues as new, extending ITS OWN chain.
+        handle = await workflow.start_child_workflow(
+            LinkProbeWorkflow.run, args=[[], 1]
+        )
+        links = await handle
+        return [links, handle.id]
+
+
+@workflow.defn
+class BadChildIdWorkflow:
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.start_child_workflow(
+            LinkProbeWorkflow.run, args=[[], 0], id="explicit--r1"
+        )
+
+
+@workflow.defn
 class CanParent:
     @workflow.run
     async def run(self) -> List[str]:
@@ -213,6 +239,8 @@ async def _env() -> AsyncIterator[Client]:
             CancelHopWorkflow,
             HandlerHopWorkflow,
             TypeSwitchWorkflow,
+            CanThenChildWorkflow,
+            BadChildIdWorkflow,
         ],
         activities=[],
     )
@@ -432,3 +460,39 @@ async def test_continue_as_new_to_different_workflow() -> None:
         assert result == ["switched"]
         hopped = client.get_workflow_handle("type-switch", run_id="type-switch--r1")
         assert (await hopped.describe()).workflow_type == "LoopingWorkflow"
+
+
+async def test_children_of_continued_runs() -> None:
+    """A child of a CAN-created run gets an auto id embedding the parent's
+    chain suffix; it must still be a *standalone* chain base: no false
+    continuation link, a real parent in describe, and its own CAN extends
+    its own chain (not the parent's)."""
+    async with _env() as client:
+        links, child_id = await client.execute_workflow(
+            CanThenChildWorkflow.run, False, id="can-host", task_queue=TASK_QUEUE
+        )
+        assert "--r1_" in child_id  # the colliding shape was exercised
+        # The child CANed once: run 0 has no continuation link, run 1 links
+        # to run 0 of the CHILD's chain (not the host's).
+        assert links == [None, child_id]
+        child_run0 = client.get_workflow_handle(child_id, run_id=child_id)
+        description = await child_run0.describe()
+        assert description.parent_id == "can-host--r1"
+        # The child's chain extended under its own id.
+        hopped = client.get_workflow_handle(child_id)
+        assert (await hopped.describe()).run_id == f"{child_id}--r1"
+
+
+async def test_explicit_child_id_with_separator_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit child ids obey the same `--r` reservation as client-side
+    starts (auto ids are exempt by construction)."""
+    monkeypatch.setenv("TEMPORAL_DBOS_FAIL_FAST", "1")
+    async with _env() as client:
+        handle = await client.start_workflow(
+            BadChildIdWorkflow.run, id="bad-child-id", task_queue=TASK_QUEUE
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await handle.result()
+        assert "--r" in str(exc_info.value.cause)

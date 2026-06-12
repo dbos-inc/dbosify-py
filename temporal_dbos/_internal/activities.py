@@ -106,6 +106,19 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             # start-to-close enforcement.
             task = asyncio.ensure_future(call_user_activity())
             poll = max(0.05, float(heartbeat_timeout) / 4)
+            try:
+                return await _watch(task, poll)
+            except asyncio.CancelledError:
+                # asyncio.wait does NOT cancel what it waits on: propagate
+                # explicitly so TRY_CANCEL / start-to-close actually stop an
+                # async activity function rather than orphaning it.
+                task.cancel()
+                raise
+
+        async def _watch(
+            task: "asyncio.Task[Dict[str, Any]]", poll: float
+        ) -> Dict[str, Any]:
+            assert heartbeat_timeout is not None
             while True:
                 done, _ = await asyncio.wait({task}, timeout=poll)
                 if done:
@@ -143,6 +156,9 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
                 "ended_at": time_mod.time(),
             }
         except (asyncio.TimeoutError, TimeoutError):
+            # Mark the context so a hung sync thread (which cancellation
+            # cannot interrupt) still unwinds at its next heartbeat.
+            ctx.cancelled.set()
             timeout_failure = exceptions.TimeoutError(
                 "activity Start-To-Close timeout",
                 type=exceptions.TimeoutType.START_TO_CLOSE,

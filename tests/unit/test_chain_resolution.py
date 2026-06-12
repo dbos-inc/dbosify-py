@@ -72,3 +72,20 @@ def test_tolerates_garbage_collected_old_runs() -> None:
     chain = FakeChain(10, deleted=[0, 1, 2, 3])
     resolved = _resolve(chain)
     assert resolved is not None and resolved[0] == 9
+
+
+@pytest.mark.parametrize(
+    "dbos_id,expected",
+    [
+        ("W", ("W", 0)),
+        ("W--r3", ("W", 3)),
+        # Auto child ids embed their parent RUN id: the suffix has an
+        # underscore, which int() would happily parse ("2_5" -> 25); the
+        # digit guard must treat these as standalone base ids.
+        ("W--r2_5", ("W--r2_5", 0)),
+        ("W--r2_5--r1", ("W--r2_5", 1)),
+        ("W--r2_5_3", ("W--r2_5_3", 0)),
+    ],
+)
+def test_parse_run(dbos_id: str, expected: "tuple[str, int]") -> None:
+    assert ids.parse_run(dbos_id) == expected

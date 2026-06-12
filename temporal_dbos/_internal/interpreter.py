@@ -1763,8 +1763,12 @@ class Interpreter(_Runtime):
     ) -> "ChildWorkflowHandle":
         self._assert_not_read_only("start a child workflow")
         seq = self._next_seq("child")
+        if child_id is not None:
+            # Explicit child ids obey the same reservation as client-side
+            # starts (auto ids are exempt: they embed this run's id, which
+            # may itself carry a chain suffix — parse_run handles those).
+            ids.validate_workflow_id(child_id)
         resolved_id = child_id or f"{self._workflow_id}_{seq}"
-        ids.validate_workflow_id(resolved_id)
         child = _ChildExec(
             seq=seq,
             type_name=type_name,
