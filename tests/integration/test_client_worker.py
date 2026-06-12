@@ -245,11 +245,13 @@ async def test_id_conflict_and_reuse() -> None:
         await handle.signal(AccumulatorWorkflow.finish)
         assert await handle.result() == 0
 
-        # Reuse after close: a new run with a chained run id.
+        # Reuse after close: a new run with a chained run id. The chain
+        # this start "begins" is its own run (temporalio semantics).
         second = await client.start_workflow(
             AccumulatorWorkflow.run, id="reuse-wf", task_queue=TASK_QUEUE
         )
         assert second.result_run_id == "reuse-wf--r1"
+        assert second.first_execution_run_id == "reuse-wf--r1"
         await second.signal(AccumulatorWorkflow.finish)
         assert await second.result() == 0
 
@@ -418,6 +420,14 @@ async def test_unfinished_handler_warnings() -> None:
             )
         )
         assert "stuck_update" in message and "stuck-upd" in message
+        # The abandoned update fails its caller promptly (Temporal fails
+        # accepted-but-incomplete updates at workflow close) rather than
+        # leaving it to time out.
+        with pytest.raises(WorkflowUpdateFailedError) as upd_err:
+            await handle.get_update_handle("stuck-upd").result()
+        cause = upd_err.value.__cause__
+        assert isinstance(cause, ApplicationError)
+        assert cause.type == "AcceptedUpdateCompletedWorkflow"
 
 
 async def test_query_reject_condition() -> None:

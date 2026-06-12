@@ -2,8 +2,9 @@
 message carryover, and child chains.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, List, Optional
+from typing import AsyncIterator, Awaitable, Callable, List, Optional
 
 import pytest
 from dbos import DBOSClient
@@ -111,6 +112,81 @@ class LinkParent:
 
 
 @workflow.defn
+class HopChild:
+    def __init__(self) -> None:
+        self.hop = False
+
+    @workflow.signal
+    def hop_now(self) -> None:
+        self.hop = True
+
+    @workflow.run
+    async def run(self, hopped: bool) -> str:
+        if not hopped:
+            await workflow.wait_condition(lambda: self.hop)
+            workflow.continue_as_new(True)
+        await workflow.wait_condition(lambda: False)  # park until swept
+        return "unreachable"
+
+
+@workflow.defn
+class SweepParent:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.start_child_workflow(HopChild.run, False, id="sweep-child")
+        await workflow.wait_condition(lambda: self.done)
+
+
+@workflow.defn
+class CancelHopWorkflow:
+    @workflow.run
+    async def run(self, hopped: bool) -> str:
+        if hopped:
+            await workflow.wait_condition(lambda: False)
+            return "unreachable"
+        try:
+            await workflow.wait_condition(lambda: False)
+        except asyncio.CancelledError:
+            # Cleanup-then-continue: the outstanding cancel request must
+            # carry over to the new run (Temporal semantics).
+            workflow.continue_as_new(True)
+        return "uncancelled"
+
+
+@workflow.defn
+class HandlerHopWorkflow:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.signal
+    def hop(self, payload: str) -> None:
+        workflow.continue_as_new(payload)
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.run
+    async def run(self, carried: str) -> str:
+        await workflow.wait_condition(lambda: self.done)
+        return carried
+
+
+@workflow.defn
+class TypeSwitchWorkflow:
+    @workflow.run
+    async def run(self) -> str:
+        workflow.continue_as_new(args=[["switched"], 0], workflow=LoopingWorkflow.run)
+
+
+@workflow.defn
 class CanParent:
     @workflow.run
     async def run(self) -> List[str]:
@@ -132,6 +208,11 @@ async def _env() -> AsyncIterator[Client]:
             LinkProbeWorkflow,
             LinkParent,
             UpdateCarryWorkflow,
+            HopChild,
+            SweepParent,
+            CancelHopWorkflow,
+            HandlerHopWorkflow,
+            TypeSwitchWorkflow,
         ],
         activities=[],
     )
@@ -248,3 +329,106 @@ async def test_update_forwarded_across_can() -> None:
         assert await dbos_client.get_event_async("upd-carry-wf", key, 0) is None
         await handle.signal(UpdateCarryWorkflow.finish)
         assert await handle.result() == 5
+
+
+async def _wait_for(
+    predicate: "Callable[[], Awaitable[bool]]", timeout: float = 20.0
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not await predicate():
+        assert asyncio.get_running_loop().time() < deadline, "condition not met"
+        await asyncio.sleep(0.1)
+
+
+async def _exists(client: Client, dbos_id: str) -> bool:
+    statuses = await client._dbos_client.list_workflows_async(workflow_ids=[dbos_id])
+    return bool(statuses)
+
+
+async def _status_of(client: Client, dbos_id: str) -> WorkflowExecutionStatus:
+    from temporal_dbos._internal import ids as _ids
+
+    handle = client.get_workflow_handle(_ids.parse_run(dbos_id)[0], run_id=dbos_id)
+    status = (await handle.describe()).status
+    assert status is not None
+    return status
+
+
+async def test_parent_close_policy_follows_child_chain() -> None:
+    """ParentClosePolicy applies to the child's *chain*: a child that
+    continued as new must have its current run terminated when the parent
+    closes, not its long-closed first run."""
+    async with _env() as client:
+        parent = await client.start_workflow(
+            SweepParent.run, id="sweep-parent", task_queue=TASK_QUEUE
+        )
+        child = client.get_workflow_handle("sweep-child")
+        await _wait_for(lambda: _exists(client, "sweep-child"))
+        await child.signal(HopChild.hop_now)
+        await _wait_for(lambda: _exists(client, "sweep-child--r1"))
+        await parent.signal(SweepParent.finish)
+        assert await parent.result() is None
+
+        async def child_terminated() -> bool:
+            current = await _status_of(client, "sweep-child--r1")
+            return current == WorkflowExecutionStatus.TERMINATED
+
+        await _wait_for(child_terminated)
+
+
+async def test_describe_parent_id_excludes_continuation_links() -> None:
+    """describe().parent_id is a real (cross-chain) parent only: a
+    continue-as-new run's same-chain DBOS link must not appear as a
+    parent."""
+    async with _env() as client:
+        await client.execute_workflow(
+            LinkProbeWorkflow.run, args=[[], 1], id="pid-wf", task_queue=TASK_QUEUE
+        )
+        hopped = client.get_workflow_handle("pid-wf", run_id="pid-wf--r1")
+        assert (await hopped.describe()).parent_id is None
+
+        await client.execute_workflow(
+            LinkParent.run, id="pid-parent", task_queue=TASK_QUEUE
+        )
+        child = client.get_workflow_handle("link-child")
+        assert (await child.describe()).parent_id == "pid-parent"
+
+
+async def test_cancel_carries_across_can() -> None:
+    """A cancel request outstanding when the run continues as new carries
+    over: the new run starts already-cancelled (Temporal semantics)."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            CancelHopWorkflow.run, False, id="cancel-hop", task_queue=TASK_QUEUE
+        )
+        await _wait_for(lambda: _exists(client, "cancel-hop"))
+        await handle.cancel()
+        with pytest.raises(Exception) as exc_info:
+            await handle.result()
+        assert "Workflow execution failed" in str(exc_info.value)
+        hopped = client.get_workflow_handle("cancel-hop", run_id="cancel-hop--r1")
+        assert (await hopped.describe()).status == WorkflowExecutionStatus.CANCELED
+
+
+async def test_continue_as_new_from_signal_handler() -> None:
+    """Signal handlers may initiate continue-as-new (as in Temporal); the
+    remaining inbox (here: finish) rides carryover to the new run."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            HandlerHopWorkflow.run, "start", id="handler-hop", task_queue=TASK_QUEUE
+        )
+        await handle.signal(HandlerHopWorkflow.hop, "hopped")
+        await handle.signal(HandlerHopWorkflow.finish)
+        assert await handle.result() == "hopped"
+
+
+async def test_continue_as_new_to_different_workflow() -> None:
+    """continue_as_new(workflow=...) switches the chain to another workflow
+    type, as in Temporal."""
+    async with _env() as client:
+        result = await client.execute_workflow(
+            TypeSwitchWorkflow.run, id="type-switch", task_queue=TASK_QUEUE
+        )
+        assert result == ["switched"]
+        hopped = client.get_workflow_handle("type-switch", run_id="type-switch--r1")
+        assert (await hopped.describe()).workflow_type == "LoopingWorkflow"

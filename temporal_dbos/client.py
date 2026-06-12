@@ -529,7 +529,9 @@ class Client:
             self,
             id,
             result_run_id=dbos_id,
-            first_execution_run_id=ids.run_dbos_id(id, 0),
+            # The run THIS start created (a reuse start "begins" at its own
+            # run), matching temporalio's response semantics.
+            first_execution_run_id=dbos_id,
         )
 
     async def execute_workflow(
@@ -773,20 +775,23 @@ class Client:
         )
         if not children:
             return
-        child_ids = [c["id"] for c in children]
-        statuses = await self._dbos_client.list_workflows_async(workflow_ids=child_ids)
-        open_ids = {s.workflow_id for s in statuses if _status.is_open(s.status)}
         for child in children:
             child_id, policy = child["id"], child.get("policy", 1)
-            if child_id not in open_ids or policy == 2:  # closed, or ABANDON
+            if policy == 2:  # ABANDON
                 continue
+            # The policy applies to the child's *chain* — a child that
+            # continued as new lives at a later run.
+            resolved = await self._current_run(child_id)
+            if resolved is None or not _status.is_open(resolved[1].status):
+                continue
+            current_id = resolved[1].workflow_id
             if policy == 3:  # REQUEST_CANCEL
                 await self._dbos_client.send_async(
-                    child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                    current_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
                 )
             else:  # TERMINATE / UNSPECIFIED
-                await self._dbos_client.cancel_workflow_async(child_id)
-                await self._apply_parent_close_policies(child_id, visited)
+                await self._dbos_client.cancel_workflow_async(current_id)
+                await self._apply_parent_close_policies(current_id, visited)
 
     async def _status_of(self, dbos_id: str) -> WorkflowStatus:
         statuses = await self._dbos_client.list_workflows_async(workflow_ids=[dbos_id])
@@ -1093,7 +1098,16 @@ class WorkflowHandle:
             status=_status.to_execution_status(status.status, error=status.error),
             start_time=_to_datetime(status.created_at),
             close_time=_to_datetime(status.completed_at),
-            parent_id=status.parent_workflow_id,
+            # A same-chain DBOS parent link is a continuation
+            # (continue-as-new), not a parent (Info.continued_run_id
+            # territory); only cross-chain links are real parents.
+            parent_id=(
+                status.parent_workflow_id
+                if status.parent_workflow_id is not None
+                and ids.parse_run(status.parent_workflow_id)[0]
+                != ids.parse_run(status.workflow_id)[0]
+                else None
+            ),
         )
 
     async def cancel(

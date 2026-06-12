@@ -518,7 +518,11 @@ Scheme (`_internal/ids.py`):
   (mirroring the cancellation marker; status maps to CONTINUED_AS_NEW).
   `handle.result(follow_runs=True)` follows markers; `follow_runs=False` raises
   `WorkflowContinuedAsNewError`; the child-result step follows chains so parents see the
-  final run's result. Client reply waits (update acceptance/result, query replies) walk
+  final run's result, and ParentClosePolicy sweeps resolve each child's *current* run (a
+  child that continued as new must be terminated/cancelled at its live run, not its
+  closed first run). Accepted updates abandoned at any terminal outcome get a failure
+  reply (`AcceptedUpdateCompletedWorkflow`, as in Temporal) instead of leaving callers to
+  time out. Client reply waits (update acceptance/result, query replies) walk
   the chain on a miss: a forwarded update/query is answered under the *new* run's id, not
   the one the client originally targeted (reply keys are globally unique, so a chain
   sweep is unambiguous). Handles from `start_workflow` are not run-bound (temporalio
