@@ -615,9 +615,13 @@ class Interpreter(_Runtime):
         anywhere between here and this run's completion replays into an
         idempotent re-attach, never a twin run.
         """
-        from dbos import SetWorkflowID
+        from contextlib import nullcontext
+        from typing import ContextManager
+
+        from dbos import SetWorkflowID, SetWorkflowTimeout
 
         from . import registry
+        from .payloads import serialize_retry_policy
 
         type_name = can._tdb_workflow or self._defn.name
         dispatch_fn = registry.dbos_workflow_for(type_name)
@@ -633,11 +637,25 @@ class Interpreter(_Runtime):
             if queue_name is not None
             else None
         )
-        # Run configuration (cron membership, retry policy, last-completion
-        # carry) follows the chain across a continue-as-new; the attempt
-        # counter resets (a CAN run is a fresh execution, as in Temporal).
-        payload = wrap_input(list(can._tdb_args), self._meta.carried_forward())
-        with SetWorkflowID(new_run_id):
+        # Run configuration (cron membership, retry policy, run timeout,
+        # last-completion carry) follows the chain across a continue-as-new;
+        # the attempt counter resets (a CAN run is a fresh execution, as in
+        # Temporal). continue_as_new's own run_timeout/retry_policy
+        # arguments override the carried values for the new run.
+        carried = self._meta.carried_forward()
+        if can._tdb_run_timeout is not None:
+            carried.run_timeout = can._tdb_run_timeout.total_seconds()
+        if can._tdb_retry_policy is not None:
+            carried.retry_policy = serialize_retry_policy(can._tdb_retry_policy)
+        payload = wrap_input(list(can._tdb_args), carried)
+        # Explicit per-run timeout, else DBOS propagates THIS run's absolute
+        # deadline to the next run (see dispatcher._enqueue_next_run).
+        timeout_ctx: ContextManager[Any] = (
+            SetWorkflowTimeout(carried.run_timeout)
+            if carried.run_timeout is not None
+            else nullcontext()
+        )
+        with SetWorkflowID(new_run_id), timeout_ctx:
             if queue is not None:
                 await queue.enqueue_async(dispatch_fn, payload)
             else:
@@ -1776,6 +1794,11 @@ class Interpreter(_Runtime):
                 else None
             ),
             run_id=self._workflow_id,
+            run_timeout=(
+                timedelta(seconds=self._meta.run_timeout)
+                if self._meta.run_timeout is not None
+                else None
+            ),
             start_time=datetime.fromtimestamp(self._start_time),
             task_queue="default",
             workflow_id=self._workflow_id,

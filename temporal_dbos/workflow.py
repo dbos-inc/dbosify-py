@@ -465,6 +465,7 @@ class Info:
     namespace: str = "default"
     retry_policy: Optional[RetryPolicy] = None
     run_id: str = ""
+    run_timeout: Optional[timedelta] = None
     start_time: datetime = datetime.fromtimestamp(0)
     task_queue: str = ""
     workflow_id: str = ""
@@ -1008,6 +1009,8 @@ class ContinueAsNewError(BaseException):
         self._tdb_args: Sequence[Any] = ()
         self._tdb_workflow: Optional[str] = None
         self._tdb_task_queue: Optional[str] = None
+        self._tdb_run_timeout: Optional[timedelta] = None
+        self._tdb_retry_policy: Optional[RetryPolicy] = None
 
 
 def continue_as_new(
@@ -1029,9 +1032,7 @@ def continue_as_new(
     raised :py:class:`ContinueAsNewError` must not be caught.
     """
     for key, value in {
-        "run_timeout": run_timeout,
         "task_timeout": task_timeout,
-        "retry_policy": retry_policy,
         "memo": memo,
         "search_attributes": search_attributes,
         "versioning_intent": versioning_intent,
@@ -1046,6 +1047,11 @@ def continue_as_new(
         _resolve_workflow_type(workflow) if workflow is not None else None
     )
     err._tdb_task_queue = task_queue
+    # Overrides for the new run; absent, the chain's carried values apply.
+    err._tdb_run_timeout = run_timeout
+    if retry_policy is not None:
+        retry_policy._validate()
+    err._tdb_retry_policy = retry_policy
     raise err
 
 

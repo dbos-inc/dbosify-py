@@ -84,15 +84,35 @@ after the close time, so a run that overruns an occurrence skips it
   also arguably more useful.
 - Cancellation between runs takes effect at the next fire: the cancel
   envelope waits in the delayed next run's inbox — there is no server to
-  cancel the waiting run in place. And a cron run that never parks (no
-  awaits) cannot observe a cooperative cancel mid-run: it completes, and
-  the pending cancel ends the chain at the hop instead — the final run
-  reads COMPLETED (Temporal's equivalent run also completes; its server
-  suppresses the continuation).
+  cancel the waiting run in place. The same applies to a retry attempt
+  waiting out its backoff (up to the policy's ``maximum_interval``), where
+  Temporal cancels the backing-off execution immediately. And a cron run
+  that never parks (no awaits) cannot observe a cooperative cancel
+  mid-run: it completes, and the pending cancel ends the chain at the hop
+  instead — the final run reads COMPLETED (Temporal's equivalent run also
+  completes; its server suppresses the continuation).
 - Cron expressions: 5-field, UTC by default, `CRON_TZ=`/`TZ=` prefixes
   honored — as in Temporal; 6-field (leading seconds) and 7-field
   (trailing year) forms are accepted as an extension where Temporal
   rejects them. The `@every` shorthand is not supported.
+
+### D20. Workflow-retry matching and carryover differ at the edges
+
+The retry decision mirrors Temporal's (`non_retryable` flag, type matching,
+backoff, attempt caps, cancelled/terminated failures never retried, timeout
+failures retried only for start-to-close/heartbeat types), with two edges:
+
+- `non_retryable_error_types` matches the failure ``type`` of application
+  errors — as in Temporal — but *falls back to the envelope failure class*
+  (``ActivityError``, ``ChildWorkflowError``, ...) for wrapper failures,
+  which Temporal treats as always retryable and never matches against the
+  list. A superset: listing those class names works here and does nothing
+  on a real Temporal server. Temporal's ``TemporalTimeout:StartToClose``
+  string convention in the list is not supported.
+- Inbox messages still unconsumed when a run fails (e.g. a signal racing
+  the close) carry over to the retry attempt, mirroring the
+  continue-as-new carryover; Temporal lets signals die with the failed
+  run. More generous, occasionally observable.
 
 ## Process and operations model
 

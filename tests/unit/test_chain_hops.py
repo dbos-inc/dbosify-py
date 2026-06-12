@@ -49,6 +49,7 @@ class TestInputEnvelope:
             cron="@hourly",
             attempt=7,
             retry_policy={"initial_interval": 1.0},
+            run_timeout=30.0,
             last_completion={"value": 41},
             last_failure={"cls": "ApplicationError", "message": "x"},
         )
@@ -56,8 +57,14 @@ class TestInputEnvelope:
         assert carried.attempt == 1
         assert carried.cron == meta.cron
         assert carried.retry_policy == meta.retry_policy
+        assert carried.run_timeout == meta.run_timeout
         assert carried.last_completion == meta.last_completion
         assert carried.last_failure == meta.last_failure
+
+    def test_run_timeout_rides_the_envelope(self) -> None:
+        args, meta = unwrap_input(wrap_input([], RunMeta(run_timeout=2.5)))
+        assert meta.run_timeout == 2.5
+        assert not meta.is_empty()
 
     def test_retry_policy_round_trip(self) -> None:
         policy = RetryPolicy(
@@ -163,3 +170,22 @@ class TestWorkflowRetryDelay:
             _workflow_retry_delay(self.POLICY, 1, _failure(next_retry_delay=42.5))
             == 42.5
         )
+
+    def test_cancelled_and_terminated_failures_never_retry(self) -> None:
+        # Temporal's isRetryable: cancellation/termination failures end the
+        # retry chain regardless of policy — including a CancelledError that
+        # reaches the failure path without an external cancel request.
+        for cls_name in ("CancelledError", "TerminatedError"):
+            failure = {"cls": cls_name, "message": "x"}
+            assert _workflow_retry_delay(self.POLICY, 1, failure) is None
+
+    def test_timeout_failures_retry_only_start_to_close_and_heartbeat(self) -> None:
+        # TimeoutType: 1=START_TO_CLOSE, 2=SCHEDULE_TO_START,
+        # 3=SCHEDULE_TO_CLOSE, 4=HEARTBEAT (Temporal retries only 1 and 4).
+        for timeout_type, expected in [(1, 1.0), (2, None), (3, None), (4, 1.0)]:
+            failure = {
+                "cls": "TimeoutError",
+                "message": "x",
+                "timeout_type": timeout_type,
+            }
+            assert _workflow_retry_delay(self.POLICY, 1, failure) == expected

@@ -76,12 +76,34 @@ class FailsWithType:
         raise ApplicationError("typed boom", type="DoNotRetry")
 
 
+@workflow.defn
+class FailsOnceThenReportsTimeout:
+    @workflow.run
+    async def run(self) -> Dict[str, Any]:
+        info = workflow.info()
+        if info.attempt == 1:
+            raise ApplicationError("attempt 1 fails")
+        return {
+            "attempt": info.attempt,
+            "run_timeout_sec": (
+                info.run_timeout.total_seconds()
+                if info.run_timeout is not None
+                else None
+            ),
+        }
+
+
 @asynccontextmanager
 async def _env() -> AsyncIterator[Client]:
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[SucceedsOnAttempt, AlwaysFails, FailsWithType],
+        workflows=[
+            SucceedsOnAttempt,
+            AlwaysFails,
+            FailsWithType,
+            FailsOnceThenReportsTimeout,
+        ],
         activities=[],
     )
     async with worker:
@@ -181,6 +203,28 @@ async def test_non_retryable_error_stops_immediately() -> None:
                 retry_policy=FAST_RETRY,
             )
         assert await _chain_length(client, "non-retryable") == 1
+
+
+async def test_run_timeout_is_per_attempt() -> None:
+    """A retry attempt gets a FRESH run_timeout, assigned when it dequeues.
+
+    Regression: without explicit re-application on the hop, DBOS propagates
+    the failed run's *absolute* deadline to the runs it enqueues — here the
+    2.5s backoff exceeds the 2s run_timeout, so attempt 2 would be born
+    already expired and natively killed at dequeue (surfacing as
+    TERMINATED). Temporal applies run_timeout per run.
+    """
+    async with _env() as client:
+        result = await client.execute_workflow(
+            FailsOnceThenReportsTimeout.run,
+            id="per-attempt-timeout",
+            task_queue=TASK_QUEUE,
+            run_timeout=timedelta(seconds=2),
+            retry_policy=RetryPolicy(
+                initial_interval=timedelta(seconds=2.5), maximum_attempts=3
+            ),
+        )
+        assert result == {"attempt": 2, "run_timeout_sec": 2.0}
 
 
 async def test_non_retryable_error_types() -> None:

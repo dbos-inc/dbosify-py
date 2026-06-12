@@ -92,8 +92,9 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 10 | Workflow time derives from checkpointed participant clocks: monotonic, but client clock skew can step it forward. |
 | 11 | `@workflow.query` handlers must be synchronous (temporalio deprecates async ones; we reject them). |
 | 12 | (Temporary, until the Phase 3 data-conversion pipeline) Payloads are serialized with pickle, not JSON: exact objects round-trip even without type hints, where temporalio's default converter would return plain dicts. Checkpoints written under pickle will not survive the switch. |
-| 13 | Cron workflows are run chains with per-run results: `result()` on a successful cron run returns that run's result (temporalio's would follow the chain forever); cancellation between runs takes effect at the next fire; 6/7-field cron expressions are accepted as an extension. |
-| 14 | (Temporary) Workflow retry policies trigger on workflow *failures*; run-timeout-driven retries land together with the run-timeout TIMED_OUT status marker. |
+| 13 | Cron workflows are run chains with per-run results: `result()` on a successful cron run returns that run's result (temporalio's would follow the chain forever); cancellation between runs — or during a retry attempt's backoff — takes effect at the next fire; 6/7-field cron expressions are accepted as an extension. |
+| 14 | (Temporary) Workflow retry policies trigger on workflow *failures*; run-timeout-driven retries and `execution_timeout` enforcement (the whole-chain time bound, which also caps retry chains) land together with the TIMED_OUT status-marker work. Until then an unlimited retry policy retries without a time bound. |
+| 15 | Workflow-retry edges: `non_retryable_error_types` additionally matches envelope failure classes (a superset of Temporal's application-type-only matching), and unconsumed signals carry over to the next retry attempt instead of dying with the failed run. |
 
 ## Development
 

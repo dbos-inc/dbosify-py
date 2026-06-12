@@ -30,7 +30,13 @@ from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Sequence, Type, Union
 
-from dbos import DBOS, SetEnqueueOptions, SetWorkflowID, WorkflowHandle
+from dbos import (
+    DBOS,
+    SetEnqueueOptions,
+    SetWorkflowID,
+    SetWorkflowTimeout,
+    WorkflowHandle,
+)
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
 
 from .. import exceptions
@@ -272,6 +278,21 @@ def _workflow_retry_delay(
     the schedule_to_close bound: there is no overall workflow-retry deadline
     here (execution_timeout enforcement is a separate, unimplemented knob).
     """
+    cls_name = failure["cls"]
+    if cls_name in ("CancelledError", "TerminatedError"):
+        # Never retried, regardless of policy (Temporal's isRetryable):
+        # this covers a cancellation outcome nobody requested externally —
+        # e.g. user code cancelling its own primary task — which reaches
+        # here classified as a plain workflow failure. (A cron chain still
+        # continues past such a failure, as Temporal's cron does; only
+        # *requested* cancellation ends the chain.)
+        return None
+    if cls_name == "TimeoutError" and failure.get("timeout_type") not in (
+        int(exceptions.TimeoutType.START_TO_CLOSE),
+        int(exceptions.TimeoutType.HEARTBEAT),
+    ):
+        # Temporal retries only start-to-close and heartbeat timeouts.
+        return None
     if failure.get("non_retryable"):
         return None
     failure_type = failure.get("type") or failure["cls"]
@@ -316,7 +337,19 @@ async def _enqueue_next_run(
         if delay_seconds > 0
         else nullcontext()
     )
-    with SetWorkflowID(new_run_id), delay_ctx:
+    # Re-apply the per-run timeout explicitly: an in-workflow start with no
+    # explicit timeout inherits this (closing) run's *absolute* deadline
+    # (dbos._core._get_timeout_deadline), which would let a backed-off
+    # attempt be born already expired. An explicit timeout on an enqueued
+    # workflow is converted to a deadline at dequeue — Temporal's per-run
+    # semantics. (Runs whose start predates the meta-envelope still inherit;
+    # acceptable for pre-envelope checkpoints.)
+    timeout_ctx = (
+        SetWorkflowTimeout(meta.run_timeout)
+        if meta.run_timeout is not None
+        else nullcontext()
+    )
+    with SetWorkflowID(new_run_id), timeout_ctx, delay_ctx:
         if queue is not None:
             await queue.enqueue_async(dispatch_fn, payload)
         else:

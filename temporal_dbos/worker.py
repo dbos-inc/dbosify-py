@@ -147,11 +147,27 @@ class Worker:
         finally:
             self._shutdown_event = None
             self._finished = True
-            DBOS.destroy(
-                workflow_completion_timeout_sec=int(
-                    self._graceful_shutdown_timeout.total_seconds()
+            # destroy() must not run ON the loop DBOS adopted: when any
+            # workflow-timeout task is still pending (every run_timeout
+            # workflow parks one until its deadline), destroy submits a
+            # cancellation coroutine to the main loop and blocks on its
+            # result — a self-deadlock if called from that loop. Run it on
+            # a dedicated thread so the loop stays free to execute the
+            # cancellation. A fresh single-use thread, not asyncio.to_thread:
+            # the loop's default executor is DBOS's own pool, which destroy
+            # shuts down. (Upstream-worthy: DBOS.destroy could detect it is
+            # being called from its adopted main loop.)
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="tdb-worker-shutdown"
+            ) as shutdown_pool:
+                await loop.run_in_executor(
+                    shutdown_pool,
+                    lambda: DBOS.destroy(
+                        workflow_completion_timeout_sec=int(
+                            self._graceful_shutdown_timeout.total_seconds()
+                        )
+                    ),
                 )
-            )
             if original_executor is None or getattr(
                 original_executor, "_shutdown", False
             ):

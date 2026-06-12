@@ -547,9 +547,16 @@ Scheme (`_internal/ids.py`):
   The failed run's failure envelope records `new_run_id`, so
   `result(follow_runs=True)` follows retries exactly as temporalio follows
   `new_execution_run_id` on a failure event; the next attempt sees the failure via
-  `workflow.get_last_failure()`. Retries trigger on workflow *failures*; run-timeout
+  `workflow.get_last_failure()`. Cancelled/terminated-classified failures are never
+  retried, and timeout failures retry only for start-to-close/heartbeat types
+  (Temporal's isRetryable). Retries trigger on workflow *failures*; run-timeout
   retries land with the TIMED_OUT marker work. A cancel requested around the close
-  suppresses further attempts.
+  suppresses further attempts. `run_timeout` is carried in the meta-envelope and
+  re-applied per successor run (an explicit timeout on an enqueued workflow gets its
+  deadline at dequeue) — without that, DBOS propagates the closing run's *absolute*
+  deadline to in-workflow-started children, and a backed-off attempt could be born
+  expired. The same carry applies across cron hops and continue-as-new (whose own
+  run_timeout/retry_policy arguments override the carried values).
 - **Cron (done)** (`start_workflow(cron_schedule=...)`): implemented as **delayed-enqueue
   chain hops**, not DBOS schedule rows (revising the original sketch — the
   continue-as-new chain machinery made this strictly simpler and more faithful): the

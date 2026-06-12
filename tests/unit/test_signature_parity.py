@@ -83,7 +83,6 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "priority",
         "raw_memo",
         "root",
-        "run_timeout",
         "search_attributes",
         "task_timeout",
         "typed_search_attributes",

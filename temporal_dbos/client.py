@@ -603,6 +603,11 @@ class Client:
         if retry_policy is not None:
             retry_policy._validate()
             meta.retry_policy = serialize_retry_policy(retry_policy)
+        if run_timeout is not None:
+            # Carried so chain successors (retries, cron, continue-as-new)
+            # each get a fresh per-run timeout — without it, DBOS propagates
+            # the closing run's *absolute* deadline to the runs it enqueues.
+            meta.run_timeout = run_timeout.total_seconds()
         if cron_schedule:
             # Validated up front so a bad expression fails the start, not
             # the first chain hop. The first run is created immediately but

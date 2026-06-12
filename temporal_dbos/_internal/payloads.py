@@ -17,6 +17,10 @@ bare args list, so all pre-envelope checkpoints stay readable. Meta keys:
   ``cron``            cron expression — this run is part of a cron chain
   ``attempt``         workflow-retry attempt, 1-based (absent = 1)
   ``retry_policy``    serialized workflow RetryPolicy (see below)
+  ``run_timeout``     per-run timeout in seconds, re-applied to every chain
+                      successor (DBOS would otherwise propagate the closing
+                      run's *absolute* deadline to in-workflow-started
+                      children — see dispatcher._enqueue_next_run)
   ``last_completion`` ``{"value": ...}`` from the chain's last successful
                       run, or None — present-ness distinguishes "no previous
                       completion" from "the result was None", as in Temporal
@@ -44,6 +48,7 @@ class RunMeta:
     cron: Optional[str] = None
     attempt: int = 1
     retry_policy: Optional[Dict[str, Any]] = None
+    run_timeout: Optional[float] = None
     last_completion: Optional[Dict[str, Any]] = None
     last_failure: Optional[FailureEnvelope] = None
 
@@ -52,6 +57,7 @@ class RunMeta:
             self.cron is None
             and self.attempt == 1
             and self.retry_policy is None
+            and self.run_timeout is None
             and self.last_completion is None
             and self.last_failure is None
         )
@@ -63,6 +69,7 @@ class RunMeta:
             cron=self.cron,
             attempt=1,
             retry_policy=self.retry_policy,
+            run_timeout=self.run_timeout,
             last_completion=self.last_completion,
             last_failure=self.last_failure,
         )
@@ -80,6 +87,7 @@ def wrap_input(args: Sequence[Any], meta: Optional[RunMeta] = None) -> Any:
             "cron": meta.cron,
             "attempt": meta.attempt,
             "retry_policy": meta.retry_policy,
+            "run_timeout": meta.run_timeout,
             "last_completion": meta.last_completion,
             "last_failure": meta.last_failure,
         },
@@ -93,6 +101,7 @@ def unwrap_input(payload: Any) -> Tuple[List[Any], RunMeta]:
             cron=raw.get("cron"),
             attempt=int(raw.get("attempt", 1)),
             retry_policy=raw.get("retry_policy"),
+            run_timeout=raw.get("run_timeout"),
             last_completion=raw.get("last_completion"),
             last_failure=raw.get("last_failure"),
         )
