@@ -13,6 +13,7 @@ external completion via ``client.get_async_activity_handle``.
 """
 
 import inspect
+import json
 import logging
 import threading
 import time as time_mod
@@ -224,9 +225,11 @@ def _make_info(meta: dict[str, Any]) -> Info:
     task_token = b""
     if seq is not None:
         heartbeat_details = tuple(_heartbeat_store.get((run_id, int(seq)), ()))
-        # Token format: the seq rides after the last "::" (workflow ids may
-        # themselves contain almost anything).
-        task_token = f"{run_id}::{int(seq)}".encode()
+        # An opaque structured token (workflow ids and activity ids may
+        # contain almost anything, so no string separator is safe).
+        task_token = json.dumps(
+            {"run": run_id, "aid": str(meta.get("activity_id", ""))}
+        ).encode()
     return Info(
         activity_id=str(meta.get("activity_id", "")),
         activity_type=str(meta.get("activity_type", "")),

@@ -8,15 +8,25 @@ import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, AsyncIterator, List, Sequence
+from typing import Any, AsyncIterator, List, Optional, Sequence
 
 import pytest
 from dbos import DBOSClient
 
 from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client, WorkflowFailureError
+from temporal_dbos.client import (
+    AsyncActivityCancelledError,
+    Client,
+    WorkflowFailureError,
+)
 from temporal_dbos.common import RetryPolicy
-from temporal_dbos.exceptions import ActivityError, ApplicationError, CancelledError
+from temporal_dbos.exceptions import (
+    ActivityError,
+    ApplicationError,
+    CancelledError,
+    TimeoutError,
+    TimeoutType,
+)
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
@@ -162,6 +172,31 @@ class AsyncRetryWorkflow:
 
 
 @workflow.defn
+class AsyncTimeoutWorkflow:
+    @workflow.run
+    async def run(self, s2c: float, hb: Optional[float]) -> str:
+        result: str = await workflow.execute_activity(
+            complete_externally,
+            start_to_close_timeout=timedelta(seconds=s2c),
+            heartbeat_timeout=timedelta(seconds=hb) if hb else None,
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+        return result
+
+
+@workflow.defn
+class AsyncCustomIdWorkflow:
+    @workflow.run
+    async def run(self) -> str:
+        result: str = await workflow.execute_activity(
+            complete_externally,
+            start_to_close_timeout=timedelta(seconds=60),
+            activity_id="my-custom-act",
+        )
+        return result
+
+
+@workflow.defn
 class AsyncCompleteWorkflow:
     @workflow.run
     async def run(self, catch_cancel: bool) -> Any:
@@ -187,6 +222,8 @@ async def _env() -> AsyncIterator[Client]:
             AsyncCompleteWorkflow,
             HeartbeatTimeoutWorkflow,
             AsyncRetryWorkflow,
+            AsyncTimeoutWorkflow,
+            AsyncCustomIdWorkflow,
         ],
         activities=[
             heartbeating_forever,
@@ -406,3 +443,92 @@ async def test_async_activity_fail_retries() -> None:
             "second-attempt"
         )
         assert await handle.result() == "second-attempt"
+
+
+def _timeout_cause(exc_info: Any) -> TimeoutError:
+    cause = exc_info.value.cause
+    assert isinstance(cause, ActivityError)
+    assert isinstance(cause.__cause__, TimeoutError)
+    return cause.__cause__
+
+
+async def test_parked_async_activity_start_to_close() -> None:
+    """start-to-close keeps applying while an activity is parked awaiting
+    external completion (Temporal semantics)."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AsyncTimeoutWorkflow.run,
+            args=[0.8, None],
+            id="parked-s2c",
+            task_queue=TASK_QUEUE,
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await handle.result()
+        assert _timeout_cause(exc_info).type == TimeoutType.START_TO_CLOSE
+
+
+async def test_parked_async_activity_heartbeat_timeout() -> None:
+    """A parked async activity whose completer never heartbeats times out
+    with TimeoutType.HEARTBEAT; one that heartbeats inside the window
+    survives and completes."""
+    async with _env() as client:
+        silent = await client.start_workflow(
+            AsyncTimeoutWorkflow.run,
+            args=[30.0, 0.5],
+            id="parked-hb-silent",
+            task_queue=TASK_QUEUE,
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await silent.result()
+        assert _timeout_cause(exc_info).type == TimeoutType.HEARTBEAT
+
+        TOKENS.clear()
+        alive = await client.start_workflow(
+            AsyncTimeoutWorkflow.run,
+            args=[30.0, 0.8],
+            id="parked-hb-alive",
+            task_queue=TASK_QUEUE,
+        )
+        async_handle = client.get_async_activity_handle(task_token=await _token())
+        for _ in range(4):
+            await async_handle.heartbeat("alive")
+            await asyncio.sleep(0.3)
+        await async_handle.complete("kept-alive")
+        assert await alive.result() == "kept-alive"
+
+
+async def test_completer_learns_of_cancellation() -> None:
+    """When the workflow side cancels a parked async activity, the
+    completer's next heartbeat/complete raises AsyncActivityCancelledError
+    instead of delivering into the void."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AsyncCompleteWorkflow.run, False, id="async-gone", task_queue=TASK_QUEUE
+        )
+        async_handle = client.get_async_activity_handle(task_token=await _token())
+        await handle.cancel()
+        deadline = asyncio.get_running_loop().time() + 10
+        while True:
+            try:
+                await async_handle.heartbeat("still here?")
+            except AsyncActivityCancelledError:
+                break
+            assert asyncio.get_running_loop().time() < deadline, "never marked gone"
+            await asyncio.sleep(0.1)
+        with pytest.raises(AsyncActivityCancelledError):
+            await async_handle.complete("too late")
+
+
+async def test_async_activity_reference_addressing() -> None:
+    """get_async_activity_handle by workflow_id + activity_id (no token, no
+    run_id: the chain's current run is resolved)."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AsyncCustomIdWorkflow.run, id="async-by-ref", task_queue=TASK_QUEUE
+        )
+        await _token()  # wait until the activity has parked
+        async_handle = client.get_async_activity_handle(
+            workflow_id="async-by-ref", activity_id="my-custom-act"
+        )
+        await async_handle.complete("by-reference")
+        assert await handle.result() == "by-reference"

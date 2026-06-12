@@ -398,6 +398,10 @@ class _ActivityExec:
     cancel_requested: bool = False  # WAIT_CANCELLATION_COMPLETED in flight
     async_pending: bool = False  # raise_complete_async(): awaiting external
     heartbeat_timeout: Optional[float] = None
+    # Whether a completer heartbeat arrived within the current watch window
+    # (the parked heartbeat-timeout check counts envelopes between timer
+    # fires — deterministic, no clock reads).
+    async_hb_seen: bool = False
 
 
 @dataclass
@@ -562,6 +566,12 @@ class Interpreter(_Runtime):
                 await self._forward_inbox_to(self._can_new_run_id)
             if self._outcome is not None and self._outcome[0] != "task_failure":
                 await self._fail_abandoned_updates()
+                for exec_state in self._pending_activities.values():
+                    if exec_state.async_pending:
+                        await DBOS.set_event_async(
+                            inbox.async_activity_gone_key(exec_state.activity_id),
+                            True,
+                        )
 
         self._warn_if_unfinished_handlers()
         kind, value = self._outcome
@@ -854,7 +864,11 @@ class Interpreter(_Runtime):
         exec_state = self._pending_activities.get(seq)
         if exec_state is None:
             return
-        if exec_state.cancellation_type == 1:  # WAIT_CANCELLATION_COMPLETED
+        if exec_state.cancellation_type == 1 and not exec_state.async_pending:
+            # WAIT_CANCELLATION_COMPLETED: confirmed by the in-flight
+            # attempt's unwind. (A parked async activity has no attempt to
+            # confirm; it degrades to TRY_CANCEL below and the completer
+            # learns via the gone-event.)
             exec_state.cancel_requested = True
             activity_api._request_cancel((self._workflow_id, seq))
             return
@@ -998,8 +1012,16 @@ class Interpreter(_Runtime):
                 # observes cancellation at its next heartbeat.
                 activity_api._request_cancel((self._workflow_id, seq))
             activity_api._forget_attempt_state((self._workflow_id, seq))
+            if exec_state.async_pending:
+                # Tell the external completer (checkpointed event): its next
+                # heartbeat/complete raises instead of vanishing.
+                await DBOS.set_event_async(
+                    inbox.async_activity_gone_key(exec_state.activity_id), True
+                )
             for waiter in list(self._waiters):
-                if waiter.kind == "activity" and waiter.seq == seq:
+                if waiter.kind in ("activity", "act_s2c", "act_hb") and (
+                    waiter.seq == seq
+                ):
                     self._waiters.remove(waiter)
                     if exec_state.cancellation_type == 2:  # ABANDON
                         self._abandoned_tasks.add(waiter.task)
@@ -1080,6 +1102,12 @@ class Interpreter(_Runtime):
                 self._deliver_timer(waiter.seq)
             elif waiter.kind == "activity":
                 self._deliver_activity_event(waiter)
+            elif waiter.kind == "act_s2c":
+                self._async_parked_timeout(
+                    waiter.seq, exceptions.TimeoutType.START_TO_CLOSE
+                )
+            elif waiter.kind == "act_hb":
+                self._async_heartbeat_check(waiter.seq)
             elif waiter.kind == "child":
                 self._deliver_child_event(waiter)
 
@@ -1107,7 +1135,24 @@ class Interpreter(_Runtime):
             # raise_complete_async(): the function returned but the activity
             # stays pending; an activity_result inbox envelope resolves it.
             # The marker is checkpointed, so recovery re-parks identically.
+            # Timeouts keep applying while parked (Temporal semantics),
+            # via durable-sleep waiters: a one-shot start-to-close (measured
+            # from the park, slightly more generous than Temporal's
+            # attempt-start) and a re-arming heartbeat-window check.
             exec_state.async_pending = True
+            if exec_state.start_to_close is not None:
+                self._launch_waiter(
+                    "act_s2c",
+                    exec_state.seq,
+                    DBOS.sleep_async(exec_state.start_to_close),
+                )
+            if exec_state.heartbeat_timeout is not None:
+                exec_state.async_hb_seen = False
+                self._launch_waiter(
+                    "act_hb",
+                    exec_state.seq,
+                    DBOS.sleep_async(exec_state.heartbeat_timeout),
+                )
             return
         if envelope["ok"]:
             del self._pending_activities[waiter.seq]
@@ -1288,21 +1333,29 @@ class Interpreter(_Runtime):
                 "Workflow %s: unknown inbox envelope kind %r", self._workflow_id, kind
             )
 
+    def _async_pending_by_id(self, activity_id: str) -> Optional[_ActivityExec]:
+        for exec_state in self._pending_activities.values():
+            if exec_state.activity_id == activity_id and exec_state.async_pending:
+                return exec_state
+        return None
+
     def _apply_activity_result(self, envelope: inbox.Envelope) -> None:
         """External completion of an async activity
         (client.get_async_activity_handle). Checkpointed inbox delivery, so
         the resolution replays identically; failures consult the retry
         policy (Temporal semantics — the function re-runs)."""
-        seq = int(envelope.get("seq", -1))
-        exec_state = self._pending_activities.get(seq)
-        if exec_state is None or not exec_state.async_pending:
+        activity_id = str(envelope.get("activity_id", ""))
+        exec_state = self._async_pending_by_id(activity_id)
+        if exec_state is None:
             logger.debug(
                 "Workflow %s: dropping activity_result for unknown/non-async "
-                "activity seq %s",
+                "activity id %s",
                 self._workflow_id,
-                seq,
+                activity_id,
             )
             return
+        seq = exec_state.seq
+        self._retire_parked_timers(seq)
         if envelope.get("cancelled"):
             del self._pending_activities[seq]
             activity_api._forget_attempt_state((self._workflow_id, seq))
@@ -1315,35 +1368,88 @@ class Interpreter(_Runtime):
             # An external fail goes through the retry policy, like Temporal:
             # the next attempt re-runs the activity function (which may park
             # async again, yielding a fresh wait under the same token).
-            failure: FailureEnvelope = envelope["failure"]
-            exec_state.async_pending = False
-            exec_state.last_failure = failure
-            retry_delay, retry_state = self._retry_decision(exec_state, failure)
-            if retry_delay is not None:
-                exec_state.in_backoff = True
-                self._launch_waiter("activity", seq, DBOS.sleep_async(retry_delay))
-                return
-            del self._pending_activities[seq]
-            activity_api._forget_attempt_state((self._workflow_id, seq))
-            error = exceptions.ActivityError(
-                "Activity task failed",
-                scheduled_event_id=0,
-                started_event_id=0,
-                identity="",
-                activity_type=exec_state.activity_name,
-                activity_id=exec_state.activity_id,
-                retry_state=retry_state,
-            )
-            error.__cause__ = deserialize_failure(failure)
-            exec_state.future.set_exception(error)
+            self._fail_async_attempt(exec_state, envelope["failure"])
+
+    def _fail_async_attempt(
+        self, exec_state: _ActivityExec, failure: FailureEnvelope
+    ) -> None:
+        """Shared failure path for parked async activities (external fail,
+        parked start-to-close, parked heartbeat timeout): retry per policy
+        (re-running the function) or resolve with ActivityError."""
+        seq = exec_state.seq
+        exec_state.async_pending = False
+        exec_state.last_failure = failure
+        retry_delay, retry_state = self._retry_decision(exec_state, failure)
+        if retry_delay is not None:
+            exec_state.in_backoff = True
+            self._launch_waiter("activity", seq, DBOS.sleep_async(retry_delay))
+            return
+        del self._pending_activities[seq]
+        activity_api._forget_attempt_state((self._workflow_id, seq))
+        error = exceptions.ActivityError(
+            "Activity task failed",
+            scheduled_event_id=0,
+            started_event_id=0,
+            identity="",
+            activity_type=exec_state.activity_name,
+            activity_id=exec_state.activity_id,
+            retry_state=retry_state,
+        )
+        error.__cause__ = deserialize_failure(failure)
+        exec_state.future.set_exception(error)
+
+    def _retire_parked_timers(self, seq: int) -> None:
+        for waiter in list(self._waiters):
+            if waiter.kind in ("act_s2c", "act_hb") and waiter.seq == seq:
+                self._waiters.remove(waiter)
+                waiter.task.cancel()
+                self._abandoned_tasks.add(waiter.task)
+                waiter.task.add_done_callback(self._discard_abandoned)
+
+    def _async_parked_timeout(
+        self, seq: int, timeout_type: "exceptions.TimeoutType"
+    ) -> None:
+        exec_state = self._pending_activities.get(seq)
+        if exec_state is None or not exec_state.async_pending:
+            return  # resolved (or retired) before the timer fired
+        self._retire_parked_timers(seq)
+        timeout_failure = exceptions.TimeoutError(
+            (
+                "activity Start-To-Close timeout"
+                if timeout_type == exceptions.TimeoutType.START_TO_CLOSE
+                else "activity Heartbeat timeout"
+            ),
+            type=timeout_type,
+            last_heartbeat_details=[],
+        )
+        from .payloads import serialize_failure
+
+        self._fail_async_attempt(exec_state, serialize_failure(timeout_failure))
+
+    def _async_heartbeat_check(self, seq: int) -> None:
+        exec_state = self._pending_activities.get(seq)
+        if exec_state is None or not exec_state.async_pending:
+            return
+        if not exec_state.async_hb_seen:
+            self._async_parked_timeout(seq, exceptions.TimeoutType.HEARTBEAT)
+            return
+        # A heartbeat arrived within the window: re-arm.
+        exec_state.async_hb_seen = False
+        assert exec_state.heartbeat_timeout is not None
+        self._launch_waiter(
+            "act_hb", seq, DBOS.sleep_async(exec_state.heartbeat_timeout)
+        )
 
     def _apply_activity_heartbeat(self, envelope: inbox.Envelope) -> None:
         """Heartbeat for an async-pending activity from the external
-        completer; details surface on the next retry attempt (in-process,
-        like in-activity heartbeats)."""
-        seq = int(envelope.get("seq", -1))
-        if seq in self._pending_activities:
-            activity_api._heartbeat_store[(self._workflow_id, seq)] = list(
+        completer; refreshes the parked heartbeat-timeout window, and the
+        details surface on the next retry attempt (in-process, like
+        in-activity heartbeats)."""
+        activity_id = str(envelope.get("activity_id", ""))
+        exec_state = self._async_pending_by_id(activity_id)
+        if exec_state is not None:
+            exec_state.async_hb_seen = True
+            activity_api._heartbeat_store[(self._workflow_id, exec_state.seq)] = list(
                 envelope.get("details", [])
             )
 

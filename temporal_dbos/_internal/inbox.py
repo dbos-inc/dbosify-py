@@ -58,7 +58,7 @@ def cancel_envelope(reason: str = "") -> Envelope:
 
 
 def activity_result_envelope(
-    seq: int,
+    activity_id: str,
     *,
     result: Any = None,
     failure: Any = None,
@@ -69,7 +69,7 @@ def activity_result_envelope(
         "kind": "activity_result",
         "name": "",
         "args": [],
-        "seq": seq,
+        "activity_id": activity_id,
         "ok": failure is None and not cancelled,
         "result": result,
         "failure": failure,
@@ -78,15 +78,22 @@ def activity_result_envelope(
     }
 
 
-def activity_heartbeat_envelope(seq: int, details: Sequence[Any]) -> Envelope:
+def activity_heartbeat_envelope(activity_id: str, details: Sequence[Any]) -> Envelope:
     return {
         "kind": "activity_heartbeat",
         "name": "",
         "args": [],
-        "seq": seq,
+        "activity_id": activity_id,
         "details": list(details),
         "sent_at": time.time(),
     }
+
+
+def async_activity_gone_key(activity_id: str) -> str:
+    """Event set when a parked async activity will never accept its
+    completion (cancelled, or its run closed): completers poll it so their
+    heartbeats/completions can raise instead of going into the void."""
+    return f"__tdb_act_{activity_id}_gone"
 
 
 def query_envelope(name: str, args: Sequence[Any], request_id: str) -> Envelope:
