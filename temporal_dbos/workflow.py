@@ -450,12 +450,15 @@ class Info:
     """
 
     attempt: int
-    namespace: str
-    run_id: str
-    start_time: datetime
-    task_queue: str
-    workflow_id: str
-    workflow_type: str
+    # The previous run of this chain when this run was created by a
+    # continuation (continue-as-new; later also retries/cron), else None.
+    continued_run_id: Optional[str] = None
+    namespace: str = "default"
+    run_id: str = ""
+    start_time: datetime = datetime.fromtimestamp(0)
+    task_queue: str = ""
+    workflow_id: str = ""
+    workflow_type: str = ""
 
     def get_current_history_length(self) -> int:
         """Approximated as the run's checkpoint cursor (claimed DBOS

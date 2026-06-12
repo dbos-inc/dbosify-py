@@ -457,6 +457,7 @@ class Interpreter(_Runtime):
         self._own_queue_resolved = False
         self._replay_horizon = 0
         self._can_new_run_id: Optional[str] = None
+        self._continued_from: Optional[str] = None
         self._random = Random(0)
         self._workflow_id = ""
         self._start_time = 0.0
@@ -485,6 +486,23 @@ class Interpreter(_Runtime):
             None, DBOS.list_workflow_steps, self._workflow_id
         )
         self._replay_horizon = max((step["function_id"] for step in steps), default=0)
+
+        # continued_run_id: DBOS threads parent_workflow_id automatically for
+        # in-workflow starts, and our continue-as-new enqueue runs inside the
+        # closing run — so a parent link *within the same chain* is exactly a
+        # continuation link (a real parent points at a different chain base;
+        # client-side reuse starts carry no link). Immutable for the run, so
+        # a live read is replay-safe (executor thread: in-context the call
+        # would be checkpointed, which is unnecessary here).
+        status = await asyncio.get_running_loop().run_in_executor(
+            None, DBOS.get_workflow_status, self._workflow_id
+        )
+        parent = status.parent_workflow_id if status else None
+        if (
+            parent is not None
+            and ids.parse_run(parent)[0] == ids.parse_run(self._workflow_id)[0]
+        ):
+            self._continued_from = parent
 
         init = await _workflow_init_step()
         self._start_time = float(init["start_time"])
@@ -1443,6 +1461,7 @@ class Interpreter(_Runtime):
     def runtime_info(self) -> Info:
         return Info(
             attempt=1,
+            continued_run_id=self._continued_from,
             namespace="default",
             run_id=self._workflow_id,
             start_time=datetime.fromtimestamp(self._start_time),

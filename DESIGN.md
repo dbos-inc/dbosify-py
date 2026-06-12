@@ -515,8 +515,10 @@ Scheme (`_internal/ids.py`):
   `WorkflowContinuedAsNewError`; the child-result step follows chains so parents see the
   final run's result. `is_continue_as_new_suggested()` is a threshold on the checkpoint
   cursor (`TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD`, default 10000, mirroring Temporal's
-  ~10k-events scale). `workflow.info().continued_run_id` is still pending (needs start
-  metadata to distinguish CAN links from reuse links).
+  ~10k-events scale). `workflow.info().continued_run_id` is the run's DBOS parent link
+  when it points within the same chain (DBOS threads `parent_workflow_id` for in-workflow
+  starts, which a CAN enqueue is; real parents point at a different chain base and
+  client-side reuse starts carry no link).
 - **Workflow retry_policy** (workflows do NOT retry by default — match that): on failure,
   dispatcher consults the policy and starts run n+1 with attempt+1 (visible in
   `workflow.info().attempt`), honoring backoff via `SetEnqueueOptions(delay_seconds=...)`.
