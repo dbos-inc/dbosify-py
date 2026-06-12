@@ -3,6 +3,8 @@ way a temporal-dbos app is: a Worker built from a DBOSConfig (owning the
 process's DBOS lifecycle), a Client wrapping a DBOSClient.
 """
 
+import asyncio
+import warnings
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, AsyncIterator, List, Optional
@@ -13,10 +15,14 @@ from dbos import DBOSClient
 from temporal_dbos import activity, workflow
 from temporal_dbos.client import (
     Client,
+    WithStartWorkflowOperation,
     WorkflowExecutionStatus,
     WorkflowFailureError,
+    WorkflowQueryRejectedError,
     WorkflowUpdateFailedError,
+    WorkflowUpdateStage,
 )
+from temporal_dbos.common import QueryRejectCondition, WorkflowIDConflictPolicy
 from temporal_dbos.exceptions import (
     ApplicationError,
     WorkflowAlreadyStartedError,
@@ -101,6 +107,61 @@ class SignalStartWorkflow:
         return self.greetings
 
 
+@workflow.defn
+class StagedUpdateWorkflow:
+    def __init__(self) -> None:
+        self.release = False
+        self.done = False
+
+    @workflow.signal
+    def unblock(self) -> None:
+        self.release = True
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.update
+    async def slow_update(self, n: int) -> int:
+        await workflow.wait_condition(lambda: self.release)
+        return n * 2
+
+    @slow_update.validator
+    def _validate_slow_update(self, n: int) -> None:
+        if n < 0:
+            raise ApplicationError("no negatives", type="Neg")
+
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.wait_condition(
+            lambda: self.done and workflow.all_handlers_finished()
+        )
+        return "done"
+
+
+@workflow.defn
+class UnfinishedHandlersWorkflow:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.update
+    async def stuck_update(self) -> None:
+        await workflow.wait_condition(lambda: False)
+
+    @workflow.signal(unfinished_policy=workflow.HandlerUnfinishedPolicy.ABANDON)
+    async def stuck_signal(self) -> None:
+        await workflow.wait_condition(lambda: False)
+
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.wait_condition(lambda: self.done)
+        return "done"
+
+
 @asynccontextmanager
 async def _env() -> AsyncIterator[Client]:
     """A running Worker plus a Client against the same database. The client
@@ -114,6 +175,8 @@ async def _env() -> AsyncIterator[Client]:
             AccumulatorWorkflow,
             FailingWorkflow,
             SignalStartWorkflow,
+            StagedUpdateWorkflow,
+            UnfinishedHandlersWorkflow,
         ],
         activities=[compose_greeting],
     )
@@ -243,3 +306,147 @@ async def test_workflow_id_validation() -> None:
             await client.start_workflow(
                 GreetingWorkflow.run, "x", id="bad--r1", task_queue=TASK_QUEUE
             )
+
+
+async def test_start_update_stages() -> None:
+    """start_update(ACCEPTED) returns once past the validator, before the
+    handler finishes; the handle's result() collects the eventual value.
+    Rejection raises from start_update itself."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            StagedUpdateWorkflow.run, id="staged-wf", task_queue=TASK_QUEUE
+        )
+        update_handle = await handle.start_update(
+            StagedUpdateWorkflow.slow_update,
+            21,
+            wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+        )
+        # Accepted but parked: release the handler, then collect the result.
+        await handle.signal(StagedUpdateWorkflow.unblock)
+        assert await update_handle.result() == 42
+
+        with pytest.raises(WorkflowUpdateFailedError):
+            await handle.start_update(
+                StagedUpdateWorkflow.slow_update,
+                -1,
+                wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+            )
+
+        # The run waits on all_handlers_finished before returning.
+        await handle.signal(StagedUpdateWorkflow.finish)
+        assert await handle.result() == "done"
+
+
+async def test_update_with_start() -> None:
+    """execute_update_with_start_workflow lazily creates the workflow on the
+    first call (USE_EXISTING), attaches on subsequent calls, exposes the
+    workflow handle on the operation, and operations are single-use."""
+
+    def _op() -> WithStartWorkflowOperation:
+        return WithStartWorkflowOperation(
+            AccumulatorWorkflow.run,
+            id="uws-wf",
+            task_queue=TASK_QUEUE,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+        )
+
+    async with _env() as client:
+        first_op = _op()
+        assert (
+            await client.execute_update_with_start_workflow(
+                AccumulatorWorkflow.add, 5, start_workflow_operation=first_op
+            )
+            == 5
+        )
+        # Second call attaches to the existing workflow: state accumulates.
+        assert (
+            await client.execute_update_with_start_workflow(
+                AccumulatorWorkflow.add, 3, start_workflow_operation=_op()
+            )
+            == 8
+        )
+        # The handle is available on the used operation; single-use enforced.
+        handle = await first_op.workflow_handle()
+        with pytest.raises(RuntimeError, match="reuse"):
+            await client.execute_update_with_start_workflow(
+                AccumulatorWorkflow.add, 1, start_workflow_operation=first_op
+            )
+        await handle.signal(AccumulatorWorkflow.finish)
+        assert await handle.result() == 8
+
+
+async def test_loop_default_executor_survives_worker_exit() -> None:
+    """DBOS's async APIs install DBOS's thread pool as the calling loop's
+    default executor and destroy() shuts that pool down; the Worker restores
+    a live default executor on exit so the application's asyncio.to_thread
+    keeps working after `async with Worker(...)`."""
+    async with _env() as client:
+        # Force executor swaps both in run() and in workflow execution.
+        await client.execute_workflow(
+            GreetingWorkflow.run, "exec", id="executor-wf", task_queue=TASK_QUEUE
+        )
+    assert await asyncio.to_thread(lambda: 42) == 42
+
+
+async def test_unfinished_handler_warnings() -> None:
+    """A workflow that reaches a terminal outcome with handlers mid-flight
+    warns per WARN_AND_ABANDON handler (Temporal's HandlerUnfinishedPolicy);
+    ABANDON handlers are abandoned silently."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            UnfinishedHandlersWorkflow.run, id="unfinished-wf", task_queue=TASK_QUEUE
+        )
+        await handle.start_update(
+            UnfinishedHandlersWorkflow.stuck_update,
+            wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+            id="stuck-upd",
+        )
+        await handle.signal(UnfinishedHandlersWorkflow.stuck_signal)
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            await handle.signal(UnfinishedHandlersWorkflow.finish)
+            assert await handle.result() == "done"
+        kinds = [type(w.message) for w in captured]
+        assert workflow.UnfinishedUpdateHandlersWarning in kinds
+        # The stuck signal handler opted out via ABANDON.
+        assert workflow.UnfinishedSignalHandlersWarning not in kinds
+        message = str(
+            next(
+                w.message
+                for w in captured
+                if isinstance(w.message, workflow.UnfinishedUpdateHandlersWarning)
+            )
+        )
+        assert "stuck_update" in message and "stuck-upd" in message
+
+
+async def test_query_reject_condition() -> None:
+    """reject_condition (per-call or client default) rejects queries by
+    workflow status before sending, raising WorkflowQueryRejectedError."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AccumulatorWorkflow.run, id="qrc-wf", task_queue=TASK_QUEUE
+        )
+        # Open workflow: the condition passes and the query runs.
+        total = await handle.query(
+            AccumulatorWorkflow.total_so_far,
+            reject_condition=QueryRejectCondition.NOT_OPEN,
+        )
+        assert total == 0
+        await handle.signal(AccumulatorWorkflow.finish)
+        await handle.result()
+        with pytest.raises(WorkflowQueryRejectedError) as exc_info:
+            await handle.query(
+                AccumulatorWorkflow.total_so_far,
+                reject_condition=QueryRejectCondition.NOT_OPEN,
+            )
+        assert exc_info.value.status == WorkflowExecutionStatus.COMPLETED
+
+        # The client-level default applies when the call passes nothing.
+        strict_client = await Client.connect(
+            client._dbos_client,
+            default_workflow_query_reject_condition=QueryRejectCondition.NOT_OPEN,
+        )
+        strict_handle = strict_client.get_workflow_handle("qrc-wf")
+        with pytest.raises(WorkflowQueryRejectedError):
+            await strict_handle.query(AccumulatorWorkflow.total_so_far)

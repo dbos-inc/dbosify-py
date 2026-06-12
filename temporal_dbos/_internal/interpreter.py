@@ -35,10 +35,12 @@ tests/integration/test_dbos_semantics.py):
 """
 
 import asyncio
+import json
 import logging
 import secrets
 import time as time_mod
-from collections import deque
+import warnings
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from random import Random
@@ -49,9 +51,17 @@ from dbos._context import get_local_dbos_context  # see docs/phase0.md
 
 from .. import exceptions
 from ..common import RetryPolicy
-from ..workflow import ActivityHandle, Info, _Runtime
+from ..workflow import (
+    ActivityHandle,
+    ChildWorkflowHandle,
+    HandlerUnfinishedPolicy,
+    Info,
+    UnfinishedSignalHandlersWarning,
+    UnfinishedUpdateHandlersWarning,
+    _Runtime,
+)
 from . import activities as activities_mod
-from . import inbox
+from . import ids, inbox
 from .payloads import FailureEnvelope, deserialize_failure
 from .registry import WorkflowDefinition
 
@@ -89,9 +99,15 @@ class _AbortDrain(Exception):
         self.cause = cause
 
 
+# How often the child-result step polls for the child's terminal state.
+CHILD_POLL_INTERVAL_SECONDS = 0.25
+
 # Created lazily (not at import) so decoration binds to the live DBOS
 # registry — tests destroy and re-create it between cases.
 _init_step: Optional[Callable[[], Any]] = None
+_child_result_step: Optional[Callable[[str], Any]] = None
+_child_exists_step: Optional[Callable[[str], Any]] = None
+_update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
 
 
 def _workflow_init_step() -> Any:
@@ -107,6 +123,112 @@ def _workflow_init_step() -> Any:
 
         _init_step = init_step
     return _init_step()
+
+
+def _validate_update(validate: Callable[[], None]) -> Any:
+    """Checkpoint the update validator's verdict so the validator runs
+    exactly once: replay returns the recorded verdict without re-executing
+    it. This is Temporal's semantics — acceptance is recorded in history and
+    validators are skipped on replay — so a nondeterministic validator
+    cannot flip its verdict and corrupt the execution. The callable argument
+    is never serialized (steps record only their results).
+    """
+    global _update_validate_step
+    if _update_validate_step is None:
+
+        @DBOS.step(name="__tdb_upd_validate")
+        async def update_validate_step(validate: Callable[[], None]) -> Dict[str, Any]:
+            from .payloads import serialize_failure
+
+            try:
+                validate()
+            except BaseException as err:  # noqa: BLE001
+                return {"accepted": False, "failure": serialize_failure(err)}
+            return {"accepted": True}
+
+        _update_validate_step = update_validate_step
+    return _update_validate_step(validate)
+
+
+def _await_child_result(child_id: str) -> Any:
+    """The child-result waiter: our own step wrapping the *non-recording*
+    wait, returning an envelope.
+
+    DBOS's handle.get_result() is unusable inside racing waiter tasks: its
+    record_get_result claims a function_id at COMPLETION time (completion
+    order = nondeterministic), and it never reads the record back. Wrapping
+    the raw await in our own step claims the function_id at launch (like
+    activity attempts) and records the child's outcome in our slot.
+    """
+    global _child_result_step
+    if _child_result_step is None:
+
+        @DBOS.step(name="__tdb_child_result")
+        async def child_result_step(child_id: str) -> Dict[str, Any]:
+            from dbos._dbos import _get_dbos_instance  # see docs/phase0.md
+            from dbos._error import DBOSAwaitedWorkflowCancelledError
+
+            from .payloads import (
+                SerializedWorkflowCancellation,
+                SerializedWorkflowFailure,
+                serialize_failure,
+            )
+
+            dbos = _get_dbos_instance()
+            try:
+                result = await dbos._sys_db.await_workflow_result_async(
+                    child_id, CHILD_POLL_INTERVAL_SECONDS
+                )
+            except SerializedWorkflowCancellation as cancelled:
+                return {
+                    "ok": False,
+                    "cancelled": True,
+                    "failure": cancelled.envelope,
+                    "ended_at": time_mod.time(),
+                }
+            except SerializedWorkflowFailure as failed:
+                return {
+                    "ok": False,
+                    "failure": failed.envelope,
+                    "ended_at": time_mod.time(),
+                }
+            except DBOSAwaitedWorkflowCancelledError:
+                # Native DBOS cancel == the child was terminated.
+                terminated = exceptions.TerminatedError("Child workflow terminated")
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(terminated),
+                    "ended_at": time_mod.time(),
+                }
+            except Exception as err:  # noqa: BLE001 — FAIL_FAST / legacy errors
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(err),
+                    "ended_at": time_mod.time(),
+                }
+            return {"ok": True, "result": result, "ended_at": time_mod.time()}
+
+        _child_result_step = child_result_step
+    return _child_result_step(child_id)
+
+
+def _child_id_taken(child_id: str) -> Any:
+    """Checkpointed existence check for a child workflow id, so the answer
+    is replay-stable: on first execution the child doesn't exist yet (we
+    haven't started it); on replay the recorded False is returned even
+    though the child now exists *because we created it*. A live read here
+    would spuriously fail every replay.
+    """
+    global _child_exists_step
+    if _child_exists_step is None:
+
+        @DBOS.step(name="__tdb_child_check")
+        async def child_exists_step(child_id: str) -> bool:
+            status = await DBOS.get_workflow_status_async(child_id)
+            return status is not None
+
+        _child_exists_step = child_exists_step
+    return _child_exists_step(child_id)
 
 
 class _TimerHandle(asyncio.TimerHandle):
@@ -247,6 +369,25 @@ class _ActivityExec:
     last_failure: Optional[FailureEnvelope] = None
 
 
+@dataclass
+class _ChildExec:
+    """Per-child-workflow state. The start resolves once the enqueue is
+    durable (Temporal: handles resolve on start); the result arrives through
+    the event race via the child-result step.
+    """
+
+    seq: int
+    type_name: str
+    child_id: str
+    args: List[Any]
+    task_queue: Optional[str]
+    parent_close_policy: int  # ParentClosePolicy
+    cancellation_type: int  # ChildWorkflowCancellationType
+    start_future: "asyncio.Future[Any]"  # on the virtual loop
+    result_future: "asyncio.Future[Any]"  # on the virtual loop
+    started: bool = False
+
+
 class Interpreter(_Runtime):
     """Hosts one workflow execution. Construct fresh for each (re)execution;
     ``execute()`` replays deterministically from whatever checkpoints exist.
@@ -271,12 +412,23 @@ class Interpreter(_Runtime):
         self._waiters: List[_Waiter] = []
         self._buffered_signals: Dict[str, List[inbox.Envelope]] = {}
         self._seen_update_ids: Set[str] = set()
-        self._handlers_running = 0
+        # Live signal/update handler tasks -> {kind, name, id, policy};
+        # backs all_handlers_finished() and the unfinished-handler warnings.
+        self._inflight_handlers: "Dict[asyncio.Task[Any], Dict[str, Any]]" = {}
         self._read_only = False
         self._cancel_requested = False
         self._cancel_reason: Optional[str] = None
         self._cancelled_activity_seqs: List[int] = []
         self._abandoned_tasks: Set["asyncio.Task[Any]"] = set()
+        self._pending_children: Dict[int, _ChildExec] = {}
+        self._children_registry: List[Dict[str, Any]] = []
+        self._cancelled_child_seqs: List[int] = []
+        self._pending_sends: Dict[int, Tuple[str, Any, "asyncio.Future[Any]", bool]] = (
+            {}
+        )
+        self._own_queue_name: Optional[str] = None
+        self._own_queue_resolved = False
+        self._replay_horizon = 0
         self._random = Random(0)
         self._workflow_id = ""
         self._start_time = 0.0
@@ -292,6 +444,20 @@ class Interpreter(_Runtime):
         assert ctx is not None, "interpreter must run inside a DBOS workflow"
         self._workflow_id = ctx.workflow_id
 
+        # The checkpoint horizon: the highest recorded function_id. While our
+        # claim cursor is below it, we are re-executing recorded history —
+        # that is what unsafe.is_replaying() reports. The read must be live
+        # (is_replaying is *about* replay state, exempt from determinism),
+        # but inside a workflow context DBOS checkpoints listWorkflowSteps
+        # itself — it would replay its own first-execution (empty) result.
+        # An executor thread has no DBOS context, so the read stays live.
+        # (Upstream wishlist: a cheap max-function_id query; this fetches
+        # and deserializes the full step list.)
+        steps = await asyncio.get_running_loop().run_in_executor(
+            None, DBOS.list_workflow_steps, self._workflow_id
+        )
+        self._replay_horizon = max((step["function_id"] for step in steps), default=0)
+
         init = await _workflow_init_step()
         self._start_time = float(init["start_time"])
         self._vloop.time_seconds = self._start_time
@@ -301,8 +467,8 @@ class Interpreter(_Runtime):
         try:
             while True:
                 await self._drain_outside_task()
-                self._sweep_cancelled_activities()
-                made_progress = self._process_commands()
+                await self._sweep_cancellations()
+                made_progress = await self._process_commands()
                 if made_progress:
                     continue  # immediate timer fires need another drain
                 if self._outcome is not None and self._outcome[0] == "task_failure":
@@ -321,8 +487,12 @@ class Interpreter(_Runtime):
                     [w.task for w in self._waiters],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                self._deliver(done)
+                await self._deliver(done)
         finally:
+            if self._outcome is not None and self._outcome[0] != "task_failure":
+                # Terminal outcome (not a retryable task failure): apply
+                # ParentClosePolicy to still-running children.
+                await self._sweep_children_on_close()
             for waiter in self._waiters:
                 waiter.task.cancel()
             if self._waiters:
@@ -331,13 +501,7 @@ class Interpreter(_Runtime):
                 )
             self._waiters.clear()
 
-        if self._handlers_running:
-            logger.warning(
-                "Workflow %s finished with %d signal/update handler(s) still "
-                "running; their effects after this point are lost",
-                self._workflow_id,
-                self._handlers_running,
-            )
+        self._warn_if_unfinished_handlers()
         kind, value = self._outcome
         if kind == "ok":
             return value
@@ -553,10 +717,10 @@ class Interpreter(_Runtime):
         )
         return ActivityHandle(exec_state.future)
 
-    def _process_commands(self) -> bool:
+    async def _process_commands(self) -> bool:
         """Turn queued commands into real-loop waiter tasks. Returns True if
         any virtual-loop progress was made without needing a checkpointed
-        wait (expired timers firing immediately).
+        wait (expired timers firing immediately, child starts resolving).
         """
         commands, self._commands = self._commands, []
         progressed = False
@@ -576,17 +740,110 @@ class Interpreter(_Runtime):
                     self._launch_waiter("timer", seq, DBOS.sleep_async(real_delay))
             elif kind == "activity":
                 self._launch_attempt(self._pending_activities[seq])
+            elif kind == "child":
+                await self._start_child(self._pending_children[seq])
+                progressed = True  # the start future resolved either way
+            elif kind == "send":
+                target, envelope, future, resolve_chain = self._pending_sends.pop(seq)
+                # send_async is checkpointed; awaited inline so its
+                # function_id claim stays at a deterministic position. The
+                # chain resolution is a live read, but that's safe: on
+                # replay send_async returns its recorded checkpoint without
+                # consuming the resolved value.
+                try:
+                    if resolve_chain:
+                        target = await self._resolve_current_run(target)
+                    await DBOS.send_async(target, envelope, inbox.INBOX_TOPIC)
+                except Exception as err:  # noqa: BLE001
+                    if not future.cancelled():
+                        future.set_exception(
+                            exceptions.ApplicationError(
+                                str(err), type=type(err).__name__
+                            )
+                        )
+                else:
+                    if not future.cancelled():
+                        future.set_result(None)
+                progressed = True
         return progressed
 
-    def _sweep_cancelled_activities(self) -> None:
-        """Retire activities whose virtual-loop futures were cancelled during
-        the drain. Cancellation decisions are deterministic workflow state,
-        so this sweep replays identically; a cancelled in-flight step records
-        nothing, which replays like a crash (re-execute — at-least-once).
+    async def _start_child(self, child: _ChildExec) -> None:
+        """Make the child start durable: enqueue its per-type dispatcher
+        under the deterministic child id. DBOS records in-workflow starts
+        (and SetWorkflowID re-attaches idempotently), so replay re-attaches
+        to the same child instead of spawning a twin.
+        """
+        from dbos import SetWorkflowID
 
-        TRY_CANCEL (default) cancels the real task. ABANDON detaches it.
-        WAIT_CANCELLATION_COMPLETED is approximated as TRY_CANCEL until the
-        Phase 3 activity-side cancellation observation lands.
+        from . import registry
+
+        try:
+            dispatch_fn = registry.dbos_workflow_for(child.type_name)
+            if await _child_id_taken(child.child_id):
+                # Temporal raises into the parent when a child id is already
+                # in use; SetWorkflowID would otherwise silently attach to
+                # the foreign workflow. (Checkpointed check; the usual
+                # TOCTOU window between check and start is documented.)
+                del self._pending_children[child.seq]
+                if not child.start_future.cancelled():
+                    child.start_future.set_exception(
+                        exceptions.WorkflowAlreadyStartedError(
+                            child.child_id, child.type_name
+                        )
+                    )
+                return
+            if not self._own_queue_resolved:
+                status = await DBOS.get_workflow_status_async(self._workflow_id)
+                self._own_queue_name = status.queue_name if status else None
+                self._own_queue_resolved = True
+            queue_name = child.task_queue or self._own_queue_name
+            child_queue = None
+            if queue_name is not None:
+                child_queue = await DBOS.retrieve_queue_async(queue_name)
+            # Record intent BEFORE the start commits (claim-then-start): any
+            # child that exists is guaranteed to be in the registry, closing
+            # the terminate-races-child-start orphan window. The reverse
+            # anomaly — a registry entry whose enqueue never happened — is
+            # harmless: policy sweeps skip nonexistent workflows, and
+            # recovery re-runs the enqueue anyway.
+            self._children_registry.append(
+                {"id": child.child_id, "policy": child.parent_close_policy}
+            )
+            await DBOS.set_event_async(
+                inbox.CHILDREN_EVENT_KEY, list(self._children_registry)
+            )
+            with SetWorkflowID(child.child_id):
+                if child_queue is not None:
+                    await child_queue.enqueue_async(dispatch_fn, list(child.args))
+                else:
+                    # Parent wasn't queue-dispatched (Phase 0 helpers):
+                    # start the child directly in-process.
+                    await DBOS.start_workflow_async(dispatch_fn, list(child.args))
+        except Exception as err:  # noqa: BLE001
+            del self._pending_children[child.seq]
+            if not child.start_future.cancelled():
+                child.start_future.set_exception(
+                    exceptions.ApplicationError(str(err), type=type(err).__name__)
+                )
+            return
+        child.started = True
+        if not child.start_future.cancelled():
+            child.start_future.set_result(None)
+        self._launch_waiter("child", child.seq, _await_child_result(child.child_id))
+
+    async def _sweep_cancellations(self) -> None:
+        """Retire activities and children whose virtual-loop futures were
+        cancelled during the drain. Cancellation decisions are deterministic
+        workflow state, so this sweep replays identically.
+
+        Activities: TRY_CANCEL (default) cancels the real step task (which
+        records nothing — replays like a crash); ABANDON detaches it; WAIT
+        is approximated as TRY_CANCEL until Phase 3.
+
+        Children: non-ABANDON types deliver the child's cooperative-cancel
+        envelope (a checkpointed send) and retire the waiter; ABANDON just
+        retires the waiter. The WAIT variants are approximated (the awaiter
+        is already gone once the future is cancelled).
         """
         seqs, self._cancelled_activity_seqs = self._cancelled_activity_seqs, []
         for seq in seqs:
@@ -601,6 +858,20 @@ class Interpreter(_Runtime):
                         waiter.task.add_done_callback(self._discard_abandoned)
                     else:
                         waiter.task.cancel()
+
+        child_seqs, self._cancelled_child_seqs = self._cancelled_child_seqs, []
+        for seq in child_seqs:
+            child = self._pending_children.pop(seq, None)
+            if child is None:
+                continue
+            for waiter in list(self._waiters):
+                if waiter.kind == "child" and waiter.seq == seq:
+                    self._waiters.remove(waiter)
+                    waiter.task.cancel()
+            if child.cancellation_type != 0 and child.started:  # not ABANDON
+                await DBOS.send_async(
+                    child.child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                )
 
     def _discard_abandoned(self, task: "asyncio.Task[Any]") -> None:
         self._abandoned_tasks.discard(task)
@@ -648,17 +919,19 @@ class Interpreter(_Runtime):
         if to_seconds is not None and to_seconds > self._vloop.time_seconds:
             self._vloop.time_seconds = to_seconds
 
-    def _deliver(self, done: Set["asyncio.Task[Any]"]) -> None:
+    async def _deliver(self, done: Set["asyncio.Task[Any]"]) -> None:
         for waiter in list(self._waiters):
             if waiter.task not in done:
                 continue
             self._waiters.remove(waiter)
             if waiter.kind == "inbox":
-                self._deliver_inbox(waiter.task.result())
+                await self._deliver_inbox(waiter.task.result())
             elif waiter.kind == "timer":
                 self._deliver_timer(waiter.seq)
             elif waiter.kind == "activity":
                 self._deliver_activity_event(waiter)
+            elif waiter.kind == "child":
+                self._deliver_child_event(waiter)
 
     def _deliver_timer(self, seq: int) -> None:
         handle = self._pending_timers.pop(seq, None)
@@ -706,6 +979,73 @@ class Interpreter(_Runtime):
         error.__cause__ = deserialize_failure(failure)
         exec_state.future.set_exception(error)
 
+    def _deliver_child_event(self, waiter: _Waiter) -> None:
+        child = self._pending_children.pop(waiter.seq, None)
+        if child is None or child.result_future.cancelled():
+            return  # cancelled between completion and delivery
+        envelope: Dict[str, Any] = waiter.task.result()
+        self._advance_time(envelope.get("ended_at"))
+        if envelope["ok"]:
+            child.result_future.set_result(envelope["result"])
+            return
+        error = exceptions.ChildWorkflowError(
+            "Child workflow execution failed",
+            namespace="default",
+            workflow_id=child.child_id,
+            run_id=child.child_id,
+            workflow_type=child.type_name,
+            initiated_event_id=0,
+            started_event_id=0,
+            retry_state=None,
+        )
+        error.__cause__ = deserialize_failure(envelope["failure"])
+        child.result_future.set_exception(error)
+
+    async def _sweep_children_on_close(self) -> None:
+        """ParentClosePolicy (§6.5): when the parent reaches a terminal
+        outcome, deal with still-running children. TERMINATE (the default)
+        native-cancels them — recursively, applying *their* recorded
+        policies, since a terminated child runs no code of its own;
+        REQUEST_CANCEL delivers the cooperative envelope; ABANDON leaves
+        them running. Re-running this on replay is idempotent.
+        """
+        for child in list(self._pending_children.values()):
+            if not child.started:
+                continue
+            policy = child.parent_close_policy
+            if policy == 2:  # ABANDON
+                continue
+            if policy == 3:  # REQUEST_CANCEL
+                await DBOS.send_async(
+                    child.child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                )
+            else:  # TERMINATE (1) and UNSPECIFIED (0) default to terminate
+                await self._terminate_child_tree(child.child_id, set())
+
+    async def _terminate_child_tree(self, child_id: str, visited: Set[str]) -> None:
+        """Terminate a child and apply its recorded parent-close policies to
+        its own descendants (it runs no code, so nobody else will)."""
+        if child_id in visited:
+            return
+        visited.add(child_id)
+        status = await DBOS.get_workflow_status_async(child_id)
+        if status is None or status.status not in ("PENDING", "ENQUEUED", "DELAYED"):
+            return  # already terminal (or stuck); don't clobber its status
+        await DBOS.cancel_workflow_async(child_id)
+        grandchildren = await DBOS.get_event_async(
+            child_id, inbox.CHILDREN_EVENT_KEY, 0
+        )
+        for grandchild in grandchildren or []:
+            policy = grandchild.get("policy", 1)
+            if policy == 2:  # ABANDON
+                continue
+            if policy == 3:  # REQUEST_CANCEL
+                await DBOS.send_async(
+                    grandchild["id"], inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                )
+            else:
+                await self._terminate_child_tree(grandchild["id"], visited)
+
     def _retry_decision(
         self, exec_state: _ActivityExec, failure: FailureEnvelope
     ) -> Tuple[Optional[float], exceptions.RetryState]:
@@ -745,7 +1085,7 @@ class Interpreter(_Runtime):
     # Inbox routing
     # ------------------------------------------------------------------
 
-    def _deliver_inbox(self, message: Any) -> None:
+    async def _deliver_inbox(self, message: Any) -> None:
         if message is None:
             return  # recv timeout (checkpointed; deterministic); re-armed next round
         if not isinstance(message, dict) or "kind" not in message:
@@ -761,7 +1101,7 @@ class Interpreter(_Runtime):
         if kind == "signal":
             self._apply_signal(envelope)
         elif kind == "update":
-            self._apply_update(envelope)
+            await self._apply_update(envelope)
         elif kind == "query":
             self._apply_query(envelope)
         elif kind == "cancel":
@@ -799,7 +1139,12 @@ class Interpreter(_Runtime):
                 envelope["name"],
             )
             return
-        self._spawn_handler(self._run_signal_handler(defn.fn, envelope["args"]))
+        self._spawn_handler(
+            self._run_signal_handler(defn.fn, envelope["args"]),
+            kind="signal",
+            name=defn.name,
+            policy=defn.unfinished_policy,
+        )
 
     async def _run_signal_handler(
         self, fn: Callable[..., Any], args: Sequence[Any]
@@ -814,23 +1159,73 @@ class Interpreter(_Runtime):
             # workflow; anything else fails the workflow task).
             self._record_workflow_error(err)
 
-    def _spawn_handler(self, coro: Any) -> None:
-        self._handlers_running += 1
+    def _spawn_handler(
+        self,
+        coro: Any,
+        *,
+        kind: str,
+        name: str,
+        policy: int,
+        handler_id: Optional[str] = None,
+    ) -> None:
         task: asyncio.Task[Any] = asyncio.Task(coro, loop=self._vloop)
+        self._inflight_handlers[task] = {
+            "kind": kind,
+            "name": name,
+            "id": handler_id,
+            "policy": policy,
+        }
         self._tasks.add(task)
 
         def _finished(t: "asyncio.Task[Any]") -> None:
-            self._handlers_running -= 1
+            self._inflight_handlers.pop(t, None)
             self._tasks.discard(t)
 
         task.add_done_callback(_finished)
 
-    def _apply_update(self, envelope: inbox.Envelope) -> None:
+    def _warn_if_unfinished_handlers(self) -> None:
+        """Temporal's HandlerUnfinishedPolicy behavior: a workflow that
+        reaches a terminal outcome while handlers are mid-flight abandons
+        them, and warns for each handler whose policy is WARN_AND_ABANDON.
+        Guard with `await workflow.wait_condition(lambda:
+        workflow.all_handlers_finished())` before returning.
+        """
+        warnable = [
+            record
+            for record in self._inflight_handlers.values()
+            if record["policy"] == HandlerUnfinishedPolicy.WARN_AND_ABANDON
+        ]
+        updates = [r for r in warnable if r["kind"] == "update"]
+        if updates:
+            warnings.warn(
+                UnfinishedUpdateHandlersWarning(
+                    _unfinished_handler_message(
+                        "update",
+                        "the client that sent "
+                        "the update will never receive its result",
+                    )
+                    + json.dumps([{"name": r["name"], "id": r["id"]} for r in updates])
+                )
+            )
+        signals = [r for r in warnable if r["kind"] == "signal"]
+        if signals:
+            counts = Counter(r["name"] for r in signals)
+            warnings.warn(
+                UnfinishedSignalHandlersWarning(
+                    _unfinished_handler_message("signal", "its work was interrupted")
+                    + json.dumps(
+                        [{"name": n, "count": c} for n, c in counts.most_common()]
+                    )
+                )
+            )
+
+    async def _apply_update(self, envelope: inbox.Envelope) -> None:
         update_id: str = envelope["update_id"]
         if update_id in self._seen_update_ids:
             return  # duplicate delivery; the original reply event stands
         self._seen_update_ids.add(update_id)
         reply_key = inbox.update_result_key(update_id)
+        acceptance_key = inbox.update_acceptance_key(update_id)
         defn = self._defn.updates.get(envelope["name"])
         if defn is None:
             failure = exceptions.ApplicationError(
@@ -838,21 +1233,43 @@ class Interpreter(_Runtime):
                 type="NotFoundError",
                 non_retryable=True,
             )
+            self._reply(acceptance_key, status="rejected", failure=failure)
             self._reply(reply_key, status="rejected", failure=failure)
             return
         if defn.validator is not None:
-            # Validators run synchronously, read-only, against current state;
-            # a rejected update must leave no trace in workflow state.
-            self._read_only = True
-            try:
-                defn.validator(self._instance, *envelope["args"])
-            except BaseException as err:  # noqa: BLE001
-                self._reply(reply_key, status="rejected", failure=err)
+            validator = defn.validator
+
+            def run_validator() -> None:
+                # Synchronous, read-only, against current state; a rejected
+                # update must leave no trace in workflow state.
+                self._read_only = True
+                try:
+                    validator(self._instance, *envelope["args"])
+                finally:
+                    self._read_only = False
+
+            # The verdict is a checkpoint: the validator runs exactly once,
+            # at first delivery; replay reads the recorded verdict.
+            verdict = await _validate_update(run_validator)
+            if not verdict["accepted"]:
+                self._reply(
+                    acceptance_key,
+                    status="rejected",
+                    failure_envelope=verdict["failure"],
+                )
+                self._reply(
+                    reply_key, status="rejected", failure_envelope=verdict["failure"]
+                )
                 return
-            finally:
-                self._read_only = False
+        # Past validation: the update is accepted (WorkflowUpdateStage
+        # ACCEPTED); the handler runs as a tracked vloop task.
+        self._reply(acceptance_key, status="accepted")
         self._spawn_handler(
-            self._run_update_handler(defn.fn, envelope["args"], reply_key)
+            self._run_update_handler(defn.fn, envelope["args"], reply_key),
+            kind="update",
+            name=defn.name,
+            policy=defn.unfinished_policy,
+            handler_id=envelope["update_id"],
         )
 
     async def _run_update_handler(
@@ -900,11 +1317,14 @@ class Interpreter(_Runtime):
         status: str,
         result: Any = None,
         failure: Optional[BaseException] = None,
+        failure_envelope: Optional[Any] = None,
     ) -> None:
         from .payloads import serialize_failure
 
         payload: Dict[str, Any] = {"status": status}
-        if failure is not None:
+        if failure_envelope is not None:
+            payload["failure"] = failure_envelope
+        elif failure is not None:
             payload["failure"] = serialize_failure(failure)
         else:
             payload["result"] = result
@@ -931,13 +1351,77 @@ class Interpreter(_Runtime):
     def runtime_random(self) -> Random:
         return self._random
 
+    async def runtime_start_child_workflow(
+        self,
+        type_name: str,
+        args: Sequence[Any],
+        *,
+        child_id: Optional[str],
+        task_queue: Optional[str],
+        parent_close_policy: int,
+        cancellation_type: int,
+    ) -> "ChildWorkflowHandle":
+        self._assert_not_read_only("start a child workflow")
+        seq = self._next_seq("child")
+        resolved_id = child_id or f"{self._workflow_id}_{seq}"
+        ids.validate_workflow_id(resolved_id)
+        child = _ChildExec(
+            seq=seq,
+            type_name=type_name,
+            child_id=resolved_id,
+            args=list(args),
+            task_queue=task_queue,
+            parent_close_policy=parent_close_policy,
+            cancellation_type=cancellation_type,
+            start_future=self._vloop.create_future(),
+            result_future=self._vloop.create_future(),
+        )
+        self._pending_children[seq] = child
+        self._commands.append(("child", seq))
+        child.result_future.add_done_callback(
+            lambda fut: (
+                self._cancelled_child_seqs.append(seq)
+                if fut.cancelled() and seq in self._pending_children
+                else None
+            )
+        )
+        # Parks the caller until the start is durable (Temporal: handles
+        # resolve on start). The outer loop processes the command.
+        await child.start_future
+        return ChildWorkflowHandle(self, resolved_id, child.result_future)
+
+    async def runtime_send_to_workflow(
+        self, workflow_id: str, envelope: Any, *, resolve_chain: bool = False
+    ) -> None:
+        self._assert_not_read_only("send to a workflow")
+        seq = self._next_seq("send")
+        future = self._vloop.create_future()
+        self._pending_sends[seq] = (workflow_id, envelope, future, resolve_chain)
+        self._commands.append(("send", seq))
+        await future
+
+    async def _resolve_current_run(self, workflow_id: str) -> str:
+        """Resolve a Temporal workflow id to its current run's DBOS id
+        (§6.4 run chains)."""
+        statuses = await DBOS.list_workflows_async(workflow_id_prefix=workflow_id)
+        best: Optional[Tuple[int, str]] = None
+        for status in statuses:
+            index = ids.run_index_of(workflow_id, status.workflow_id)
+            if index is not None and (best is None or index > best[0]):
+                best = (index, status.workflow_id)
+        return best[1] if best is not None else workflow_id
+
     def runtime_cancellation_reason(self) -> Optional[str]:
         return self._cancel_reason
 
+    def runtime_all_handlers_finished(self) -> bool:
+        return not self._inflight_handlers
+
     def runtime_is_replaying(self) -> bool:
-        # TODO(phase 2): derive from checkpoint-cursor position to back
-        # workflow.unsafe.is_replaying() and replay log suppression.
-        return False
+        ctx = get_local_dbos_context()
+        if ctx is None:
+            return False
+        return ctx.function_id < self._replay_horizon
 
     async def runtime_wait_condition(
         self, fn: Callable[[], bool], *, timeout: Optional[float]
@@ -948,3 +1432,20 @@ class Interpreter(_Runtime):
             await asyncio.wait_for(fut, timeout)
         else:
             await fut
+
+
+def _unfinished_handler_message(kind: str, consequence: str) -> str:
+    """Mirrors temporalio's [TMPRL1102] unfinished-handler warning text,
+    adapted to our delivery model."""
+    return (
+        f"[TMPRL1102] Workflow finished while {kind} handlers are still running. "
+        f"This may have interrupted work that the {kind} handler was doing, and "
+        f"{consequence}. You can wait for all update and signal handlers to "
+        "complete by using `await workflow.wait_condition(lambda: "
+        "workflow.all_handlers_finished())`. Alternatively, if you are okay with "
+        "interrupting running handlers when the workflow finishes, then you can "
+        "disable this warning via the handler decorator: "
+        f"`@workflow.{kind}(unfinished_policy="
+        f"workflow.HandlerUnfinishedPolicy.ABANDON)`. The following {kind}s were "
+        "unfinished (and warnings were not disabled for their handler): "
+    )

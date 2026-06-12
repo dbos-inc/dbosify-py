@@ -15,7 +15,8 @@ import os
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Mapping, Optional, Sequence, Type, Union
+from enum import IntEnum
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Type, Union
 
 from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from dbos._error import DBOSAwaitedWorkflowCancelledError
@@ -26,7 +27,12 @@ from ._internal import registry as _registry
 from ._internal import status as _status
 from ._internal.payloads import SerializedWorkflowFailure, deserialize_failure
 from ._internal.status import WorkflowExecutionStatus
-from .common import RetryPolicy, WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from .common import (
+    QueryRejectCondition,
+    RetryPolicy,
+    WorkflowIDConflictPolicy,
+    WorkflowIDReusePolicy,
+)
 from .workflow import _UpdateMethod
 
 # Worst-case latency for client-side get_event when a LISTEN/NOTIFY wakeup is
@@ -36,6 +42,8 @@ DEFAULT_CLIENT_POLL_SECONDS = 1.0
 
 __all__ = [
     "Client",
+    "WithStartWorkflowOperation",
+    "WorkflowQueryRejectedError",
     "WorkflowHandle",
     "WorkflowExecution",
     "WorkflowExecutionDescription",
@@ -43,6 +51,8 @@ __all__ = [
     "WorkflowFailureError",
     "WorkflowQueryFailedError",
     "WorkflowUpdateFailedError",
+    "WorkflowUpdateHandle",
+    "WorkflowUpdateStage",
 ]
 
 logger = logging.getLogger("temporal_dbos.client")
@@ -60,6 +70,20 @@ class WorkflowFailureError(exceptions.TemporalError):
         self.__cause__ = cause
 
 
+class WorkflowQueryRejectedError(exceptions.TemporalError):
+    """The query was rejected by its ``reject_condition``: the workflow's
+    status matched the condition before the query was sent."""
+
+    def __init__(self, status: Optional["WorkflowExecutionStatus"]) -> None:
+        super().__init__(f"Query rejected, status: {status}")
+        self._status = status
+
+    @property
+    def status(self) -> Optional["WorkflowExecutionStatus"]:
+        """The workflow execution status that caused the rejection."""
+        return self._status
+
+
 class WorkflowQueryFailedError(exceptions.TemporalError):
     """The query handler failed or was not found."""
 
@@ -74,6 +98,153 @@ class WorkflowUpdateFailedError(exceptions.TemporalError):
     def __init__(self, cause: BaseException) -> None:
         super().__init__("Workflow update failed")
         self.__cause__ = cause
+
+
+class WorkflowUpdateStage(IntEnum):
+    """Stage to wait for in ``start_update``, mirroring
+    ``temporalio.client.WorkflowUpdateStage``. ADMITTED is not supported
+    (same as temporalio).
+    """
+
+    ADMITTED = 1
+    ACCEPTED = 2
+    COMPLETED = 3
+
+
+class WorkflowUpdateHandle:
+    """Handle for a workflow update: poll its result with
+    :py:meth:`result`. Obtained from ``start_update``/``execute_update``.
+    """
+
+    def __init__(
+        self,
+        client: "Client",
+        id: str,
+        workflow_id: str,
+        *,
+        workflow_run_id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        known_outcome: Optional[Any] = None,
+    ) -> None:
+        self._client = client
+        self._id = id
+        self._workflow_id = workflow_id
+        self._workflow_run_id = workflow_run_id
+        self._known_outcome = known_outcome  # result_type unused (pickle)
+
+    @property
+    def id(self) -> str:
+        """ID of this update request."""
+        return self._id
+
+    @property
+    def workflow_id(self) -> str:
+        """The ID of the workflow targeted by this update."""
+        return self._workflow_id
+
+    @property
+    def workflow_run_id(self) -> Optional[str]:
+        """The run targeted by this update, if known."""
+        return self._workflow_run_id
+
+    async def result(
+        self,
+        *,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> Any:
+        """Wait for and return the update's result; raises
+        :py:class:`WorkflowUpdateFailedError` on rejection or failure.
+        """
+        _ignore_rpc_options("update result", rpc_metadata, None)
+        outcome = self._known_outcome
+        if outcome is None:
+            timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
+            outcome = await self._client._dbos_client.get_event_async(
+                self._workflow_run_id or self._workflow_id,
+                inbox.update_result_key(self._id),
+                timeout,
+            )
+            if outcome is None:
+                raise TimeoutError(f"update did not complete within {timeout}s")
+            self._known_outcome = outcome
+        if outcome["status"] == "completed":
+            return outcome["result"]
+        raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
+
+
+class WithStartWorkflowOperation:
+    """Defines the workflow-start half of an update-with-start request
+    (mirroring ``temporalio.client.WithStartWorkflowOperation``): start the
+    workflow per ``id_conflict_policy`` (typically USE_EXISTING — "create
+    the cart if it doesn't exist") and deliver the update to it. The
+    workflow handle is available via :py:meth:`workflow_handle` even if the
+    update itself fails. Single-use.
+    """
+
+    def __init__(
+        self,
+        workflow: Any,
+        arg: Any = _arg_unset,
+        *,
+        args: Sequence[Any] = [],
+        id: str,
+        task_queue: str,
+        id_conflict_policy: WorkflowIDConflictPolicy,
+        result_type: Optional[type] = None,
+        execution_timeout: Optional[timedelta] = None,
+        run_timeout: Optional[timedelta] = None,
+        task_timeout: Optional[timedelta] = None,
+        id_reuse_policy: WorkflowIDReusePolicy = WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        retry_policy: Optional[RetryPolicy] = None,
+        cron_schedule: str = "",
+        memo: Optional[Mapping[str, Any]] = None,
+        search_attributes: Optional[Any] = None,
+        static_summary: Optional[str] = None,
+        static_details: Optional[str] = None,
+        start_delay: Optional[timedelta] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+        priority: Optional[Any] = None,
+    ) -> None:
+        # Required (no default), matching temporalio; explicit UNSPECIFIED
+        # is also rejected.
+        if id_conflict_policy == WorkflowIDConflictPolicy.UNSPECIFIED:
+            raise ValueError("WithStartWorkflowOperation requires id_conflict_policy")
+        self._start_kwargs: Dict[str, Any] = dict(
+            args=_resolve_args(arg, args),
+            id=id,
+            task_queue=task_queue,
+            id_conflict_policy=id_conflict_policy,
+            result_type=result_type,
+            execution_timeout=execution_timeout,
+            run_timeout=run_timeout,
+            task_timeout=task_timeout,
+            id_reuse_policy=id_reuse_policy,
+            retry_policy=retry_policy,
+            cron_schedule=cron_schedule,
+            memo=memo,
+            search_attributes=search_attributes,
+            static_summary=static_summary,
+            static_details=static_details,
+            start_delay=start_delay,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+            priority=priority,
+        )
+        self._workflow = workflow
+        self._handle: Optional["WorkflowHandle"] = None
+        self._used = False
+
+    async def workflow_handle(self) -> "WorkflowHandle":
+        """The handle for the started (or attached-to) workflow. Available
+        once the operation has been used, even if the update failed."""
+        if self._handle is None:
+            raise RuntimeError(
+                "WithStartWorkflowOperation has not been used in an "
+                "update-with-start call yet"
+            )
+        return self._handle
 
 
 @dataclass(frozen=True)
@@ -174,8 +345,14 @@ class Client:
     via the async :py:meth:`connect` (kept for temporalio shape).
     """
 
-    def __init__(self, dbos_client: DBOSClient) -> None:
+    def __init__(
+        self,
+        dbos_client: DBOSClient,
+        *,
+        default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
+    ) -> None:
         self._dbos_client = dbos_client
+        self._default_query_reject_condition = default_workflow_query_reject_condition
         # Bound the LISTEN/NOTIFY-miss latency for get_event-based replies
         # (updates/queries). Private until DBOS exposes an option.
         self._dbos_client._sys_db._notification_fallback_polling_interval = float(
@@ -183,9 +360,17 @@ class Client:
         )
 
     @classmethod
-    async def connect(cls, dbos_client: DBOSClient) -> "Client":
+    async def connect(
+        cls,
+        dbos_client: DBOSClient,
+        *,
+        default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
+    ) -> "Client":
         """Create a client from a ``dbos.DBOSClient``."""
-        return cls(dbos_client)
+        return cls(
+            dbos_client,
+            default_workflow_query_reject_condition=default_workflow_query_reject_condition,
+        )
 
     # ------------------------------------------------------------------
     # Workflow start
@@ -404,6 +589,74 @@ class Client:
             workflow_id, run_id=run_id, first_execution_run_id=first_execution_run_id
         )
 
+    async def start_update_with_start_workflow(
+        self,
+        update: Any,
+        arg: Any = _arg_unset,
+        *,
+        start_workflow_operation: WithStartWorkflowOperation,
+        wait_for_stage: WorkflowUpdateStage,
+        args: Sequence[Any] = [],
+        id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> WorkflowUpdateHandle:
+        """Start a workflow (per the operation's id_conflict_policy,
+        typically USE_EXISTING) and send it an update, waiting for
+        ``wait_for_stage``. Not atomic: the start commits before the update
+        is sent (DEVIATIONS.md D7 family); the operation's workflow handle
+        is available even if the update fails.
+        """
+        op = start_workflow_operation
+        if op._used:
+            raise RuntimeError("WithStartWorkflowOperation cannot be reused")
+        op._used = True
+        start_args = op._start_kwargs["args"]
+        start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
+        op._handle = await self.start_workflow(
+            op._workflow, args=start_args, **start_kwargs
+        )
+        return await op._handle.start_update(
+            update,
+            arg,
+            wait_for_stage=wait_for_stage,
+            args=args,
+            id=id,
+            result_type=result_type,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+        )
+
+    async def execute_update_with_start_workflow(
+        self,
+        update: Any,
+        arg: Any = _arg_unset,
+        *,
+        start_workflow_operation: WithStartWorkflowOperation,
+        args: Sequence[Any] = [],
+        id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> Any:
+        """Start a workflow (if needed) and execute an update on it,
+        returning the update result. See
+        :py:meth:`start_update_with_start_workflow`.
+        """
+        handle = await self.start_update_with_start_workflow(
+            update,
+            arg,
+            start_workflow_operation=start_workflow_operation,
+            wait_for_stage=WorkflowUpdateStage.COMPLETED,
+            args=args,
+            id=id,
+            result_type=result_type,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+        )
+        return await handle.result(rpc_timeout=rpc_timeout)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -429,6 +682,34 @@ class Client:
         if current is None:
             raise RuntimeError(f"Workflow not found: {workflow_id!r}")
         return current[1].workflow_id
+
+    async def _apply_parent_close_policies(
+        self, parent_dbos_id: str, visited: "set[str]"
+    ) -> None:
+        """Apply the ParentClosePolicy recorded in the parent's children
+        event (see inbox.CHILDREN_EVENT_KEY) after a termination."""
+        if parent_dbos_id in visited:
+            return
+        visited.add(parent_dbos_id)
+        children = await self._dbos_client.get_event_async(
+            parent_dbos_id, inbox.CHILDREN_EVENT_KEY, 0
+        )
+        if not children:
+            return
+        child_ids = [c["id"] for c in children]
+        statuses = await self._dbos_client.list_workflows_async(workflow_ids=child_ids)
+        open_ids = {s.workflow_id for s in statuses if _status.is_open(s.status)}
+        for child in children:
+            child_id, policy = child["id"], child.get("policy", 1)
+            if child_id not in open_ids or policy == 2:  # closed, or ABANDON
+                continue
+            if policy == 3:  # REQUEST_CANCEL
+                await self._dbos_client.send_async(
+                    child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                )
+            else:  # TERMINATE / UNSPECIFIED
+                await self._dbos_client.cancel_workflow_async(child_id)
+                await self._apply_parent_close_policies(child_id, visited)
 
     async def _status_of(self, dbos_id: str) -> WorkflowStatus:
         statuses = await self._dbos_client.list_workflows_async(workflow_ids=[dbos_id])
@@ -534,11 +815,27 @@ class WorkflowHandle:
         *,
         args: Sequence[Any] = [],
         result_type: Optional[type] = None,
+        reject_condition: Optional[QueryRejectCondition] = None,
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> Any:
-        """Query the workflow (v1: requires a RUNNING workflow)."""
+        """Query the workflow (v1: requires a RUNNING workflow). Raises
+        :py:class:`WorkflowQueryRejectedError` if the workflow's status
+        matches ``reject_condition`` (or the client default).
+        """
         _ignore_rpc_options("query", rpc_metadata, None)
+        condition = reject_condition or self._client._default_query_reject_condition
+        if condition is not None and condition != QueryRejectCondition.NONE:
+            # Client-side check (no server arbiter — DEVIATIONS D7 family):
+            # the status read and the query send are not atomic.
+            status = (await self.describe()).status
+            rejected = (
+                status != WorkflowExecutionStatus.RUNNING
+                if condition == QueryRejectCondition.NOT_OPEN
+                else status != WorkflowExecutionStatus.COMPLETED
+            )
+            if rejected:
+                raise WorkflowQueryRejectedError(status)
         request_id = str(uuid_mod.uuid4())
         client = self._client._dbos_client
         target = await self._target()
@@ -562,6 +859,65 @@ class WorkflowHandle:
             return reply["result"]
         raise WorkflowQueryFailedError(str(deserialize_failure(reply["failure"])))
 
+    async def start_update(
+        self,
+        update: Any,
+        arg: Any = _arg_unset,
+        *,
+        wait_for_stage: WorkflowUpdateStage,
+        args: Sequence[Any] = [],
+        id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> WorkflowUpdateHandle:
+        """Send an update and wait until it reaches ``wait_for_stage``
+        (ACCEPTED: past its validator; COMPLETED: handler finished). Raises
+        :py:class:`WorkflowUpdateFailedError` if the update is rejected.
+        """
+        _ignore_rpc_options("start_update", rpc_metadata, None)
+        if wait_for_stage not in (
+            WorkflowUpdateStage.ACCEPTED,
+            WorkflowUpdateStage.COMPLETED,
+        ):
+            raise ValueError("Admitted wait stage not supported")
+        update_id = id or str(uuid_mod.uuid4())
+        client = self._client._dbos_client
+        target = await self._target()
+        timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
+        await client.send_async(
+            target,
+            inbox.update_envelope(
+                _update_name(update), _resolve_args(arg, args), update_id
+            ),
+            inbox.INBOX_TOPIC,
+            idempotency_key=update_id,
+        )
+        handle = WorkflowUpdateHandle(
+            self._client, update_id, self._id, workflow_run_id=target
+        )
+        if wait_for_stage == WorkflowUpdateStage.ACCEPTED:
+            acceptance = await client.get_event_async(
+                target, inbox.update_acceptance_key(update_id), timeout
+            )
+            if acceptance is None:
+                raise TimeoutError(f"update was not accepted within {timeout}s")
+            if acceptance["status"] != "accepted":
+                raise WorkflowUpdateFailedError(
+                    deserialize_failure(acceptance["failure"])
+                )
+        else:  # COMPLETED
+            outcome = await client.get_event_async(
+                target, inbox.update_result_key(update_id), timeout
+            )
+            if outcome is None:
+                raise TimeoutError(f"update did not complete within {timeout}s")
+            if outcome["status"] == "rejected":
+                # Rejection is a failure of the *start* (never accepted).
+                raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
+            handle._known_outcome = outcome
+        return handle
+
     async def execute_update(
         self,
         update: Any,
@@ -576,27 +932,47 @@ class WorkflowHandle:
         """Send an update and wait for its result; raises
         :py:class:`WorkflowUpdateFailedError` on rejection or failure.
         """
-        _ignore_rpc_options("execute_update", rpc_metadata, None)
-        update_id = id or str(uuid_mod.uuid4())
-        client = self._client._dbos_client
-        target = await self._target()
-        timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
-        await client.send_async(
-            target,
-            inbox.update_envelope(
-                _update_name(update), _resolve_args(arg, args), update_id
-            ),
-            inbox.INBOX_TOPIC,
-            idempotency_key=update_id,
+        handle = await self.start_update(
+            update,
+            arg,
+            wait_for_stage=WorkflowUpdateStage.COMPLETED,
+            args=args,
+            id=id,
+            result_type=result_type,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
         )
-        reply = await client.get_event_async(
-            target, inbox.update_result_key(update_id), timeout
+        return await handle.result(rpc_timeout=rpc_timeout)
+
+    def get_update_handle(
+        self,
+        id: str,
+        *,
+        workflow_run_id: Optional[str] = None,
+        result_type: Optional[type] = None,
+    ) -> WorkflowUpdateHandle:
+        """Get a handle for an already-sent update — e.g. to re-attach and
+        collect its result after a client restart. Requires the update to
+        have been started with a known ``id``.
+        """
+        return WorkflowUpdateHandle(
+            self._client,
+            id,
+            self._id,
+            workflow_run_id=workflow_run_id or self._run_id,
+            result_type=result_type,
         )
-        if reply is None:
-            raise TimeoutError(f"update did not complete within {timeout}s")
-        if reply["status"] == "completed":
-            return reply["result"]
-        raise WorkflowUpdateFailedError(deserialize_failure(reply["failure"]))
+
+    def get_update_handle_for(
+        self,
+        update: Any,
+        id: str,
+        *,
+        workflow_run_id: Optional[str] = None,
+    ) -> WorkflowUpdateHandle:
+        """Get a typed handle for an already-sent update (see
+        :py:meth:`get_update_handle`)."""
+        return self.get_update_handle(id, workflow_run_id=workflow_run_id)
 
     async def describe(
         self,
@@ -654,4 +1030,9 @@ class WorkflowHandle:
         _ignore_rpc_options("terminate", rpc_metadata, rpc_timeout)
         if args or reason:
             logger.debug("terminate: reason/details are not stored")
-        await self._client._dbos_client.cancel_workflow_async(await self._target())
+        target = await self._target()
+        await self._client._dbos_client.cancel_workflow_async(target)
+        # Termination runs no workflow code, so the parent's close sweep
+        # never fires: apply the durably-recorded ParentClosePolicy of each
+        # child (and, recursively, of terminated descendants) from here.
+        await self._client._apply_parent_close_policies(target, set())

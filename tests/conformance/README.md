@@ -19,5 +19,14 @@ How it works:
    expectations; samples blocked on roadmap phases are `xfail` with the
    phase named in the reason.
 
+Two corpora:
+
+- `test_hello_samples.py` — the `hello/` directory: single-file samples,
+  one subprocess each (worker + starter in one process).
+- `test_message_passing.py` — the `message_passing/` directory (the Phase 2
+  exit gate): multi-file packages run as **two processes** (a long-running
+  worker in module mode, then a starter driven to completion), with
+  `rewrite_package` preserving their package-absolute imports.
+
 Run with: `uv run pytest tests/conformance/` (needs Postgres, like all
 integration tests).

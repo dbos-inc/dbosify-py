@@ -67,6 +67,17 @@ def query_envelope(name: str, args: Sequence[Any], request_id: str) -> Envelope:
     }
 
 
+# Durable registry of a workflow's children and their ParentClosePolicy:
+# [{"id": child_id, "policy": int}, ...]. Written (checkpointed set_event) as
+# children start, so parent-close policies survive the parent — including
+# termination, where no workflow code runs and the *client* applies them.
+CHILDREN_EVENT_KEY = "__tdb_children"
+
+
+def update_acceptance_key(update_id: str) -> str:
+    return f"__tdb_upd_{update_id}_accepted"
+
+
 def update_result_key(update_id: str) -> str:
     return f"__tdb_upd_{update_id}"
 

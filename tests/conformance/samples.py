@@ -67,3 +67,28 @@ def rewrite_sample(source: Path, dest_dir: Path) -> Path:
     dest = dest_dir / source.name
     dest.write_text(rewritten)
     return dest
+
+
+def rewrite_package(source_root: Path, package: str, dest_root: Path) -> Path:
+    """Rewrite a whole sample package tree (multi-file samples with
+    package-absolute imports, e.g. ``message_passing.introduction``),
+    preserving the package path under ``dest_root`` so module execution
+    (``python -m message_passing.introduction.worker``) works with
+    ``dest_root`` on ``sys.path``.
+    """
+    source_pkg = source_root / package.replace(".", "/")
+    for source in source_pkg.rglob("*.py"):
+        relative = source.relative_to(source_root)
+        dest = dest_root / relative
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        rewrite_sample(source, dest.parent)
+    # Parent package __init__ files up the chain (e.g. message_passing/).
+    parts = package.split(".")
+    for depth in range(1, len(parts) + 1):
+        ancestor = Path(*parts[:depth])
+        init = source_root / ancestor / "__init__.py"
+        dest_init = dest_root / ancestor / "__init__.py"
+        if init.exists() and not dest_init.exists():
+            dest_init.parent.mkdir(parents=True, exist_ok=True)
+            rewrite_sample(init, dest_init.parent)
+    return dest_root / parts[0]

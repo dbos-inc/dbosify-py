@@ -48,7 +48,7 @@ EXPECTATIONS = {
         skip="never exits by design: awaits a workflow whose task fails "
         "forever (identical behavior on a real Temporal server)"
     ),
-    "hello_child_workflow": Expectation(xfail="child workflows are Phase 2"),
+    "hello_child_workflow": Expectation(expect_output="Result: Hello, World!"),
     "hello_continue_as_new": Expectation(xfail="continue-as-new is Phase 3"),
     "hello_cron": Expectation(xfail="cron workflows are Phase 3"),
     "hello_exception": Expectation(),

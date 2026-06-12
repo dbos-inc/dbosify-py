@@ -27,6 +27,12 @@ async def compose(name: str, n: int) -> str:
 
 
 @activity.defn
+async def slow_compose(name: str, n: int) -> str:
+    await asyncio.sleep(0.5)
+    return f"hello-{name}-{n}"
+
+
+@activity.defn
 async def always_fails(key: str) -> str:
     attempt_counts[key] = attempt_counts.get(key, 0) + 1
     raise ValueError(f"boom {attempt_counts[key]}")
@@ -125,6 +131,32 @@ class GatherWorkflow:
             ),
             "cause_type": cause.type,
             "cause_message": cause.message,
+        }
+
+
+@workflow.defn
+class WaitRaceWorkflow:
+    @workflow.run
+    async def run(self) -> Dict[str, Any]:
+        slow = asyncio.create_task(
+            workflow.execute_activity(
+                slow_compose,
+                args=["slow", 1],
+                start_to_close_timeout=timedelta(seconds=5),
+            )
+        )
+        timer = asyncio.create_task(workflow.sleep(0.05))
+        done, pending = await workflow.wait(
+            [slow, timer], return_when=asyncio.FIRST_COMPLETED
+        )
+        first_done = "timer" if timer in done else "slow"
+        # Collect the rest in completion order via as_completed.
+        ordered = [await coro for coro in workflow.as_completed([slow])]
+        return {
+            "first_done": first_done,
+            "done_type": type(done).__name__,
+            "pending_count": len(pending),
+            "slow_result": ordered[0],
         }
 
 
@@ -255,3 +287,18 @@ def test_deterministic_helpers_run() -> None:
     handle = dispatcher.start_workflow("DeterminismProbe", [], workflow_id="probe")
     values = handle.get_result()
     assert len(values) == 3 and all(isinstance(v, str) for v in values)
+
+
+@pytest.mark.usefixtures("tdb")
+def test_workflow_wait_and_as_completed() -> None:
+    """workflow.wait returns deterministic input-order *lists* (not sets),
+    and as_completed yields awaitables in completion order."""
+    dispatcher.register_worker(workflows=[WaitRaceWorkflow], activities=[slow_compose])
+    handle = dispatcher.start_workflow(WaitRaceWorkflow, [], workflow_id="wait-race")
+    result = handle.get_result()
+    assert result == {
+        "first_done": "timer",
+        "done_type": "list",
+        "pending_count": 1,
+        "slow_result": "hello-slow-1",
+    }

@@ -51,8 +51,6 @@ FAIL_FAST_ENV = "TEMPORAL_DBOS_FAIL_FAST"
 TASK_RETRY_INITIAL_ENV = "TEMPORAL_DBOS_TASK_RETRY_INITIAL_SECONDS"
 TASK_RETRY_MAX_SECONDS = 60.0
 
-_dbos_workflows: Dict[str, Callable[[List[Any]], Coroutine[Any, Any, Any]]] = {}
-
 
 def _reset_for_tests() -> None:
     """Clear all per-process temporal-dbos state. Test-only: needed when the
@@ -61,12 +59,15 @@ def _reset_for_tests() -> None:
     """
     from . import interpreter
 
-    _dbos_workflows.clear()
+    registry._dbos_workflows.clear()
     registry._workflows.clear()
     registry._activities.clear()
     registry.worker_failure_exception_types = ()
     activities_mod._attempt_steps.clear()
     interpreter._init_step = None
+    interpreter._child_result_step = None
+    interpreter._child_exists_step = None
+    interpreter._update_validate_step = None
 
 
 def register_worker(
@@ -86,8 +87,8 @@ def register_worker(
     for cls in workflows:
         defn = registry.workflow_definition_of(cls)
         registry.register_workflow(defn)
-        if defn.name not in _dbos_workflows:
-            _dbos_workflows[defn.name] = _make_dbos_workflow(defn.name)
+        if defn.name not in registry._dbos_workflows:
+            registry.register_dbos_workflow(defn.name, _make_dbos_workflow(defn.name))
     for fn in activities:
         activity_defn = registry.activity_definition_of(fn)
         if activity_defn.fn is not fn:
@@ -179,9 +180,7 @@ def start_workflow(
     workflow_id: str,
 ) -> "WorkflowHandle[Any]":
     """Start a Temporal workflow; returns the underlying DBOS handle."""
-    fn = _dbos_workflows.get(_type_name(workflow))
-    if fn is None:
-        raise KeyError(f"Workflow type {_type_name(workflow)!r} is not registered")
+    fn = registry.dbos_workflow_for(_type_name(workflow))
     with SetWorkflowID(workflow_id):
         return DBOS.start_workflow(fn, list(args))
 

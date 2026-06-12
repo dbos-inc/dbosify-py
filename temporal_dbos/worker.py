@@ -20,6 +20,7 @@ arguments are accepted and ignored with a debug log.
 """
 
 import asyncio
+import concurrent.futures
 import logging
 from datetime import timedelta
 from typing import Any, Callable, Optional, Sequence, Type
@@ -125,6 +126,14 @@ class Worker:
         if self._finished:
             raise RuntimeError("Worker already shut down; create a new one")
         self._shutdown_event = asyncio.Event()
+        # DBOS launched with a running loop adopts it: workflow coroutines
+        # and our own DBOS async calls all run here, and every DBOS async
+        # API installs DBOS's thread pool as this loop's *default executor*
+        # — which destroy() shuts down without restoring. Capture the
+        # original so the loop's asyncio.to_thread still works after the
+        # worker exits.
+        loop = asyncio.get_running_loop()
+        original_executor = getattr(loop, "_default_executor", None)
         DBOS.launch()
         try:
             # Persist this worker's queue configuration. The default
@@ -143,6 +152,14 @@ class Worker:
                     self._graceful_shutdown_timeout.total_seconds()
                 )
             )
+            if original_executor is None or getattr(
+                original_executor, "_shutdown", False
+            ):
+                # Same construction asyncio uses for its lazy default.
+                original_executor = concurrent.futures.ThreadPoolExecutor(
+                    thread_name_prefix="asyncio"
+                )
+            loop.set_default_executor(original_executor)
             _live_worker = None
 
     async def shutdown(self) -> None:

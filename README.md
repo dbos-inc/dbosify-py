@@ -31,7 +31,7 @@ rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 (`Client.connect` takes a `dbos.DBOSClient`; `Worker` takes a
 `dbos.DBOSConfig`). Workflow and activity code runs unmodified.
 
-Current pass rate: **11 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **12 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -48,8 +48,8 @@ harness).
 | hello_parallel_activity | ✅ |
 | hello_signal | ✅ |
 | hello_update | ✅ |
-| hello_cancellation | ⬜ Phase 2 (cancellation) |
-| hello_child_workflow | ⬜ Phase 2 (child workflows) |
+| hello_child_workflow | ✅ |
+| hello_cancellation | ⬜ Phase 3 (sync activities observe cancellation via heartbeat) |
 | hello_async_activity_completion | ⬜ Phase 3 (async completion) |
 | hello_continue_as_new | ⬜ Phase 3 (continue-as-new) |
 | hello_cron | ⬜ Phase 3 (cron) |
@@ -60,9 +60,22 @@ harness).
 | hello_mtls | — needs mTLS infrastructure |
 | hello_patch | — manual multi-invocation walkthrough (Phase 4) |
 
+`message_passing/` (multi-file, worker + starter as separate processes):
+
+| Sample | Status |
+|---|---|
+| introduction | ✅ (queries, updates + validators, start_update staging, signals, async update handlers running activities) |
+| waiting_for_handlers | ✅ (`all_handlers_finished`) |
+| waiting_for_handlers_and_compensation | ✅ (`workflow.wait`, compensation patterns) |
+| update_with_start/lazy_initialization | ✅ (`WithStartWorkflowOperation`, `execute_update_with_start_workflow`) |
+| safe_message_handlers | ⬜ Phase 3 (continue-as-new) |
+
 ## Known deviations from Temporal
 
-This table is maintained as features land; see `DESIGN.md` §8 for details.
+**[DEVIATIONS.md](DEVIATIONS.md) is the canonical, detailed record of
+*fundamental* deviations** — those inherent to the serverless architecture
+or deliberate design decisions. The table below is the summary; rows marked
+temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 
 | # | Deviation |
 |---|---|
@@ -73,8 +86,11 @@ This table is maintained as features land; see `DESIGN.md` §8 for details.
 | 5 | Default child-workflow IDs are derived from the parent, not random UUIDs. |
 | 6 | `FAIL` id-conflict policy has a small TOCTOU window in v1. |
 | 7 | Different latency/throughput profile: every effect is a Postgres write. Benchmarks will be published. |
-| 8 | Payloads live in the DBOS system database; Temporal's 2MB/4MB payload caps are not enforced. |
-| 9 | (Temporary, until the Phase 3 data-conversion pipeline) Payloads are serialized with pickle, not JSON: exact objects round-trip even without type hints, where temporalio's default converter would return plain dicts. Checkpoints written under pickle will not survive the switch. |
+| 8 | Payloads live in the DBOS system database; Temporal's 2MB/4MB payload caps are not enforced, and history length is ungoverned (no ~50k-event cap pushing toward continue-as-new). |
+| 9 | Signal-with-start / update-with-start are two steps, not one atomic request; transport-ish failures raise builtin `TimeoutError`/`RuntimeError` rather than Temporal's RPC error types; signal/cancel resends are not deduplicated (updates are). |
+| 10 | Workflow time derives from checkpointed participant clocks: monotonic, but client clock skew can step it forward. |
+| 11 | `@workflow.query` handlers must be synchronous (temporalio deprecates async ones; we reject them). |
+| 12 | (Temporary, until the Phase 3 data-conversion pipeline) Payloads are serialized with pickle, not JSON: exact objects round-trip even without type hints, where temporalio's default converter would return plain dicts. Checkpoints written under pickle will not survive the switch. |
 
 ## Development
 

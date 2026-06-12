@@ -18,6 +18,7 @@ WORKFLOW_DEFN_ATTR = "__temporal_workflow_definition"
 RUN_ATTR = "__temporal_workflow_run"
 WORKFLOW_NAME_ATTR = "__temporal_workflow_name"
 SIGNAL_ATTR = "__temporal_signal_definition"
+SIGNAL_POLICY_ATTR = "__temporal_signal_unfinished_policy"
 QUERY_ATTR = "__temporal_query_definition"
 INIT_ATTR = "__temporal_workflow_init"
 ACTIVITY_DEFN_ATTR = "__temporal_activity_definition"
@@ -27,6 +28,9 @@ ACTIVITY_DEFN_ATTR = "__temporal_activity_definition"
 class SignalDefinition:
     name: str
     fn: Callable[..., Any]
+    # HandlerUnfinishedPolicy value (int to avoid importing workflow here);
+    # 1 = WARN_AND_ABANDON (the temporalio default).
+    unfinished_policy: int = 1
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,7 @@ class UpdateDefinition:
     name: str
     fn: Callable[..., Any]
     validator: Optional[Callable[..., Any]] = None
+    unfinished_policy: int = 1
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,27 @@ class ActivityDefinition:
 
 _workflows: Dict[str, WorkflowDefinition] = {}
 _activities: Dict[str, ActivityDefinition] = {}
+
+# Temporal type name -> the registered per-type DBOS workflow (`wf:{type}`),
+# populated by dispatcher.register_worker. Lives here (not in dispatcher) so
+# the interpreter can resolve child-workflow dispatch functions without an
+# import cycle.
+_dbos_workflows: Dict[str, Callable[..., Any]] = {}
+
+
+def register_dbos_workflow(name: str, fn: Callable[..., Any]) -> None:
+    _dbos_workflows[name] = fn
+
+
+def dbos_workflow_for(name: str) -> Callable[..., Any]:
+    fn = _dbos_workflows.get(name)
+    if fn is None:
+        raise KeyError(
+            f"Workflow type {name!r} is not registered with this worker. "
+            f"Registered types: {sorted(_dbos_workflows)}"
+        )
+    return fn
+
 
 # Worker-level failure exception types (Worker(workflow_failure_exception_types=...)),
 # merged across workers in this process; checked by the interpreter alongside
@@ -151,7 +177,11 @@ def build_workflow_definition(
         if signal_name is not None:
             if signal_name in signals:
                 raise ValueError(f"Multiple signal methods found for {signal_name!r}")
-            signals[signal_name] = SignalDefinition(name=signal_name, fn=member)
+            signals[signal_name] = SignalDefinition(
+                name=signal_name,
+                fn=member,
+                unfinished_policy=int(getattr(member, SIGNAL_POLICY_ATTR, 1)),
+            )
         query_name = getattr(member, QUERY_ATTR, None)
         if query_name is not None:
             if query_name in queries:
@@ -164,7 +194,10 @@ def build_workflow_definition(
             if member.name in updates:
                 raise ValueError(f"Multiple update methods found for {member.name!r}")
             updates[member.name] = UpdateDefinition(
-                name=member.name, fn=member.fn, validator=member.validator_fn
+                name=member.name,
+                fn=member.fn,
+                validator=member.validator_fn,
+                unfinished_policy=int(member.unfinished_policy),
             )
 
     if run_fn is None:

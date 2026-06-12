@@ -50,16 +50,29 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
     "client.Client.__init__": "wraps a dbos.DBOSClient (DESIGN §5, revised)",
     "client.Client.connect": "takes dbos.DBOSClient instead of target_host",
     "worker.Worker.__init__": "takes dbos.DBOSConfig; one worker per process",
+    "testing.WorkflowEnvironment.start_local": (
+        "provisions a database on env-provided Postgres; temporalio's "
+        "params are all dev-server flags, which don't apply"
+    ),
+    "testing.WorkflowEnvironment.start_time_skipping": (
+        "Phase 4; raises NotImplementedError"
+    ),
+    "testing.WorkflowEnvironment.dbos_config": (
+        "DBOS-native extension: the config to build the env's Worker from "
+        "(Workers take a DBOSConfig, not a client)"
+    ),
 }
 
 # temporalio parameters not accepted yet, recorded exactly. qualname ->
 # parameter names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # Dynamic handlers, descriptions, and handler policies: Phase 2.
+    # Dynamic handlers + handler descriptions: Phase 3.
+    # versioning_behavior: Phase 4; no_thread_cancel_exception: Phase 3
+    # (activity cancellation types).
     "workflow.defn": {"dynamic", "versioning_behavior"},
-    "workflow.signal": {"description", "dynamic", "unfinished_policy"},
+    "workflow.signal": {"description", "dynamic"},
     "workflow.query": {"description", "dynamic"},
-    "workflow.update": {"description", "dynamic", "unfinished_policy"},
+    "workflow.update": {"description", "dynamic"},
     "activity.defn": {"dynamic", "no_thread_cancel_exception"},
     # Info/describe field coverage grows with features (DESIGN §6.8).
     "workflow.Info.__init__": {
@@ -121,8 +134,6 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "result_type",
         "start_workflow_response",
     },
-    # Query reject conditions: Phase 2.
-    "client.WorkflowHandle.query": {"reject_condition"},
     # Callbacks/links/stack_level are gRPC-era plumbing; versioning
     # overrides are Phase 4.
     "client.Client.start_workflow": {
@@ -132,6 +143,10 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "versioning_override",
     },
     "client.Client.execute_workflow": {"versioning_override"},
+    "client.WithStartWorkflowOperation.__init__": {
+        "stack_level",
+        "versioning_override",
+    },
     # Activity cancellation details: Phase 3.
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
 }

@@ -1,10 +1,24 @@
-"""Subprocess worker for Phase 2 cancellation recovery tests.
+"""Subprocess worker for Phase 2 recovery tests.
 
-Run as: python phase2_worker.py <start|resume> <workflow_id> <effects_path>
+Run as: python phase2_worker.py <scenario>-<start|resume> <workflow_id> <effects_path>
 
-The workflow parks forever; on cancellation its unwind runs a cleanup
-activity and then parks again awaiting a `go` signal — creating the kill
-window *mid-unwind, after the cleanup checkpoint*.
+Scenarios:
+  cancel  cancellation unwind: parks forever; on cancel the unwind runs a
+          cleanup activity then parks awaiting `go` — the kill window is
+          mid-unwind, after the cleanup checkpoint.
+  child   child re-attach: parent starts a slow recording child and awaits
+          it — the kill window is after the child started, before it
+          completed; recovery must re-attach, not spawn a twin.
+  replay  is_replaying probe: samples workflow.unsafe.is_replaying() before
+          an activity, after it, and after a post-recovery signal — the kill
+          window is while parked, so recovery replays the prefix (True)
+          and the signal-driven tail is live (False).
+  updates message-handler chaos: two slow updates accepted (durable
+          acceptance events) and parked, a signal interleaved between them —
+          the kill window is with handlers mid-flight; recovery must replay
+          delivery order, re-park the handlers, run each effect exactly
+          once, and still answer both update results. Driven by the test
+          process via the public client; this worker only hosts.
 """
 
 import asyncio
@@ -27,6 +41,120 @@ async def record_cleanup(path: str) -> None:
     print("CLEANUP_ACTIVITY_EXECUTED", flush=True)
     with open(path, "a") as f:
         f.write("cleanup\n")
+
+
+@activity.defn
+async def record_child_work(path: str) -> str:
+    print("CHILD_ACTIVITY_EXECUTED", flush=True)
+    with open(path, "a") as f:
+        f.write("child-work\n")
+    return "done"
+
+
+@workflow.defn
+class SlowChild:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        print("CHILD_STARTED", flush=True)
+        await workflow.sleep(3.0)
+        result: str = await workflow.execute_activity(
+            record_child_work, path, start_to_close_timeout=timedelta(seconds=10)
+        )
+        return result
+
+
+@workflow.defn
+class ChildParent:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        result: str = await workflow.execute_child_workflow(
+            SlowChild.run, path, id="reattach-child"
+        )
+        return f"parent saw: {result}"
+
+
+@activity.defn
+async def record_update_effect(path: str, n: int) -> int:
+    print(f"UPDATE_EFFECT {n}", flush=True)
+    with open(path, "a") as f:
+        f.write(f"u{n}\n")
+    return n
+
+
+@workflow.defn
+class ReplayProbeWorkflow:
+    def __init__(self) -> None:
+        self.proceed = False
+
+    @workflow.signal
+    def go(self) -> None:
+        self.proceed = True
+
+    @workflow.run
+    async def run(self, path: str) -> "list[bool]":
+        early = workflow.unsafe.is_replaying()
+        # Suppressed during replay (workflow.logger's default), so the
+        # resume process must not re-emit it.
+        workflow.logger.warning("probe-log-early")
+        await workflow.execute_activity(
+            record_cleanup, path, start_to_close_timeout=timedelta(seconds=10)
+        )
+        # Past the last checkpointed event: the live frontier.
+        mid = workflow.unsafe.is_replaying()
+        print("PROBE_PARKED", flush=True)
+        await workflow.wait_condition(lambda: self.proceed)
+        late = workflow.unsafe.is_replaying()
+        workflow.logger.warning("probe-log-late")
+        return [early, mid, late]
+
+
+@workflow.defn
+class UpdateChaosWorkflow:
+    def __init__(self) -> None:
+        self.history: "list[str]" = []
+        self.release = False
+        self.done = False
+
+    @workflow.signal
+    def mark(self, label: str) -> None:
+        self.history.append(f"sig:{label}")
+
+    @workflow.signal
+    def release_updates(self) -> None:
+        self.release = True
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.update
+    async def slow_update(self, path: str, n: int) -> int:
+        self.history.append(f"upd-start:{n}")
+        await workflow.wait_condition(lambda: self.release)
+        await workflow.execute_activity(
+            record_update_effect,
+            args=[path, n],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+        self.history.append(f"upd-end:{n}")
+        return n
+
+    @slow_update.validator
+    def _validate_slow_update(self, path: str, n: int) -> None:
+        # Side effects prove run-once: the verdict is checkpointed, so
+        # replay must not re-execute the validator (Temporal semantics).
+        print(f"VALIDATOR_RAN {n}", flush=True)
+        with open(path, "a") as f:
+            f.write(f"v{n}\n")
+        if n < 0:
+            raise ValueError("no negatives")
+
+    @workflow.run
+    async def run(self, path: str) -> "list[str]":
+        await workflow.wait_condition(
+            lambda: self.done and workflow.all_handlers_finished()
+        )
+        return self.history
 
 
 @workflow.defn
@@ -53,29 +181,43 @@ class CleanupHoldWorkflow:
 
 async def main() -> None:
     mode, workflow_id, effects_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    scenario, _, action = mode.partition("-")
+    run_refs = {
+        "cancel": CleanupHoldWorkflow.run,
+        "child": ChildParent.run,
+        "replay": ReplayProbeWorkflow.run,
+        "updates": UpdateChaosWorkflow.run,
+    }
+    run_ref = run_refs[scenario]
     async with Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[CleanupHoldWorkflow],
-        activities=[record_cleanup],
+        workflows=[
+            CleanupHoldWorkflow,
+            ChildParent,
+            SlowChild,
+            ReplayProbeWorkflow,
+            UpdateChaosWorkflow,
+        ],
+        activities=[record_cleanup, record_child_work, record_update_effect],
     ):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
             client = await Client.connect(dbos_client)
-            if mode == "start":
+            if action == "start":
                 handle = await client.start_workflow(
-                    CleanupHoldWorkflow.run,
+                    run_ref,
                     effects_path,
                     id=workflow_id,
                     task_queue=TASK_QUEUE,
                 )
             else:
-                assert mode == "resume"
+                assert action == "resume"
                 handle = client.get_workflow_handle(workflow_id)
             print("STARTED", flush=True)
             try:
-                await handle.result()
-                outcome = {"result": "completed"}
+                result = await handle.result()
+                outcome = {"result": result}
             except WorkflowFailureError as err:
                 outcome = {"cause": type(err.cause).__name__}
             status = (await handle.describe()).status
