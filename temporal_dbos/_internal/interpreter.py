@@ -544,6 +544,13 @@ class Interpreter(_Runtime):
                 await self._deliver(done)
         finally:
             if self._outcome is not None and self._outcome[0] != "task_failure":
+                # Mark in-flight attempts cancelled BEFORE tearing down
+                # their waiter tasks below: task cancellation unregisters
+                # the attempt's live context, after which a still-running
+                # (threaded) activity function could no longer be reached
+                # and would spin forever.
+                for exec_state in self._pending_activities.values():
+                    activity_api._request_cancel((self._workflow_id, exec_state.seq))
                 # Terminal outcome (not a retryable task failure): apply
                 # ParentClosePolicy to still-running children.
                 await self._sweep_children_on_close()
@@ -572,13 +579,11 @@ class Interpreter(_Runtime):
                             inbox.async_activity_gone_key(exec_state.activity_id),
                             True,
                         )
-                    # Unwind orphans: a still-running (possibly threaded)
-                    # attempt observes the cancel at its next heartbeat
-                    # instead of spinning forever; then drop its
-                    # cross-attempt worker state.
-                    key = (self._workflow_id, exec_state.seq)
-                    activity_api._request_cancel(key)
-                    activity_api._forget_attempt_state(key)
+                    # (The cancel request itself was delivered before the
+                    # waiter teardown above.) Drop cross-attempt state.
+                    activity_api._forget_attempt_state(
+                        (self._workflow_id, exec_state.seq)
+                    )
 
         self._warn_if_unfinished_handlers()
         kind, value = self._outcome

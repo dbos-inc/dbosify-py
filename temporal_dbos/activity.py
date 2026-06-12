@@ -130,7 +130,12 @@ _cancel_requested_keys: "set[Tuple[str, int]]" = set()
 def _register_attempt(key: Tuple[str, int], ctx: "_Context") -> None:
     _live_attempts[key] = ctx
     if key in _cancel_requested_keys:
+        # Consume the marker: it must survive until registration because
+        # DBOS runs step bodies through its own task/thread machinery — the
+        # attempt function can start (detached) AFTER the workflow side
+        # cancelled our waiter task and finished its cleanup.
         ctx.cancelled.set()
+        _cancel_requested_keys.discard(key)
 
 
 def _unregister_attempt(key: Tuple[str, int], ctx: "_Context") -> None:
@@ -151,9 +156,14 @@ def _request_cancel(key: Tuple[str, int]) -> None:
 
 
 def _forget_attempt_state(key: Tuple[str, int]) -> None:
-    """Drop per-activity worker state once its execution resolves."""
+    """Drop per-activity worker state once its execution resolves.
+
+    Deliberately does NOT clear a pending cancel-request marker: a
+    detached, not-yet-registered attempt must still find it (registration
+    consumes it). A marker whose attempt never registers at all leaks a
+    small tuple — bounded by cancelled-before-start attempts.
+    """
     _heartbeat_store.pop(key, None)
-    _cancel_requested_keys.discard(key)
 
 
 class _CompleteAsyncError(BaseException):
