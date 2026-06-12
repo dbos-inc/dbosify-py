@@ -518,9 +518,15 @@ Scheme (`_internal/ids.py`):
   (mirroring the cancellation marker; status maps to CONTINUED_AS_NEW).
   `handle.result(follow_runs=True)` follows markers; `follow_runs=False` raises
   `WorkflowContinuedAsNewError`; the child-result step follows chains so parents see the
-  final run's result, and ParentClosePolicy sweeps resolve each child's *current* run (a
-  child that continued as new must be terminated/cancelled at its live run, not its
-  closed first run). Accepted updates abandoned at any terminal outcome get a failure
+  final run's result, and ParentClosePolicy sweeps, in-flight child cancellation, and
+  `ChildWorkflowHandle.signal` all resolve each child's *current* run (a child that
+  continued as new must be reached at its live run, not its closed first run).
+  `terminate()` is chain-aware: a run-bound terminate on a closed run raises instead of
+  clobbering its recorded marker (DBOS cancel overwrites terminal statuses), and an
+  unbound terminate follows continue-as-new hops — successors are identified by their
+  same-chain parent link (a reuse-created successor is a new logical execution and is
+  left alone) — so terminating a CAN-looping entity workflow converges instead of
+  silently missing. Accepted updates abandoned at any terminal outcome get a failure
   reply (`AcceptedUpdateCompletedWorkflow`, as in Temporal) instead of leaving callers to
   time out. Client reply waits (update acceptance/result, query replies) walk
   the chain on a miss: a forwarded update/query is answered under the *new* run's id, not

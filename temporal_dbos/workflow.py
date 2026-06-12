@@ -624,8 +624,13 @@ class ChildWorkflowHandle:
             if isinstance(signal, str)
             else getattr(signal, _registry.SIGNAL_ATTR)
         )
+        # Resolve the chain: the child may have continued as new, and the
+        # signal must reach its *current* run (replay-safe: the send is
+        # checkpointed, so resolution happens once).
         await self._runtime.runtime_send_to_workflow(
-            self._id, _inbox.signal_envelope(str(name), _resolve_args(arg, args))
+            self._id,
+            _inbox.signal_envelope(str(name), _resolve_args(arg, args)),
+            resolve_chain=True,
         )
 
 

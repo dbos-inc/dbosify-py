@@ -1288,8 +1288,46 @@ class WorkflowHandle:
         if args or reason:
             logger.debug("terminate: reason/details are not stored")
         target = await self._target()
-        await self._client._dbos_client.cancel_workflow_async(target)
-        # Termination runs no workflow code, so the parent's close sweep
-        # never fires: apply the durably-recorded ParentClosePolicy of each
-        # child (and, recursively, of terminated descendants) from here.
-        await self._client._apply_parent_close_policies(target, set())
+        # Terminate must land on a LIVE run. Two hazards (Temporal's server
+        # handles both atomically): a DBOS cancel on a closed run would
+        # CLOBBER its recorded status (eating a continue-as-new marker), so
+        # closed targets raise instead; and a workflow hopping via
+        # continue-as-new mid-request must not escape, so after each cancel
+        # we follow any CAN-created successor (identified by its same-chain
+        # parent link — a reuse-created successor is a new logical
+        # execution and is left alone) and terminate it too.
+        bound = self._run_id is not None
+        cancelled_any = False
+        for _ in range(64):
+            status = await self._client._status_of(target)
+            mapped = _status.to_execution_status(status.status, error=status.error)
+            if mapped == WorkflowExecutionStatus.CONTINUED_AS_NEW and (
+                not bound or cancelled_any
+            ):
+                # Unbound terminates address the workflow: follow the hop.
+                # (A run-bound terminate on a closed run raises below, as in
+                # Temporal.)
+                base, index = ids.parse_run(target)
+                target = ids.run_dbos_id(base, index + 1)
+                continue
+            if mapped != WorkflowExecutionStatus.RUNNING:
+                raise RuntimeError(
+                    f"Workflow run already closed: {target!r} ({mapped.name})"
+                )
+            await self._client._dbos_client.cancel_workflow_async(target)
+            # Termination runs no workflow code, so the close sweep never
+            # fires: apply the durably-recorded ParentClosePolicy of each
+            # child (recursively) from here.
+            await self._client._apply_parent_close_policies(target, set())
+            cancelled_any = True
+            base, index = ids.parse_run(target)
+            next_id = ids.run_dbos_id(base, index + 1)
+            successors = await self._client._dbos_client.list_workflows_async(
+                workflow_ids=[next_id]
+            )
+            if not successors or successors[0].parent_workflow_id != target:
+                return
+            target = next_id
+        raise RuntimeError(
+            "terminate did not converge: the workflow kept continuing-as-new"
+        )

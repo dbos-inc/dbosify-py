@@ -1062,8 +1062,11 @@ class Interpreter(_Runtime):
                     self._waiters.remove(waiter)
                     waiter.task.cancel()
             if child.cancellation_type != 0 and child.started:  # not ABANDON
+                # The cancel must reach the child's *current* run (it may
+                # have continued as new since we started it).
+                current = await self._resolve_current_run(child.child_id)
                 await DBOS.send_async(
-                    child.child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                    current, inbox.cancel_envelope(), inbox.INBOX_TOPIC
                 )
 
     def _discard_abandoned(self, task: "asyncio.Task[Any]") -> None:
