@@ -743,10 +743,17 @@ mid-update-handler (accepted-but-parked), and the is_replaying probe.
 dynamic workflows/handlers + handler descriptions,
 workflow retry policies, id reuse/conflict policies, heartbeats + activity
 cancellation types + async activity completion (done: heartbeat-delivered
-cancellation incl. sync activities, WAIT_CANCELLATION_COMPLETED, in-memory
-heartbeat details across attempts, `raise_complete_async` + task-token
-completion via inbox envelopes — flipped `hello_cancellation` and
-`hello_async_activity_completion`, hello 15/19), `list_workflows` query parser +
+cancellation incl. sync activities, WAIT_CANCELLATION_COMPLETED,
+heartbeat-timeout enforcement via an in-process watchdog (TimeoutType.HEARTBEAT,
+retried per policy), in-memory heartbeat details across attempts,
+`raise_complete_async` + task-token completion via inbox envelopes with
+external fails consulting the retry policy — flipped `hello_cancellation` and
+`hello_async_activity_completion`, hello 15/19. Known v1 gaps, all fixable:
+start-to-close/heartbeat timeouts are not enforced while an activity is parked
+async-pending; an external completer is not notified if the workflow side
+cancels the parked activity (its complete() is silently dropped, D10 family);
+async-activity handles address by task token only, not the
+workflow_id/run_id/activity_id reference triple), `list_workflows` query parser +
 `count_workflows`, client + activity interceptors, the data-conversion pipeline (default
 JSON conversion — moved from Phase 1 — plus custom DataConverters + PayloadCodec; until
 it lands, payloads ride DBOS's default pickle serializer, a documented temporary

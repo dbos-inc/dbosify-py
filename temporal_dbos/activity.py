@@ -15,6 +15,7 @@ external completion via ``client.get_async_activity_handle``.
 import inspect
 import logging
 import threading
+import time as time_mod
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -108,6 +109,7 @@ class _Context:
     on_heartbeat: Callable[..., None]
     cancelled: threading.Event = field(default_factory=threading.Event)
     last_heartbeat: Sequence[Any] = ()
+    last_heartbeat_at: float = field(default_factory=time_mod.monotonic)
     # (workflow_run_id, seq) for real runs; None in ActivityEnvironment.
     attempt_key: Optional[Tuple[str, int]] = None
 
@@ -186,6 +188,7 @@ def heartbeat(*details: Any) -> None:
     """
     ctx = _context()
     ctx.last_heartbeat = details
+    ctx.last_heartbeat_at = time_mod.monotonic()
     if ctx.attempt_key is not None:
         _heartbeat_store[ctx.attempt_key] = list(details)
     ctx.on_heartbeat(*details)

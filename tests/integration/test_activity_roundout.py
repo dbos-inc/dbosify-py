@@ -62,6 +62,19 @@ async def complete_externally() -> str:
     activity.raise_complete_async()
 
 
+@activity.defn
+def stalls_after_one_heartbeat() -> Sequence[Any]:
+    info = activity.info()
+    if info.attempt == 1:
+        activity.heartbeat("p1")
+        # Stop heartbeating: the watchdog must fail this attempt with
+        # TimeoutType.HEARTBEAT. The wait returns once the watchdog marks
+        # the attempt cancelled, letting the thread exit promptly.
+        activity.wait_for_cancelled_sync(30)
+        raise CancelledError("unwound")
+    return list(info.heartbeat_details)
+
+
 @workflow.defn
 class CancellationWorkflow:
     @workflow.run
@@ -120,6 +133,35 @@ class HeartbeatDetailsWorkflow:
 
 
 @workflow.defn
+class HeartbeatTimeoutWorkflow:
+    @workflow.run
+    async def run(self) -> Sequence[Any]:
+        result: Sequence[Any] = await workflow.execute_activity(
+            stalls_after_one_heartbeat,
+            start_to_close_timeout=timedelta(seconds=30),
+            heartbeat_timeout=timedelta(seconds=0.4),
+            retry_policy=RetryPolicy(
+                initial_interval=timedelta(milliseconds=50), maximum_attempts=2
+            ),
+        )
+        return result
+
+
+@workflow.defn
+class AsyncRetryWorkflow:
+    @workflow.run
+    async def run(self) -> str:
+        result: str = await workflow.execute_activity(
+            complete_externally,
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(
+                initial_interval=timedelta(milliseconds=50), maximum_attempts=2
+            ),
+        )
+        return result
+
+
+@workflow.defn
 class AsyncCompleteWorkflow:
     @workflow.run
     async def run(self, catch_cancel: bool) -> Any:
@@ -143,12 +185,15 @@ async def _env() -> AsyncIterator[Client]:
             WaitCancelWorkflow,
             HeartbeatDetailsWorkflow,
             AsyncCompleteWorkflow,
+            HeartbeatTimeoutWorkflow,
+            AsyncRetryWorkflow,
         ],
         activities=[
             heartbeating_forever,
             record,
             flaky_with_heartbeat,
             complete_externally,
+            stalls_after_one_heartbeat,
         ],
     )
     async with worker:
@@ -249,7 +294,9 @@ async def test_async_activity_fail() -> None:
             AsyncCompleteWorkflow.run, False, id="async-fail", task_queue=TASK_QUEUE
         )
         async_handle = client.get_async_activity_handle(task_token=await _token())
-        await async_handle.fail(ApplicationError("boom", type="Boom"))
+        await async_handle.fail(
+            ApplicationError("boom", type="Boom", non_retryable=True)
+        )
         with pytest.raises(WorkflowFailureError) as exc_info:
             await handle.result()
         cause = exc_info.value.cause
@@ -326,3 +373,36 @@ def test_async_activity_completion_survives_sigkill(tmp_path: Path) -> None:
     # The activity function ran exactly once (the replay re-parked from the
     # checkpointed marker, it did not re-execute the function).
     assert not [l for l in second.transcript if "TOKEN_WRITTEN" in l]
+
+
+async def test_heartbeat_timeout_fails_attempt_and_retries() -> None:
+    """An attempt that stops heartbeating fails with TimeoutType.HEARTBEAT
+    and retries; the next attempt sees the stalled attempt's last heartbeat
+    details."""
+    async with _env() as client:
+        result = await client.execute_workflow(
+            HeartbeatTimeoutWorkflow.run, id="hb-timeout", task_queue=TASK_QUEUE
+        )
+        assert result == ["p1"]
+
+
+async def test_async_activity_fail_retries() -> None:
+    """An external fail() consults the retry policy: the next attempt
+    re-runs the activity function (a fresh async park under the same
+    token), as in Temporal."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AsyncRetryWorkflow.run, id="async-retry", task_queue=TASK_QUEUE
+        )
+        first_token = await _token()
+        await client.get_async_activity_handle(task_token=first_token).fail(
+            ApplicationError("transient", type="Flaky")
+        )
+        deadline = asyncio.get_running_loop().time() + 10
+        while len(TOKENS) < 2:
+            assert asyncio.get_running_loop().time() < deadline, "no retry attempt"
+            await asyncio.sleep(0.05)
+        await client.get_async_activity_handle(task_token=TOKENS[-1]).complete(
+            "second-attempt"
+        )
+        assert await handle.result() == "second-attempt"

@@ -245,8 +245,9 @@ class AsyncActivityHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Fail the activity. v1: final (Temporal would consult the retry
-        policy and schedule another attempt)."""
+        """Fail the activity; the activity's retry policy applies (a
+        retryable failure schedules another attempt, re-running the
+        function)."""
         _ignore_rpc_options("async activity fail", rpc_metadata, rpc_timeout)
         await self._send(
             inbox.activity_result_envelope(self._seq, failure=serialize_failure(error))

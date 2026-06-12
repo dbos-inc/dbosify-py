@@ -523,6 +523,7 @@ class _Runtime:
         retry_policy: Optional[RetryPolicy],
         activity_id: Optional[str],
         cancellation_type: int = 0,
+        heartbeat_timeout: Optional[timedelta] = None,
     ) -> "ActivityHandle":
         raise NotImplementedError
 
@@ -754,9 +755,11 @@ def start_activity(
 ) -> ActivityHandle:
     """Start an activity and return its handle.
 
-    Phase 1 honors arg/args, ``start_to_close_timeout``,
-    ``schedule_to_close_timeout``, ``retry_policy``, and ``activity_id``;
-    the remaining parameters are accepted and ignored (debug-logged).
+    Honors arg/args, ``start_to_close_timeout``, ``schedule_to_close_timeout``,
+    ``heartbeat_timeout`` (a non-heartbeating attempt fails with
+    ``TimeoutType.HEARTBEAT`` and retries), ``retry_policy``,
+    ``cancellation_type``, and ``activity_id``; the remaining parameters are
+    accepted and ignored (debug-logged).
     ``result_type`` is a no-op: payloads round-trip through the DBOS
     serializer, so no type hint is needed to reconstruct them.
     """
@@ -767,7 +770,6 @@ def start_activity(
     ignored = {
         "task_queue": task_queue,
         "schedule_to_start_timeout": schedule_to_start_timeout,
-        "heartbeat_timeout": heartbeat_timeout,
         "versioning_intent": versioning_intent,
         "summary": summary,
         "priority": priority,
@@ -787,6 +789,7 @@ def start_activity(
             if cancellation_type is not None
             else ActivityCancellationType.TRY_CANCEL
         ),
+        heartbeat_timeout=heartbeat_timeout,
     )
 
 

@@ -62,19 +62,20 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
         defn = registry.lookup_activity(activity_name)
 
         attempt_key = (str(meta.get("workflow_run_id", "")), int(meta.get("seq", -1)))
+        heartbeat_timeout = meta.get("heartbeat_timeout")
+        # The activity context (activity.info()/heartbeat()) rides a
+        # contextvar; asyncio.to_thread copies the context, so sync
+        # activities see it too. Registering the context lets the
+        # interpreter deliver cancellation into a running attempt (the
+        # threading.Event outlives task cancellation, so an abandoned
+        # sync thread still observes it at its next heartbeat).
+        ctx = activity_api._Context(
+            info=activity_api._make_info(meta),
+            on_heartbeat=lambda *details: None,
+            attempt_key=attempt_key,
+        )
 
         async def call_user_activity() -> Dict[str, Any]:
-            # The activity context (activity.info()/heartbeat()) rides a
-            # contextvar; asyncio.to_thread copies the context, so sync
-            # activities see it too. Registering the context lets the
-            # interpreter deliver cancellation into a running attempt (the
-            # threading.Event outlives task cancellation, so an abandoned
-            # sync thread still observes it at its next heartbeat).
-            ctx = activity_api._Context(
-                info=activity_api._make_info(meta),
-                on_heartbeat=lambda *details: None,
-                attempt_key=attempt_key,
-            )
             activity_api._register_attempt(attempt_key, ctx)
             token = activity_api._current_context.set(ctx)
             try:
@@ -93,11 +94,41 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
                 activity_api._unregister_attempt(attempt_key)
             return {"ok": True, "result": result, "ended_at": time_mod.time()}
 
+        async def run_attempt() -> Dict[str, Any]:
+            if heartbeat_timeout is None:
+                return await call_user_activity()
+            # Heartbeat-timeout watchdog (Temporal's liveness contract): an
+            # attempt that stops heartbeating for longer than the timeout
+            # fails with TimeoutType.HEARTBEAT (and retries per policy). The
+            # hung function is marked cancelled — a still-live thread
+            # unwinds at its next heartbeat — and abandoned, like
+            # start-to-close enforcement.
+            task = asyncio.ensure_future(call_user_activity())
+            poll = max(0.05, float(heartbeat_timeout) / 4)
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=poll)
+                if done:
+                    return task.result()
+                stale = time_mod.monotonic() - ctx.last_heartbeat_at
+                if stale > float(heartbeat_timeout):
+                    ctx.cancelled.set()
+                    task.cancel()
+                    hb_timeout = exceptions.TimeoutError(
+                        "activity Heartbeat timeout",
+                        type=exceptions.TimeoutType.HEARTBEAT,
+                        last_heartbeat_details=list(ctx.last_heartbeat),
+                    )
+                    return {
+                        "ok": False,
+                        "failure": serialize_failure(hb_timeout),
+                        "ended_at": time_mod.time(),
+                    }
+
         try:
             # User exceptions (including user-raised TimeoutError) are
             # converted inside call_user_activity, so a TimeoutError here is
             # unambiguously the start-to-close enforcement firing.
-            return await asyncio.wait_for(call_user_activity(), timeout=start_to_close)
+            return await asyncio.wait_for(run_attempt(), timeout=start_to_close)
         except activity_api_complete_async_error():
             # raise_complete_async(): the function returned, but the
             # activity stays pending until externally completed (the

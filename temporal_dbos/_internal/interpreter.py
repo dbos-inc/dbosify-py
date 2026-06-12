@@ -397,6 +397,7 @@ class _ActivityExec:
     last_failure: Optional[FailureEnvelope] = None
     cancel_requested: bool = False  # WAIT_CANCELLATION_COMPLETED in flight
     async_pending: bool = False  # raise_complete_async(): awaiting external
+    heartbeat_timeout: Optional[float] = None
 
 
 @dataclass
@@ -798,6 +799,7 @@ class Interpreter(_Runtime):
         retry_policy: Optional[RetryPolicy],
         activity_id: Optional[str],
         cancellation_type: int = 0,
+        heartbeat_timeout: Optional[timedelta] = None,
     ) -> ActivityHandle:
         self._assert_not_read_only("start an activity")
         activities_mod.attempt_step_for(activity_name)  # raise early if unknown
@@ -823,6 +825,9 @@ class Interpreter(_Runtime):
             scheduled_at=self._vloop.time(),
             future=self._vloop.create_future(),
             cancellation_type=cancellation_type,
+            heartbeat_timeout=(
+                heartbeat_timeout.total_seconds() if heartbeat_timeout else None
+            ),
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
@@ -1032,6 +1037,7 @@ class Interpreter(_Runtime):
             "activity_id": exec_state.activity_id,
             "activity_type": exec_state.activity_name,
             "attempt": exec_state.attempt,
+            "heartbeat_timeout": exec_state.heartbeat_timeout,
             "seq": exec_state.seq,
             "workflow_id": ids.parse_run(self._workflow_id)[0],
             "workflow_run_id": self._workflow_id,
@@ -1285,8 +1291,8 @@ class Interpreter(_Runtime):
     def _apply_activity_result(self, envelope: inbox.Envelope) -> None:
         """External completion of an async activity
         (client.get_async_activity_handle). Checkpointed inbox delivery, so
-        the resolution replays identically. v1: an external `fail` is final
-        (Temporal would schedule a retry attempt)."""
+        the resolution replays identically; failures consult the retry
+        policy (Temporal semantics — the function re-runs)."""
         seq = int(envelope.get("seq", -1))
         exec_state = self._pending_activities.get(seq)
         if exec_state is None or not exec_state.async_pending:
@@ -1297,13 +1303,28 @@ class Interpreter(_Runtime):
                 seq,
             )
             return
-        del self._pending_activities[seq]
-        activity_api._forget_attempt_state((self._workflow_id, seq))
         if envelope.get("cancelled"):
+            del self._pending_activities[seq]
+            activity_api._forget_attempt_state((self._workflow_id, seq))
             exec_state.future.cancel()
         elif envelope["ok"]:
+            del self._pending_activities[seq]
+            activity_api._forget_attempt_state((self._workflow_id, seq))
             exec_state.future.set_result(envelope.get("result"))
         else:
+            # An external fail goes through the retry policy, like Temporal:
+            # the next attempt re-runs the activity function (which may park
+            # async again, yielding a fresh wait under the same token).
+            failure: FailureEnvelope = envelope["failure"]
+            exec_state.async_pending = False
+            exec_state.last_failure = failure
+            retry_delay, retry_state = self._retry_decision(exec_state, failure)
+            if retry_delay is not None:
+                exec_state.in_backoff = True
+                self._launch_waiter("activity", seq, DBOS.sleep_async(retry_delay))
+                return
+            del self._pending_activities[seq]
+            activity_api._forget_attempt_state((self._workflow_id, seq))
             error = exceptions.ActivityError(
                 "Activity task failed",
                 scheduled_event_id=0,
@@ -1311,9 +1332,9 @@ class Interpreter(_Runtime):
                 identity="",
                 activity_type=exec_state.activity_name,
                 activity_id=exec_state.activity_id,
-                retry_state=exceptions.RetryState.NON_RETRYABLE_FAILURE,
+                retry_state=retry_state,
             )
-            error.__cause__ = deserialize_failure(envelope["failure"])
+            error.__cause__ = deserialize_failure(failure)
             exec_state.future.set_exception(error)
 
     def _apply_activity_heartbeat(self, envelope: inbox.Envelope) -> None:
