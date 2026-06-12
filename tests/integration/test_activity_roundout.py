@@ -218,6 +218,20 @@ class AsyncCustomIdWorkflow:
 
 
 @workflow.defn
+class AsyncCanWorkflow:
+    @workflow.signal
+    def hop_now(self) -> None:
+        workflow.continue_as_new(True)
+
+    @workflow.run
+    async def run(self, hopped: bool) -> str:
+        result: str = await workflow.execute_activity(
+            complete_externally, start_to_close_timeout=timedelta(seconds=60)
+        )
+        return result
+
+
+@workflow.defn
 class AsyncCompleteWorkflow:
     @workflow.run
     async def run(self, catch_cancel: bool) -> Any:
@@ -246,6 +260,7 @@ async def _env() -> AsyncIterator[Client]:
             AsyncTimeoutWorkflow,
             AsyncCustomIdWorkflow,
             DuplicateIdWorkflow,
+            AsyncCanWorkflow,
         ],
         activities=[
             heartbeating_forever,
@@ -595,3 +610,34 @@ async def test_duplicate_open_activity_id_rejected(
         with pytest.raises(WorkflowFailureError) as exc_info:
             await handle.result()
         assert "already in use" in str(exc_info.value.cause)
+
+
+async def test_async_completion_does_not_cross_continue_as_new() -> None:
+    """A stale completion addressed to the old run's parked activity must
+    not ride carryover into the new run (whose own activities reuse the
+    same default ids) — and the old run's completer learns its activity is
+    gone."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AsyncCanWorkflow.run, False, id="async-can", task_queue=TASK_QUEUE
+        )
+        old_token = await _token()
+        old_handle = client.get_async_activity_handle(task_token=old_token)
+        # Hop first, then race a stale completion in behind it: FIFO puts it
+        # in the old run's inbox, where the carryover drain must drop it.
+        await handle.signal(AsyncCanWorkflow.hop_now)
+        try:
+            await old_handle.complete("STALE")
+        except AsyncActivityCancelledError:
+            pass  # the close already marked it gone: equally correct
+        # The new run parks its own activity (same default id, fresh token).
+        deadline = asyncio.get_running_loop().time() + 15
+        while len(TOKENS) < 2:
+            assert asyncio.get_running_loop().time() < deadline, "no new-run park"
+            await asyncio.sleep(0.1)
+        await client.get_async_activity_handle(task_token=TOKENS[-1]).complete("fresh")
+        # A misdelivered stale envelope would have produced "STALE".
+        assert await handle.result() == "fresh"
+        # The old run's activity is marked gone for its completer.
+        with pytest.raises(AsyncActivityCancelledError):
+            await old_handle.heartbeat("anyone?")

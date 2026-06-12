@@ -638,6 +638,17 @@ class Interpreter(_Runtime):
             message = await DBOS.recv_async(inbox.INBOX_TOPIC, 0)
             if message is None:
                 return
+            if isinstance(message, dict) and message.get("kind") in (
+                "activity_result",
+                "activity_heartbeat",
+            ):
+                # Async-activity completions are addressed to THIS run's
+                # activities; the new run numbers its own activities from
+                # scratch, so forwarding could resolve an unrelated
+                # same-id activity with a stale result. The parked
+                # activities die with this run (gone-events tell the
+                # completer); their late envelopes die here too.
+                continue
             await DBOS.send_async(new_run_id, message, inbox.INBOX_TOPIC)
 
     # ------------------------------------------------------------------
