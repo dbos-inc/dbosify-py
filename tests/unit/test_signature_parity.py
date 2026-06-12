@@ -76,7 +76,6 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     "activity.defn": {"dynamic", "no_thread_cancel_exception"},
     # Info/describe field coverage grows with features (DESIGN §6.8).
     "workflow.Info.__init__": {
-        "continued_run_id",
         "cron_schedule",
         "execution_timeout",
         "first_execution_run_id",

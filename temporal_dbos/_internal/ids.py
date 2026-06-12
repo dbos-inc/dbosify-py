@@ -32,6 +32,15 @@ def run_dbos_id(workflow_id: str, run_index: int) -> str:
     return f"{workflow_id}{RUN_SEPARATOR}{run_index}"
 
 
+def parse_run(dbos_id: str) -> "tuple[str, int]":
+    """Split a DBOS run id into (workflow_id, run_index). Safe because user
+    workflow ids may not contain the separator."""
+    if RUN_SEPARATOR in dbos_id:
+        base, _, suffix = dbos_id.rpartition(RUN_SEPARATOR)
+        return base, int(suffix)
+    return dbos_id, 0
+
+
 def run_index_of(workflow_id: str, dbos_id: str) -> Optional[int]:
     """If ``dbos_id`` is a run of ``workflow_id``, its run index; else None.
 

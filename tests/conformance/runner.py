@@ -103,6 +103,9 @@ def install_shim() -> None:
 def main() -> None:
     install_shim()
     target = sys.argv[1]
+    # Samples that argparse must see a clean argv (defaults only), not the
+    # runner's target argument.
+    sys.argv = [target]
     if target.endswith(".py"):
         runpy.run_path(target, run_name="__main__")
     else:

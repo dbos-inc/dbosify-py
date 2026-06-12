@@ -30,6 +30,7 @@ from typing import (
     List,
     Mapping,
     MutableMapping,
+    NoReturn,
     Optional,
     Sequence,
     Tuple,
@@ -53,6 +54,8 @@ __all__ = [
     "all_handlers_finished",
     "as_completed",
     "cancellation_reason",
+    "continue_as_new",
+    "ContinueAsNewError",
     "defn",
     "execute_activity",
     "execute_activity_method",
@@ -447,12 +450,32 @@ class Info:
     """
 
     attempt: int
-    namespace: str
-    run_id: str
-    start_time: datetime
-    task_queue: str
-    workflow_id: str
-    workflow_type: str
+    # The previous run of this chain when this run was created by a
+    # continuation (continue-as-new; later also retries/cron), else None.
+    continued_run_id: Optional[str] = None
+    namespace: str = "default"
+    run_id: str = ""
+    start_time: datetime = datetime.fromtimestamp(0)
+    task_queue: str = ""
+    workflow_id: str = ""
+    workflow_type: str = ""
+
+    def get_current_history_length(self) -> int:
+        """Approximated as the run's checkpoint cursor (claimed DBOS
+        function ids) — the analog of history events here."""
+        return _runtime().runtime_history_length()
+
+    def get_current_history_size(self) -> int:
+        """History byte size is not tracked; always 0. Use
+        :py:meth:`is_continue_as_new_suggested` (threshold on checkpoint
+        count) for continue-as-new decisions."""
+        return 0
+
+    def is_continue_as_new_suggested(self) -> bool:
+        """Whether this run's checkpoint count has passed the
+        continue-as-new suggestion threshold
+        (``TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD``, default 10000)."""
+        return _runtime().runtime_can_suggested()
 
 
 class _Runtime:
@@ -472,6 +495,12 @@ class _Runtime:
         raise NotImplementedError
 
     def runtime_is_replaying(self) -> bool:
+        raise NotImplementedError
+
+    def runtime_history_length(self) -> int:
+        raise NotImplementedError
+
+    def runtime_can_suggested(self) -> bool:
         raise NotImplementedError
 
     def runtime_cancellation_reason(self) -> Optional[str]:
@@ -903,6 +932,57 @@ async def wait(
 def _release_waiter(waiter: "asyncio.Future[Any]", *_args: Any) -> None:
     if not waiter.done():
         waiter.set_result(None)
+
+
+class ContinueAsNewError(BaseException):
+    """Thrown by :py:func:`continue_as_new`; must escape the run method
+    uncaught (mirrors temporalio: a ``BaseException`` so bare ``except
+    Exception`` blocks don't swallow it)."""
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        self._tdb_args: Sequence[Any] = ()
+        self._tdb_workflow: Optional[str] = None
+        self._tdb_task_queue: Optional[str] = None
+
+
+def continue_as_new(
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    workflow: Any = None,
+    task_queue: Optional[str] = None,
+    run_timeout: Optional[timedelta] = None,
+    task_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    memo: Optional[Any] = None,
+    search_attributes: Optional[Any] = None,
+    versioning_intent: Optional[Any] = None,
+    initial_versioning_behavior: Optional[Any] = None,
+) -> "NoReturn":
+    """Stop the current run and continue the chain as a new run with the
+    given arguments (same workflow type unless ``workflow`` is given). The
+    raised :py:class:`ContinueAsNewError` must not be caught.
+    """
+    for key, value in {
+        "run_timeout": run_timeout,
+        "task_timeout": task_timeout,
+        "retry_policy": retry_policy,
+        "memo": memo,
+        "search_attributes": search_attributes,
+        "versioning_intent": versioning_intent,
+        "initial_versioning_behavior": initial_versioning_behavior,
+    }.items():
+        if value is not None:
+            logger.debug("continue_as_new: ignoring unsupported parameter %r", key)
+    _runtime()  # must be called from workflow code
+    err = ContinueAsNewError("Workflow continued as new")
+    err._tdb_args = _resolve_args(arg, args)
+    err._tdb_workflow = (
+        _resolve_workflow_type(workflow) if workflow is not None else None
+    )
+    err._tdb_task_queue = task_queue
+    raise err
 
 
 def _resolve_workflow_type(workflow: Any) -> str:

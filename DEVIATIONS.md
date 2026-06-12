@@ -42,8 +42,13 @@ The same workflows are visible to DBOS tools (Conductor, `DBOS.cancel_workflow`,
 fork, resume), and those operations do **not** carry Temporal semantics:
 a DBOS-native cancel is a terminate with *no parent-close policy sweep*;
 fork/resume on dispatcher workflows have no Temporal-defined meaning.
-Operating through both layers on the same execution requires care — the
-Temporal-faithful verbs are the `temporal_dbos` client APIs.
+Status display has the same caveat: CANCELED and CONTINUED_AS_NEW are
+recorded as marker "errors", so in DBOS-native views (Conductor dashboards,
+raw status queries) those runs read as ERROR — a healthy long-lived entity
+workflow that continues-as-new periodically looks like a stream of errored
+workflows there. Operating through both layers on the same execution
+requires care — the Temporal-faithful verbs and statuses are the
+`temporal_dbos` client APIs.
 
 ## Identity and runs
 
@@ -125,6 +130,16 @@ updates are deduplicated by update id (resends are safe), signals and
 cancels carry no request id: an application-level resend delivers twice,
 where Temporal's server dedups the RPC.
 
+Run transitions widen the no-server gap slightly: a send resolves the
+chain's current run client-side, so a message can land in a run that closes
+before consuming it. Temporal routes id-addressed signals to the live run
+atomically, including across continue-as-new. Continue-as-new narrows this
+to a small window — the closing run forwards everything still unconsumed
+(carryover) and the next run is enqueued before forwarding begins — but a
+send that resolved the old run and landed after its final drain is silently
+dropped. (Upstreamable: an API to consume another workflow's inbox would
+let a new run sweep its predecessor.)
+
 ### D11. Terminate stores no reason or details
 
 DBOS cancellation has no reason field, so `handle.terminate(reason=...)`
@@ -186,7 +201,10 @@ threshold, not a server-enforced cap.
 `list_workflows` supports a documented subset of Temporal's visibility
 query language, mapped onto DBOS filters; custom search attributes are
 (post-Phase 3) stored but not indexed or queryable. The full query language
-is not planned.
+is not planned. Similarly, history *byte size* is not tracked:
+`workflow.info().get_current_history_size()` always returns 0 — use
+`is_continue_as_new_suggested()` / `get_current_history_length()` (the
+checkpoint count) for continue-as-new decisions.
 
 ### D16. Performance texture: every effect is a Postgres write
 

@@ -29,9 +29,10 @@ The conformance suite (`tests/conformance/`) runs the
 `hello/` corpus against temporal-dbos. Migration = the mechanical import
 rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 (`Client.connect` takes a `dbos.DBOSClient`; `Worker` takes a
-`dbos.DBOSConfig`). Workflow and activity code runs unmodified.
+`dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
+`message_passing/` corpus passes 5/5.
 
-Current pass rate: **12 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **13 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -51,7 +52,7 @@ harness).
 | hello_child_workflow | ✅ |
 | hello_cancellation | ⬜ Phase 3 (sync activities observe cancellation via heartbeat) |
 | hello_async_activity_completion | ⬜ Phase 3 (async completion) |
-| hello_continue_as_new | ⬜ Phase 3 (continue-as-new) |
+| hello_continue_as_new | ✅ (10 chained runs) |
 | hello_cron | ⬜ Phase 3 (cron) |
 | hello_search_attributes | ⬜ Phase 3 (search attributes) |
 | hello_query | ⬜ Phase 4 (queries on closed workflows — deviation #2) |
@@ -68,7 +69,7 @@ harness).
 | waiting_for_handlers | ✅ (`all_handlers_finished`) |
 | waiting_for_handlers_and_compensation | ✅ (`workflow.wait`, compensation patterns) |
 | update_with_start/lazy_initialization | ✅ (`WithStartWorkflowOperation`, `execute_update_with_start_workflow`) |
-| safe_message_handlers | ⬜ Phase 3 (continue-as-new) |
+| safe_message_handlers | ✅ (continue-as-new + handler-heavy traffic) — the `message_passing/` corpus is complete |
 
 ## Known deviations from Temporal
 
@@ -87,7 +88,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 6 | `FAIL` id-conflict policy has a small TOCTOU window in v1. |
 | 7 | Different latency/throughput profile: every effect is a Postgres write. Benchmarks will be published. |
 | 8 | Payloads live in the DBOS system database; Temporal's 2MB/4MB payload caps are not enforced, and history length is ungoverned (no ~50k-event cap pushing toward continue-as-new). |
-| 9 | Signal-with-start / update-with-start are two steps, not one atomic request; transport-ish failures raise builtin `TimeoutError`/`RuntimeError` rather than Temporal's RPC error types; signal/cancel resends are not deduplicated (updates are). |
+| 9 | Signal-with-start / update-with-start are two steps, not one atomic request; transport-ish failures raise builtin `TimeoutError`/`RuntimeError` rather than Temporal's RPC error types; signal/cancel resends are not deduplicated (updates are); a narrow window during a continue-as-new transition can drop an id-addressed signal (the closing run forwards everything it can). |
 | 10 | Workflow time derives from checkpointed participant clocks: monotonic, but client clock skew can step it forward. |
 | 11 | `@workflow.query` handlers must be synchronous (temporalio deprecates async ones; we reject them). |
 | 12 | (Temporary, until the Phase 3 data-conversion pipeline) Payloads are serialized with pickle, not JSON: exact objects round-trip even without type hints, where temporalio's default converter would return plain dicts. Checkpoints written under pickle will not survive the switch. |

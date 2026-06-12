@@ -25,7 +25,11 @@ from . import exceptions
 from ._internal import ids, inbox
 from ._internal import registry as _registry
 from ._internal import status as _status
-from ._internal.payloads import SerializedWorkflowFailure, deserialize_failure
+from ._internal.payloads import (
+    SerializedContinueAsNew,
+    SerializedWorkflowFailure,
+    deserialize_failure,
+)
 from ._internal.status import WorkflowExecutionStatus
 from .common import (
     QueryRejectCondition,
@@ -43,6 +47,7 @@ DEFAULT_CLIENT_POLL_SECONDS = 1.0
 __all__ = [
     "Client",
     "WithStartWorkflowOperation",
+    "WorkflowContinuedAsNewError",
     "WorkflowQueryRejectedError",
     "WorkflowHandle",
     "WorkflowExecution",
@@ -68,6 +73,20 @@ class WorkflowFailureError(exceptions.TemporalError):
     def __init__(self, *, cause: BaseException) -> None:
         super().__init__("Workflow execution failed")
         self.__cause__ = cause
+
+
+class WorkflowContinuedAsNewError(exceptions.TemporalError):
+    """The workflow continued as new while waiting with
+    ``follow_runs=False``; ``new_execution_run_id`` is the next run."""
+
+    def __init__(self, new_execution_run_id: str) -> None:
+        super().__init__("Workflow continued as new")
+        self._new_execution_run_id = new_execution_run_id
+
+    @property
+    def new_execution_run_id(self) -> str:
+        """The run id of the next run in the chain."""
+        return self._new_execution_run_id
 
 
 class WorkflowQueryRejectedError(exceptions.TemporalError):
@@ -771,25 +790,34 @@ class WorkflowHandle:
         _ignore_rpc_options("result", rpc_metadata, rpc_timeout)
         dbos_id = await self._target()
         runtime_client = self._client._dbos_client
-        handle: Any = await runtime_client.retrieve_workflow_async(dbos_id)
-        try:
-            return await handle.get_result()
-        except SerializedWorkflowFailure as failure:
-            # NOTE: `raise ... from X` overwrites __cause__, which the
-            # constructor just set — so the `from` target must be the cause
-            # itself.
-            cause = deserialize_failure(failure.envelope)
-            raise WorkflowFailureError(cause=cause) from cause
-        except DBOSAwaitedWorkflowCancelledError:
-            # Native DBOS cancel == terminate in our scheme (§6.5).
-            terminated = exceptions.TerminatedError("Workflow terminated")
-            raise WorkflowFailureError(cause=terminated) from terminated
-        except Exception as err:
-            # FAIL_FAST mode or infrastructure errors: surface with a
-            # converted cause rather than a raw pickled exception.
-            converted = exceptions.ApplicationError(str(err), type=type(err).__name__)
-            converted.__cause__ = err
-            raise WorkflowFailureError(cause=converted) from converted
+        while True:
+            handle: Any = await runtime_client.retrieve_workflow_async(dbos_id)
+            try:
+                return await handle.get_result()
+            except SerializedContinueAsNew as marker:
+                new_run_id: str = marker.envelope["new_run_id"]
+                if not follow_runs:
+                    raise WorkflowContinuedAsNewError(new_run_id) from None
+                dbos_id = new_run_id
+                continue
+            except SerializedWorkflowFailure as failure:
+                # NOTE: `raise ... from X` overwrites __cause__, which the
+                # constructor just set — so the `from` target must be the
+                # cause itself.
+                cause = deserialize_failure(failure.envelope)
+                raise WorkflowFailureError(cause=cause) from cause
+            except DBOSAwaitedWorkflowCancelledError:
+                # Native DBOS cancel == terminate in our scheme (§6.5).
+                terminated = exceptions.TerminatedError("Workflow terminated")
+                raise WorkflowFailureError(cause=terminated) from terminated
+            except Exception as err:
+                # FAIL_FAST mode or infrastructure errors: surface with a
+                # converted cause rather than a raw pickled exception.
+                converted = exceptions.ApplicationError(
+                    str(err), type=type(err).__name__
+                )
+                converted.__cause__ = err
+                raise WorkflowFailureError(cause=converted) from converted
 
     async def signal(
         self,
