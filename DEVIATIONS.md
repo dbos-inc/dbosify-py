@@ -67,6 +67,33 @@ lets recovery *re-attach* to an already-started child instead of spawning a
 twin) and is strictly more useful operationally. Same caveat: code
 asserting UUID format breaks.
 
+### D19. Cron workflows are run chains with per-run results
+
+`start_workflow(cron_schedule=...)` creates run 0 immediately, delayed to
+the next cron occurrence (the equivalent of Temporal's first-workflow-task
+backoff — the execution exists at once, so describe/signal/result work
+before the first fire); each close enqueues run n+1 at the next occurrence
+after the close time, so a run that overruns an occurrence skips it
+(Temporal semantics). Differences:
+
+- `result()` on a *successful* cron run returns that run's result, where
+  temporalio's `result(follow_runs=True)` on a cron workflow never returns
+  (it follows every continuation). Failed runs *do* follow to their
+  cron/retry successor. Making successes followable would require wrapping
+  every workflow output in a continuation envelope; per-run results are
+  also arguably more useful.
+- Cancellation between runs takes effect at the next fire: the cancel
+  envelope waits in the delayed next run's inbox — there is no server to
+  cancel the waiting run in place. And a cron run that never parks (no
+  awaits) cannot observe a cooperative cancel mid-run: it completes, and
+  the pending cancel ends the chain at the hop instead — the final run
+  reads COMPLETED (Temporal's equivalent run also completes; its server
+  suppresses the continuation).
+- Cron expressions: 5-field, UTC by default, `CRON_TZ=`/`TZ=` prefixes
+  honored — as in Temporal; 6-field (leading seconds) and 7-field
+  (trailing year) forms are accepted as an extension where Temporal
+  rejects them. The `@every` shorthand is not supported.
+
 ## Process and operations model
 
 ### D6. Failover is restart-or-management-action, not poller reassignment

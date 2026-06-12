@@ -25,12 +25,16 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from . import exceptions
 from ._internal import ids, inbox
 from ._internal import registry as _registry
+from ._internal import schedules as _schedules
 from ._internal import status as _status
 from ._internal.payloads import (
+    RunMeta,
     SerializedContinueAsNew,
     SerializedWorkflowFailure,
     deserialize_failure,
     serialize_failure,
+    serialize_retry_policy,
+    wrap_input,
 )
 from ._internal.status import WorkflowExecutionStatus
 from .common import (
@@ -563,18 +567,16 @@ class Client:
     ) -> "WorkflowHandle":
         """Start a workflow and return its handle.
 
-        Phase 1 honors arg/args, id, task_queue, run_timeout, the
-        USE_EXISTING/FAIL conflict policies, the ALLOW_DUPLICATE /
-        ALLOW_DUPLICATE_FAILED_ONLY / REJECT_DUPLICATE reuse policies,
-        start_delay, and start_signal. Workflow retry_policy and
-        cron_schedule are Phase 3.
+        Honored: arg/args, id, task_queue, run_timeout, all reuse/conflict
+        policies, start_delay, start_signal, retry_policy (workflows do not
+        retry by default, matching Temporal), and cron_schedule (each run
+        starts at the next cron occurrence after the previous run closes;
+        runs are chained like continue-as-new runs).
         """
         for key, value in {
             "result_type": result_type,
             "execution_timeout": execution_timeout,
             "task_timeout": task_timeout,
-            "retry_policy": retry_policy,
-            "cron_schedule": cron_schedule or None,
             "memo": memo,
             "search_attributes": search_attributes,
             "static_summary": static_summary,
@@ -596,6 +598,27 @@ class Client:
         type_name = _workflow_type_name(workflow)
         workflow_args = _resolve_args(arg, args)
         ids.validate_workflow_id(id)
+
+        meta = RunMeta()
+        if retry_policy is not None:
+            retry_policy._validate()
+            meta.retry_policy = serialize_retry_policy(retry_policy)
+        if cron_schedule:
+            # Validated up front so a bad expression fails the start, not
+            # the first chain hop. The first run is created immediately but
+            # fires at the next cron occurrence (Temporal's first-task
+            # backoff), so describe()/signals/result() work right away.
+            _schedules.validate_cron(cron_schedule)
+            if start_delay is not None:
+                raise ValueError(
+                    "start_delay cannot be used together with cron_schedule"
+                )
+            meta.cron = cron_schedule
+            start_delay = timedelta(
+                seconds=_schedules.next_fire_delay(
+                    cron_schedule, datetime.now(timezone.utc)
+                )
+            )
 
         current = await self._current_run(id)
         run_index = 0
@@ -642,7 +665,7 @@ class Client:
             options["workflow_timeout"] = run_timeout.total_seconds()
         if start_delay is not None:
             options["delay_seconds"] = start_delay.total_seconds()
-        await self._dbos_client.enqueue_async(options, workflow_args)
+        await self._dbos_client.enqueue_async(options, wrap_input(workflow_args, meta))
 
         if start_signal is not None:
             await self._dbos_client.send_async(
@@ -1021,6 +1044,14 @@ class WorkflowHandle:
                 dbos_id = new_run_id
                 continue
             except SerializedWorkflowFailure as failure:
+                # A failed run with a successor (workflow retry, cron
+                # continuation) is followed like temporalio follows
+                # new_execution_run_id on the failure event; without
+                # follow_runs (or a successor) the failure surfaces.
+                successor = failure.envelope.get("new_run_id")
+                if follow_runs and successor is not None:
+                    dbos_id = successor
+                    continue
                 # NOTE: `raise ... from X` overwrites __cause__, which the
                 # constructor just set — so the `from` target must be the
                 # cause itself.

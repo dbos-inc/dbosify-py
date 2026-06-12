@@ -7,6 +7,7 @@ phase that unblocks each sample.
 
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -15,6 +16,7 @@ import pytest
 
 from tests.conformance.samples import ensure_samples, rewrite_sample
 from tests.dbconfig import system_database_url
+from tests.harness import PythonProcess
 
 RUNNER = Path(__file__).parent / "runner.py"
 # Generous by default: each sample subprocess pays full DBOS init plus all
@@ -31,6 +33,10 @@ class Expectation:
     xfail: Optional[str] = None  # reason this can't pass yet
     skip: Optional[str] = None  # reason this isn't runnable in the harness
     timeout: int = SAMPLE_TIMEOUT_SECONDS  # for samples that legitimately run long
+    # The sample never exits by design (e.g. hello_cron awaits forever):
+    # run it in the background, prove the expected effect through the
+    # database (see DB_VERIFIERS), then tear it down.
+    runs_forever: bool = False
 
 
 EXPECTATIONS = {
@@ -65,7 +71,14 @@ EXPECTATIONS = {
         expect_output="Running workflow iteration 9",
         timeout=90,
     ),
-    "hello_cron": Expectation(xfail="cron workflows are Phase 3", timeout=10),
+    "hello_cron": Expectation(
+        # The sample starts a "* * * * *" cron and waits forever; its proof
+        # is in the database (the cron sample logs at INFO with no logging
+        # config, so there is no output line to wait for). Worst case the
+        # first fire is a full minute out.
+        runs_forever=True,
+        timeout=100,
+    ),
     "hello_exception": Expectation(),
     "hello_local_activity": Expectation(expect_output="Result: Hello, World!"),
     "hello_mtls": Expectation(skip="requires mTLS certificates and a TLS endpoint"),
@@ -113,11 +126,61 @@ def _params() -> "list[Any]":
     return params
 
 
+def _verify_hello_cron(deadline_seconds: float) -> None:
+    """The cron chain's proof: run 0 of `hello-cron-workflow-id` completed
+    (the schedule fired and the workflow ran) and run 1 exists (the chain
+    hop enqueued the next occurrence)."""
+    from dbos import DBOSClient
+
+    run_ids = ["hello-cron-workflow-id", "hello-cron-workflow-id--r1"]
+    deadline = time.monotonic() + deadline_seconds
+    statuses: "dict[str, str]" = {}
+    client: Optional[DBOSClient] = None
+    try:
+        while time.monotonic() < deadline:
+            time.sleep(1.0)
+            try:
+                if client is None:
+                    # The sample subprocess creates the database; until
+                    # then, construction/queries fail — keep retrying.
+                    client = DBOSClient(system_database_url=system_database_url())
+                statuses = {
+                    s.workflow_id: s.status
+                    for s in client.list_workflows(workflow_ids=run_ids)
+                }
+            except Exception:
+                continue
+            if statuses.get(run_ids[0]) == "SUCCESS" and run_ids[1] in statuses:
+                return
+        pytest.fail(
+            f"hello_cron: cron did not fire and chain within "
+            f"{deadline_seconds}s (saw {statuses!r})"
+        )
+    finally:
+        if client is not None:
+            client.destroy()
+
+
+DB_VERIFIERS = {"hello_cron": _verify_hello_cron}
+
+
 @pytest.mark.timeout(max(e.timeout for e in EXPECTATIONS.values()) + 30)
 @pytest.mark.usefixtures("cleanup_test_databases")
 @pytest.mark.parametrize("sample_name", _params())
 def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
     expectation = EXPECTATIONS[sample_name]
+    if expectation.runs_forever:
+        process = PythonProcess(
+            RUNNER,
+            str(rewritten_samples / f"{sample_name}.py"),
+            env={"TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url()},
+        )
+        process.start()
+        try:
+            DB_VERIFIERS[sample_name](expectation.timeout)
+        finally:
+            process.terminate_and_wait()
+        return
     result = subprocess.run(
         [sys.executable, str(RUNNER), str(rewritten_samples / f"{sample_name}.py")],
         capture_output=True,

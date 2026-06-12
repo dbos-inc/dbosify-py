@@ -540,12 +540,33 @@ Scheme (`_internal/ids.py`):
   when it points within the same chain (DBOS threads `parent_workflow_id` for in-workflow
   starts, which a CAN enqueue is; real parents point at a different chain base and
   client-side reuse starts carry no link).
-- **Workflow retry_policy** (workflows do NOT retry by default — match that): on failure,
-  dispatcher consults the policy and starts run n+1 with attempt+1 (visible in
+- **Workflow retry_policy (done)** (workflows do NOT retry by default — match that): on
+  failure, the dispatcher consults the policy (serialized into the run's input
+  meta-envelope) and enqueues run n+1 with attempt+1 (visible in
   `workflow.info().attempt`), honoring backoff via `SetEnqueueOptions(delay_seconds=...)`.
-- **Cron** (`start_workflow(cron_schedule=...)`): map to a DBOS schedule (§6.7) whose
-  fire starts run n+1 of the chain; `get_last_completion_result()` reads the previous run's
-  result via the chain. Phase 3.
+  The failed run's failure envelope records `new_run_id`, so
+  `result(follow_runs=True)` follows retries exactly as temporalio follows
+  `new_execution_run_id` on a failure event; the next attempt sees the failure via
+  `workflow.get_last_failure()`. Retries trigger on workflow *failures*; run-timeout
+  retries land with the TIMED_OUT marker work. A cancel requested around the close
+  suppresses further attempts.
+- **Cron (done)** (`start_workflow(cron_schedule=...)`): implemented as **delayed-enqueue
+  chain hops**, not DBOS schedule rows (revising the original sketch — the
+  continue-as-new chain machinery made this strictly simpler and more faithful): the
+  start enqueues run 0 immediately with `delay_seconds` to the next cron occurrence
+  (Temporal's first-workflow-task backoff: the execution exists at once, so
+  describe/signal/result work before the first fire, and DELAYED maps to RUNNING), and
+  each close enqueues run n+1 delayed to the next occurrence after close time (a run
+  that overruns an occurrence skips it, as in Temporal). No scheduler-poll latency, no
+  schedule-row lifecycle to clean up on cancel/terminate, and recovery rides the same
+  idempotent re-attach as continue-as-new. `get_last_completion_result()` /
+  `get_last_failure()` thread the previous run's outcome forward in the meta-envelope
+  (no DB walk). Cron continues after failed runs (retry policy, when present, takes
+  precedence per attempt); a cancel observed by the run — or found undelivered at the
+  hop, for runs that never park — ends the chain; unconsumed inbox messages otherwise
+  carry over to the successor like the CAN carryover. Cron evaluation uses DBOS's
+  vendored croniter: 5-field UTC with `CRON_TZ=`/`TZ=` prefixes, plus 6/7-field
+  (seconds/year) accepted as an extension (DEVIATIONS D19).
 
 ### 6.5 Cancellation matrix
 
@@ -743,11 +764,16 @@ Achieved: 4/5 `message_passing/` samples pass (the fifth needs Phase 3 continue-
 xfail-tagged); chaos suite covers SIGKILL mid-cancellation-unwind, mid-child,
 mid-update-handler (accepted-but-parked), and the is_replaying probe.
 
-**Phase 3 — Operational surface.** Schedules + cron + `start_delay`, continue-as-new
+**Phase 3 — Operational surface.** Schedules + cron + `start_delay` (cron done via
+delayed-enqueue chain hops — flipped `hello_cron`, hello 16/19; `create_schedule` and
+the ScheduleHandle surface remain), continue-as-new
 (done: chain hops, carryover, follow_runs, child chains; flipped
 `hello_continue_as_new` and `safe_message_handlers` — `message_passing/` is 5/5),
 dynamic workflows/handlers + handler descriptions,
-workflow retry policies, id reuse/conflict policies, heartbeats + activity
+workflow retry policies (done: attempt counts, backoff, non-retryable types,
+follow-on-failure, last-failure threading; the run input grew a meta-envelope that
+carries per-run chain state — the same envelope later carries memo/search attributes),
+id reuse/conflict policies, heartbeats + activity
 cancellation types + async activity completion (done: heartbeat-delivered
 cancellation incl. sync activities, WAIT_CANCELLATION_COMPLETED,
 heartbeat-timeout enforcement via an in-process watchdog (TimeoutType.HEARTBEAT,

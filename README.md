@@ -32,7 +32,7 @@ rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 `dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
 `message_passing/` corpus passes 5/5.
 
-Current pass rate: **15 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **16 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -53,7 +53,7 @@ harness).
 | hello_cancellation | ✅ (sync activity observes cancellation via heartbeat; cleanup runs in the unwind) |
 | hello_async_activity_completion | ✅ (`raise_complete_async` + task-token completion) |
 | hello_continue_as_new | ✅ (10 chained runs) |
-| hello_cron | ⬜ Phase 3 (cron) |
+| hello_cron | ✅ (cron chain fires and hops; the sample never exits, so the harness verifies through the database) |
 | hello_search_attributes | ⬜ Phase 3 (search attributes) |
 | hello_query | ⬜ Phase 4 (queries on closed workflows — deviation #2) |
 | hello_activity_multiprocess | ⬜ multiprocess activity executors unsupported |
@@ -92,6 +92,8 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 10 | Workflow time derives from checkpointed participant clocks: monotonic, but client clock skew can step it forward. |
 | 11 | `@workflow.query` handlers must be synchronous (temporalio deprecates async ones; we reject them). |
 | 12 | (Temporary, until the Phase 3 data-conversion pipeline) Payloads are serialized with pickle, not JSON: exact objects round-trip even without type hints, where temporalio's default converter would return plain dicts. Checkpoints written under pickle will not survive the switch. |
+| 13 | Cron workflows are run chains with per-run results: `result()` on a successful cron run returns that run's result (temporalio's would follow the chain forever); cancellation between runs takes effect at the next fire; 6/7-field cron expressions are accepted as an extension. |
+| 14 | (Temporary) Workflow retry policies trigger on workflow *failures*; run-timeout-driven retries land together with the run-timeout TIMED_OUT status marker. |
 
 ## Development
 

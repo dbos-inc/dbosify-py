@@ -20,14 +20,17 @@ Phase 1.
 """
 
 import asyncio
+import copy
 import dataclasses
 import logging
 import os
 import time as time_mod
 import uuid
+from contextlib import nullcontext
+from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Sequence, Type, Union
 
-from dbos import DBOS, SetWorkflowID, WorkflowHandle
+from dbos import DBOS, SetEnqueueOptions, SetWorkflowID, WorkflowHandle
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
 
 from .. import exceptions
@@ -36,7 +39,7 @@ from .. import exceptions
 # temporalio.client.WorkflowUpdateFailedError.
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from . import activities as activities_mod
-from . import inbox, registry
+from . import ids, inbox, registry, schedules
 from .interpreter import (
     Interpreter,
     WorkflowCancelled,
@@ -44,11 +47,15 @@ from .interpreter import (
     WorkflowTaskFailure,
 )
 from .payloads import (
+    FailureEnvelope,
+    RunMeta,
     SerializedContinueAsNew,
     SerializedWorkflowCancellation,
     SerializedWorkflowFailure,
     deserialize_failure,
     serialize_failure,
+    unwrap_input,
+    wrap_input,
 )
 
 logger = logging.getLogger("temporal_dbos.dispatcher")
@@ -108,10 +115,17 @@ def register_worker(
 
 def _make_dbos_workflow(
     type_name: str,
-) -> Callable[[List[Any]], Coroutine[Any, Any, Any]]:
-    async def dispatch(args: List[Any]) -> Any:
+) -> Callable[[Any], Coroutine[Any, Any, Any]]:
+    async def dispatch(payload: Any) -> Any:
+        args, meta = unwrap_input(payload)
+        # Chain hops (cron continuation, workflow retries) re-enqueue this
+        # run's arguments at close; snapshot them before user code can
+        # mutate nested structures in place.
+        hops_possible = meta.cron is not None or meta.retry_policy is not None
+        hop_args = copy.deepcopy(args) if hops_possible else None
+        run_flags = {"cancel_observed": False}
         try:
-            return await _run_workflow_task_loop(type_name, args)
+            result = await _run_workflow_task_loop(type_name, args, meta, run_flags)
         except WorkflowContinuedAsNew as can:
             # The chain-hop marker: the next run is already enqueued; this
             # run's status maps to CONTINUED_AS_NEW and awaiters follow
@@ -120,7 +134,9 @@ def _make_dbos_workflow(
         except WorkflowCancelled as cancelled:
             # The _TemporalCancelledMarker: cooperative cancellation maps to
             # status CANCELED (§6.2), distinct from FAILED below and from
-            # TERMINATED (native DBOS cancel, no record at all).
+            # TERMINATED (native DBOS cancel, no record at all). Cancellation
+            # ends the chain: no retry, no cron continuation (Temporal
+            # semantics).
             raise SerializedWorkflowCancellation(
                 serialize_failure(cancelled.cause)
             ) from None
@@ -128,16 +144,195 @@ def _make_dbos_workflow(
             # Record workflow failures in the stable envelope format so
             # clients reconstruct the exact exception, cause chain included
             # (pickle would drop __cause__).
-            raise SerializedWorkflowFailure(serialize_failure(err)) from None
+            envelope = serialize_failure(err)
+            next_run_id = await _continue_chain_after_failure(
+                type_name, hop_args, meta, envelope, run_flags["cancel_observed"]
+            )
+            if next_run_id is not None:
+                # result(follow_runs=True) follows a failed run to its
+                # retry/cron successor, exactly as temporalio follows
+                # new_execution_run_id on a failure event.
+                envelope["new_run_id"] = next_run_id
+            raise SerializedWorkflowFailure(envelope) from None
+        if meta.cron is not None:
+            assert hop_args is not None
+            carryover = await _drain_unconsumed_inbox()
+            # A cancel requested around the run's close — observed but
+            # swallowed by user code, or still sitting unconsumed in the
+            # inbox of a run that never parked — ends the cron chain
+            # (Temporal suppresses cron continuation once cancellation is
+            # requested). The run itself still closes COMPLETED.
+            if not run_flags["cancel_observed"] and not _contains_cancel(carryover):
+                next_meta = meta.carried_forward()
+                next_meta.last_completion = {"value": result}
+                next_meta.last_failure = None
+                new_run_id = await _enqueue_next_run(
+                    type_name,
+                    hop_args,
+                    next_meta,
+                    delay_seconds=schedules.next_fire_delay(
+                        meta.cron, datetime.now(timezone.utc)
+                    ),
+                )
+                await _forward_carryover(new_run_id, carryover)
+        return result
 
     dispatch.__name__ = dispatch.__qualname__ = f"wf:{type_name}"
-    decorated: Callable[[List[Any]], Coroutine[Any, Any, Any]] = DBOS.workflow(
+    decorated: Callable[[Any], Coroutine[Any, Any, Any]] = DBOS.workflow(
         name=f"wf:{type_name}"
     )(dispatch)
     return decorated
 
 
-async def _run_workflow_task_loop(type_name: str, args: List[Any]) -> Any:
+async def _continue_chain_after_failure(
+    type_name: str,
+    hop_args: Optional[List[Any]],
+    meta: RunMeta,
+    envelope: FailureEnvelope,
+    cancel_observed: bool,
+) -> Optional[str]:
+    """Start the chain's next run after a workflow failure, if anything
+    calls for one: a retry policy with attempts left wins (backoff delay,
+    attempt+1); otherwise a cron chain continues at its next occurrence
+    (attempt resets, as in Temporal). A cancel requested around the close
+    ends the chain either way. Returns the new run id, or None when the
+    failure is terminal for the chain.
+    """
+    if hop_args is None:
+        return None
+    carryover = await _drain_unconsumed_inbox()
+    if cancel_observed or _contains_cancel(carryover):
+        return None
+    new_run_id: Optional[str] = None
+    if meta.retry_policy is not None:
+        delay = _workflow_retry_delay(meta.retry_policy, meta.attempt, envelope)
+        if delay is not None:
+            next_meta = meta.carried_forward()
+            next_meta.attempt = meta.attempt + 1
+            next_meta.last_failure = dict(envelope)
+            new_run_id = await _enqueue_next_run(
+                type_name, hop_args, next_meta, delay_seconds=delay
+            )
+    if new_run_id is None and meta.cron is not None:
+        next_meta = meta.carried_forward()
+        next_meta.last_failure = dict(envelope)
+        new_run_id = await _enqueue_next_run(
+            type_name,
+            hop_args,
+            next_meta,
+            delay_seconds=schedules.next_fire_delay(
+                meta.cron, datetime.now(timezone.utc)
+            ),
+        )
+    if new_run_id is not None:
+        await _forward_carryover(new_run_id, carryover)
+    return new_run_id
+
+
+async def _drain_unconsumed_inbox() -> List[Any]:
+    """Collect inbox messages still unconsumed at run close. Every recv(0)
+    is checkpointed, so the drain replays identically on recovery."""
+    messages: List[Any] = []
+    while True:
+        message = await DBOS.recv_async(inbox.INBOX_TOPIC, 0)
+        if message is None:
+            return messages
+        messages.append(message)
+
+
+def _contains_cancel(messages: List[Any]) -> bool:
+    return any(
+        isinstance(message, dict) and message.get("kind") == "cancel"
+        for message in messages
+    )
+
+
+async def _forward_carryover(new_run_id: str, messages: List[Any]) -> None:
+    """Forward unconsumed messages to the chain's next run (mirroring the
+    interpreter's continue-as-new carryover): an id-addressed signal racing
+    the close keeps reaching the chain instead of dying with this run.
+    Activity envelopes are run-scoped (activity seqs reset per run) and die
+    here, exactly as in the CAN path.
+    """
+    for message in messages:
+        if isinstance(message, dict) and message.get("kind") in (
+            "activity_result",
+            "activity_heartbeat",
+        ):
+            continue
+        await DBOS.send_async(new_run_id, message, inbox.INBOX_TOPIC)
+
+
+def _workflow_retry_delay(
+    policy: Dict[str, Any], attempt: int, failure: FailureEnvelope
+) -> Optional[float]:
+    """Backoff before the next workflow-retry attempt, or None to give up.
+
+    Mirrors the activity retry decision (interpreter._retry_decision) minus
+    the schedule_to_close bound: there is no overall workflow-retry deadline
+    here (execution_timeout enforcement is a separate, unimplemented knob).
+    """
+    if failure.get("non_retryable"):
+        return None
+    failure_type = failure.get("type") or failure["cls"]
+    if failure_type in set(policy.get("non_retryable_error_types") or ()):
+        return None
+    maximum_attempts = policy.get("maximum_attempts") or 0
+    if maximum_attempts and attempt >= maximum_attempts:
+        return None
+    override = failure.get("next_retry_delay")
+    if override is not None:
+        return float(override)
+    initial = float(policy["initial_interval"])
+    delay = initial * float(policy["backoff_coefficient"]) ** (attempt - 1)
+    maximum = policy.get("maximum_interval")
+    return min(delay, float(maximum) if maximum is not None else initial * 100)
+
+
+async def _enqueue_next_run(
+    type_name: str, args: List[Any], meta: RunMeta, *, delay_seconds: float
+) -> str:
+    """Enqueue the chain's next run (workflow retry / cron continuation),
+    mirroring the interpreter's continue-as-new enqueue: the run id is
+    deterministic (current index + 1) and DBOS records in-workflow starts,
+    so a crash anywhere after this replays into an idempotent re-attach.
+    Replays skip the enqueue entirely, which is what makes the live clock
+    reads behind ``delay_seconds`` replay-safe: the delay only ever takes
+    effect once, at first execution.
+    """
+    ctx = get_local_dbos_context()
+    assert ctx is not None, "chain hops must run inside a DBOS workflow"
+    base, index = ids.parse_run(ctx.workflow_id)
+    new_run_id = ids.run_dbos_id(base, index + 1)
+    dispatch_fn = registry.dbos_workflow_for(type_name)
+    status = await DBOS.get_workflow_status_async(ctx.workflow_id)
+    queue_name = status.queue_name if status else None
+    queue = (
+        await DBOS.retrieve_queue_async(queue_name) if queue_name is not None else None
+    )
+    payload = wrap_input(args, meta)
+    delay_ctx = (
+        SetEnqueueOptions(delay_seconds=delay_seconds)
+        if delay_seconds > 0
+        else nullcontext()
+    )
+    with SetWorkflowID(new_run_id), delay_ctx:
+        if queue is not None:
+            await queue.enqueue_async(dispatch_fn, payload)
+        else:
+            # This run wasn't queue-dispatched (Phase 0 helpers): start the
+            # next run directly in-process. Enqueue delays don't apply on
+            # this path; queue-dispatched runs (every Client start) do.
+            await DBOS.start_workflow_async(dispatch_fn, payload)
+    return new_run_id
+
+
+async def _run_workflow_task_loop(
+    type_name: str,
+    args: List[Any],
+    meta: RunMeta,
+    run_flags: Optional[Dict[str, bool]] = None,
+) -> Any:
     ctx = get_local_dbos_context()
     assert ctx is not None, "dispatcher must run inside a DBOS workflow"
     start_function_id = ctx.function_id
@@ -146,8 +341,18 @@ async def _run_workflow_task_loop(type_name: str, args: List[Any]) -> Any:
         # Looked up fresh each attempt so a replaced implementation takes
         # effect ("fix the bug, redeploy").
         defn = registry.lookup_workflow(type_name)
+        interpreter = Interpreter(defn, args, meta)
         try:
-            return await Interpreter(defn, args).execute()
+            try:
+                return await interpreter.execute()
+            finally:
+                # Whether the run returned, was cancelled, or failed, the
+                # chain-hop decision needs to know a cancel request was
+                # observed (replay-stable: it derives from checkpointed
+                # inbox deliveries). Task-failure retries overwrite this on
+                # their next attempt.
+                if run_flags is not None:
+                    run_flags["cancel_observed"] = interpreter._cancel_requested
         except WorkflowTaskFailure as failure:
             if os.environ.get(FAIL_FAST_ENV):
                 # Bare raise: `from None` would clobber the user exception's
