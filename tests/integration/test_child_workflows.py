@@ -14,8 +14,13 @@ import pytest
 from dbos import DBOSClient
 
 from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client, WorkflowExecutionStatus
-from temporal_dbos.exceptions import ApplicationError, ChildWorkflowError
+from temporal_dbos.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporal_dbos.exceptions import (
+    ApplicationError,
+    CancelledError,
+    ChildWorkflowError,
+    WorkflowAlreadyStartedError,
+)
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
@@ -154,6 +159,31 @@ class ParkingParent:
         return "unreachable"
 
 
+@workflow.defn
+class DuplicateIdParent:
+    @workflow.run
+    async def run(self) -> str:
+        try:
+            await workflow.execute_child_workflow(
+                ComposeChild.run, args=["Hi", "X"], id="taken-id"
+            )
+            return "no-error"
+        except WorkflowAlreadyStartedError as err:
+            return f"already-started:{err.workflow_id}"
+
+
+@workflow.defn
+class ExternalToucher:
+    @workflow.run
+    async def run(self, target: str, action: str) -> str:
+        handle = workflow.get_external_workflow_handle(target)
+        if action == "signal":
+            await handle.signal("release")
+        else:
+            await handle.cancel(reason="external cancel")
+        return "sent"
+
+
 ALL_WORKFLOWS = [
     ComposeChild,
     FailingChild,
@@ -164,6 +194,8 @@ ALL_WORKFLOWS = [
     SignalingParent,
     ClosingParent,
     ParkingParent,
+    DuplicateIdParent,
+    ExternalToucher,
 ]
 
 
@@ -304,3 +336,50 @@ async def test_parent_close_abandon(tmp_path: Path) -> None:
         )
         assert status == WorkflowExecutionStatus.COMPLETED
     assert effects.read_text() == "child-done\n"
+
+
+async def test_duplicate_child_id_raises_into_parent() -> None:
+    """A child id already in use raises WorkflowAlreadyStartedError into the
+    parent (instead of SetWorkflowID silently attaching to the foreign
+    workflow)."""
+    async with _env() as client:
+        taken = await client.start_workflow(
+            WaitingChild.run, id="taken-id", task_queue=TASK_QUEUE
+        )
+        result = await client.execute_workflow(
+            DuplicateIdParent.run, id="dup-parent", task_queue=TASK_QUEUE
+        )
+        assert result == "already-started:taken-id"
+        await taken.terminate()
+
+
+async def test_external_handle_signal() -> None:
+    async with _env() as client:
+        target = await client.start_workflow(
+            WaitingChild.run, id="ext-sig-target", task_queue=TASK_QUEUE
+        )
+        sent = await client.execute_workflow(
+            ExternalToucher.run,
+            args=["ext-sig-target", "signal"],
+            id="ext-signaler",
+            task_queue=TASK_QUEUE,
+        )
+        assert sent == "sent"
+        assert await target.result() == "released"
+
+
+async def test_external_handle_cancel() -> None:
+    async with _env() as client:
+        target = await client.start_workflow(
+            WaitingChild.run, id="ext-cancel-target", task_queue=TASK_QUEUE
+        )
+        await client.execute_workflow(
+            ExternalToucher.run,
+            args=["ext-cancel-target", "cancel"],
+            id="ext-canceller",
+            task_queue=TASK_QUEUE,
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await target.result()
+        assert isinstance(exc_info.value.cause, CancelledError)
+        assert (await target.describe()).status == WorkflowExecutionStatus.CANCELED

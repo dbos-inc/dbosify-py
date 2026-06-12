@@ -40,6 +40,7 @@ __all__ = [
     "ActivityHandle",
     "ChildWorkflowCancellationType",
     "ChildWorkflowHandle",
+    "ExternalWorkflowHandle",
     "Info",
     "ParentClosePolicy",
     "cancellation_reason",
@@ -49,6 +50,8 @@ __all__ = [
     "execute_child_workflow",
     "execute_local_activity",
     "execute_local_activity_method",
+    "get_external_workflow_handle",
+    "get_external_workflow_handle_for",
     "in_workflow",
     "info",
     "init",
@@ -198,6 +201,57 @@ class _UpdateMethod:
         return vfn
 
 
+class ExternalWorkflowHandle:
+    """Handle for interacting with an *external* workflow from within a
+    workflow: signal and (cooperatively) cancel, both as checkpointed sends
+    targeting the id's current run.
+    """
+
+    def __init__(
+        self, runtime: "_Runtime", workflow_id: str, run_id: Optional[str] = None
+    ) -> None:
+        self._runtime = runtime
+        self._id = workflow_id
+        self._run_id = run_id
+
+    @property
+    def id(self) -> str:
+        """ID of the external workflow."""
+        return self._id
+
+    @property
+    def run_id(self) -> Optional[str]:
+        """Run ID of the external workflow, if bound."""
+        return self._run_id
+
+    async def signal(
+        self, signal: Any, arg: Any = _arg_unset, *, args: Sequence[Any] = []
+    ) -> None:
+        """Send a signal to the external workflow."""
+        from ._internal import inbox as _inbox
+
+        name = (
+            signal
+            if isinstance(signal, str)
+            else getattr(signal, _registry.SIGNAL_ATTR)
+        )
+        await self._runtime.runtime_send_to_workflow(
+            self._run_id or self._id,
+            _inbox.signal_envelope(str(name), _resolve_args(arg, args)),
+            resolve_chain=self._run_id is None,
+        )
+
+    async def cancel(self, *, reason: str = "") -> None:
+        """Request cooperative cancellation of the external workflow."""
+        from ._internal import inbox as _inbox
+
+        await self._runtime.runtime_send_to_workflow(
+            self._run_id or self._id,
+            _inbox.cancel_envelope(reason),
+            resolve_chain=self._run_id is None,
+        )
+
+
 @overload
 def update(fn: Callable[..., Any]) -> _UpdateMethod: ...
 
@@ -338,7 +392,9 @@ class _Runtime:
     ) -> "ChildWorkflowHandle":
         raise NotImplementedError
 
-    async def runtime_send_to_workflow(self, workflow_id: str, envelope: Any) -> None:
+    async def runtime_send_to_workflow(
+        self, workflow_id: str, envelope: Any, *, resolve_chain: bool = False
+    ) -> None:
         raise NotImplementedError
 
 
@@ -670,6 +726,22 @@ async def start_child_workflow(
         parent_close_policy=int(parent_close_policy),
         cancellation_type=int(cancellation_type),
     )
+
+
+def get_external_workflow_handle(
+    workflow_id: str, *, run_id: Optional[str] = None
+) -> ExternalWorkflowHandle:
+    """Get a handle to an external workflow for signalling/cancelling. With
+    no ``run_id``, operations target the id's current run.
+    """
+    return ExternalWorkflowHandle(_runtime(), workflow_id, run_id)
+
+
+def get_external_workflow_handle_for(
+    workflow: Any, workflow_id: str, *, run_id: Optional[str] = None
+) -> ExternalWorkflowHandle:
+    """Typed variant of :py:func:`get_external_workflow_handle`."""
+    return get_external_workflow_handle(workflow_id, run_id=run_id)
 
 
 async def execute_child_workflow(

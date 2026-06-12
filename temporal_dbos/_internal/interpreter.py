@@ -96,6 +96,7 @@ CHILD_POLL_INTERVAL_SECONDS = 0.25
 # registry — tests destroy and re-create it between cases.
 _init_step: Optional[Callable[[], Any]] = None
 _child_result_step: Optional[Callable[[str], Any]] = None
+_child_exists_step: Optional[Callable[[str], Any]] = None
 
 
 def _workflow_init_step() -> Any:
@@ -173,6 +174,25 @@ def _await_child_result(child_id: str) -> Any:
 
         _child_result_step = child_result_step
     return _child_result_step(child_id)
+
+
+def _child_id_taken(child_id: str) -> Any:
+    """Checkpointed existence check for a child workflow id, so the answer
+    is replay-stable: on first execution the child doesn't exist yet (we
+    haven't started it); on replay the recorded False is returned even
+    though the child now exists *because we created it*. A live read here
+    would spuriously fail every replay.
+    """
+    global _child_exists_step
+    if _child_exists_step is None:
+
+        @DBOS.step(name="__tdb_child_check")
+        async def child_exists_step(child_id: str) -> bool:
+            status = await DBOS.get_workflow_status_async(child_id)
+            return status is not None
+
+        _child_exists_step = child_exists_step
+    return _child_exists_step(child_id)
 
 
 class _TimerHandle(asyncio.TimerHandle):
@@ -365,7 +385,9 @@ class Interpreter(_Runtime):
         self._pending_children: Dict[int, _ChildExec] = {}
         self._children_registry: List[Dict[str, Any]] = []
         self._cancelled_child_seqs: List[int] = []
-        self._pending_sends: Dict[int, Tuple[str, Any, "asyncio.Future[Any]"]] = {}
+        self._pending_sends: Dict[int, Tuple[str, Any, "asyncio.Future[Any]", bool]] = (
+            {}
+        )
         self._own_queue_name: Optional[str] = None
         self._own_queue_resolved = False
         self._random = Random(0)
@@ -675,10 +697,15 @@ class Interpreter(_Runtime):
                 await self._start_child(self._pending_children[seq])
                 progressed = True  # the start future resolved either way
             elif kind == "send":
-                target, envelope, future = self._pending_sends.pop(seq)
+                target, envelope, future, resolve_chain = self._pending_sends.pop(seq)
                 # send_async is checkpointed; awaited inline so its
-                # function_id claim stays at a deterministic position.
+                # function_id claim stays at a deterministic position. The
+                # chain resolution is a live read, but that's safe: on
+                # replay send_async returns its recorded checkpoint without
+                # consuming the resolved value.
                 try:
+                    if resolve_chain:
+                        target = await self._resolve_current_run(target)
                     await DBOS.send_async(target, envelope, inbox.INBOX_TOPIC)
                 except Exception as err:  # noqa: BLE001
                     if not future.cancelled():
@@ -705,6 +732,19 @@ class Interpreter(_Runtime):
 
         try:
             dispatch_fn = registry.dbos_workflow_for(child.type_name)
+            if await _child_id_taken(child.child_id):
+                # Temporal raises into the parent when a child id is already
+                # in use; SetWorkflowID would otherwise silently attach to
+                # the foreign workflow. (Checkpointed check; the usual
+                # TOCTOU window between check and start is documented.)
+                del self._pending_children[child.seq]
+                if not child.start_future.cancelled():
+                    child.start_future.set_exception(
+                        exceptions.WorkflowAlreadyStartedError(
+                            child.child_id, child.type_name
+                        )
+                    )
+                return
             if not self._own_queue_resolved:
                 status = await DBOS.get_workflow_status_async(self._workflow_id)
                 self._own_queue_name = status.queue_name if status else None
@@ -1223,13 +1263,26 @@ class Interpreter(_Runtime):
         await child.start_future
         return ChildWorkflowHandle(self, resolved_id, child.result_future)
 
-    async def runtime_send_to_workflow(self, workflow_id: str, envelope: Any) -> None:
+    async def runtime_send_to_workflow(
+        self, workflow_id: str, envelope: Any, *, resolve_chain: bool = False
+    ) -> None:
         self._assert_not_read_only("send to a workflow")
         seq = self._next_seq("send")
         future = self._vloop.create_future()
-        self._pending_sends[seq] = (workflow_id, envelope, future)
+        self._pending_sends[seq] = (workflow_id, envelope, future, resolve_chain)
         self._commands.append(("send", seq))
         await future
+
+    async def _resolve_current_run(self, workflow_id: str) -> str:
+        """Resolve a Temporal workflow id to its current run's DBOS id
+        (§6.4 run chains)."""
+        statuses = await DBOS.list_workflows_async(workflow_id_prefix=workflow_id)
+        best: Optional[Tuple[int, str]] = None
+        for status in statuses:
+            index = ids.run_index_of(workflow_id, status.workflow_id)
+            if index is not None and (best is None or index > best[0]):
+                best = (index, status.workflow_id)
+        return best[1] if best is not None else workflow_id
 
     def runtime_cancellation_reason(self) -> Optional[str]:
         return self._cancel_reason
