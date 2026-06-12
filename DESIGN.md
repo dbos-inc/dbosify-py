@@ -513,7 +513,13 @@ Scheme (`_internal/ids.py`):
   (mirroring the cancellation marker; status maps to CONTINUED_AS_NEW).
   `handle.result(follow_runs=True)` follows markers; `follow_runs=False` raises
   `WorkflowContinuedAsNewError`; the child-result step follows chains so parents see the
-  final run's result. `is_continue_as_new_suggested()` is a threshold on the checkpoint
+  final run's result. Client reply waits (update acceptance/result, query replies) walk
+  the chain on a miss: a forwarded update/query is answered under the *new* run's id, not
+  the one the client originally targeted (reply keys are globally unique, so a chain
+  sweep is unambiguous). Handles from `start_workflow` are not run-bound (temporalio
+  semantics): signals/queries/updates resolve the chain's current run per call, which is
+  what keeps them routing correctly across continue-as-new; `result()` anchors on
+  `result_run_id` (the started run) and follows forward. `is_continue_as_new_suggested()` is a threshold on the checkpoint
   cursor (`TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD`, default 10000, mirroring Temporal's
   ~10k-events scale). `workflow.info().continued_run_id` is the run's DBOS parent link
   when it points within the same chain (DBOS threads `parent_workflow_id` for in-workflow
