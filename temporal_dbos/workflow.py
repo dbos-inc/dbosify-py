@@ -16,6 +16,7 @@ import asyncio
 import inspect
 import logging
 import uuid as uuid_mod
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import IntEnum
@@ -1017,3 +1018,14 @@ class unsafe:
     def is_replaying() -> bool:
         """Whether the workflow is replaying its checkpointed prefix."""
         return _runtime().runtime_is_replaying()
+
+    @staticmethod
+    def imports_passed_through() -> "AbstractContextManager[None]":
+        """No-op context manager: there is no sandbox to pass imports
+        through (DEVIATIONS.md D13)."""
+        return nullcontext()
+
+    @staticmethod
+    def in_sandbox() -> bool:
+        """Always False: there is no workflow sandbox."""
+        return False

@@ -102,7 +102,13 @@ def install_shim() -> None:
 
 def main() -> None:
     install_shim()
-    runpy.run_path(sys.argv[1], run_name="__main__")
+    target = sys.argv[1]
+    if target.endswith(".py"):
+        runpy.run_path(target, run_name="__main__")
+    else:
+        # Module mode for package samples (python -m equivalent); the
+        # package root comes in on PYTHONPATH from the test.
+        runpy.run_module(target, run_name="__main__", alter_sys=True)
 
 
 if __name__ == "__main__":
