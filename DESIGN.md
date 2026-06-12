@@ -434,7 +434,7 @@ the compat table until then.
   |---|---|
   | PENDING / ENQUEUED / DELAYED | RUNNING |
   | SUCCESS (normal envelope) | COMPLETED |
-  | SUCCESS (continue-as-new marker envelope) | CONTINUED_AS_NEW |
+  | ERROR, error is `SerializedContinueAsNew` | CONTINUED_AS_NEW |
   | ERROR, error is `_TemporalCancelledMarker` | CANCELED |
   | ERROR, error is `_TemporalTimedOutMarker` | TIMED_OUT |
   | ERROR (other) | FAILED |
@@ -502,14 +502,21 @@ Scheme (`_internal/ids.py`):
   runs): `ALLOW_DUPLICATE` → next n. `ALLOW_DUPLICATE_FAILED_ONLY` / `REJECT_DUPLICATE` →
   check last run's terminal status first. Phase 3 for the exotic ones; `USE_EXISTING`+
   `FAIL`+`ALLOW_DUPLICATE` in Phase 1.
-- **Continue-as-new**: `workflow.continue_as_new(...)` raises `ContinueAsNewError`
-  (a `BaseException`, same as temporalio). The dispatcher catches it, starts run n+1 (same
-  task queue unless overridden, fresh empty checkpoint history — this is what resets DBOS
-  step-history growth, the same problem CAN solves in Temporal), records a chain-link
-  marker as its own result. `handle.result(follow_runs=True)` follows markers.
-  `workflow.info().continued_run_id` / `first_execution_run_id` come from the chain.
-  Implement `is_continue_as_new_suggested()` as a threshold on interpreter seq count
-  (mirror Temporal's ~10k-events warning scale; make it configurable).
+- **Continue-as-new (done)**: `workflow.continue_as_new(...)` raises `ContinueAsNewError`
+  (a `BaseException`, same as temporalio); the interpreter treats it as a terminal
+  outcome. At close it enqueues run n+1 (same task queue unless overridden, deterministic
+  next run id so a crash replays into an idempotent re-attach, fresh empty checkpoint
+  history — this is what resets DBOS step-history growth, the same problem CAN solves in
+  Temporal), forwards carryover messages (buffered signals, an outstanding cancel
+  request, then checkpointed `recv(0)` drains of unconsumed inbox messages — all
+  replay-stable), and records the `SerializedContinueAsNew` marker as the run's "error"
+  (mirroring the cancellation marker; status maps to CONTINUED_AS_NEW).
+  `handle.result(follow_runs=True)` follows markers; `follow_runs=False` raises
+  `WorkflowContinuedAsNewError`; the child-result step follows chains so parents see the
+  final run's result. `is_continue_as_new_suggested()` is a threshold on the checkpoint
+  cursor (`TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD`, default 10000, mirroring Temporal's
+  ~10k-events scale). `workflow.info().continued_run_id` is still pending (needs start
+  metadata to distinguish CAN links from reuse links).
 - **Workflow retry_policy** (workflows do NOT retry by default — match that): on failure,
   dispatcher consults the policy and starts run n+1 with attempt+1 (visible in
   `workflow.info().attempt`), honoring backoff via `SetEnqueueOptions(delay_seconds=...)`.
@@ -713,9 +720,11 @@ Achieved: 4/5 `message_passing/` samples pass (the fifth needs Phase 3 continue-
 xfail-tagged); chaos suite covers SIGKILL mid-cancellation-unwind, mid-child,
 mid-update-handler (accepted-but-parked), and the is_replaying probe.
 
-**Phase 3 — Operational surface.** Schedules + cron + `start_delay`, continue-as-new,
+**Phase 3 — Operational surface.** Schedules + cron + `start_delay`, continue-as-new
+(done: chain hops, carryover, follow_runs, child chains; flipped
+`hello_continue_as_new` and `safe_message_handlers` — `message_passing/` is 5/5),
 dynamic workflows/handlers + handler descriptions,
-chains + workflow retry policies, id reuse/conflict policies, heartbeats + activity
+workflow retry policies, id reuse/conflict policies, heartbeats + activity
 cancellation types + async activity completion, `list_workflows` query parser +
 `count_workflows`, client + activity interceptors, the data-conversion pipeline (default
 JSON conversion — moved from Phase 1 — plus custom DataConverters + PayloadCodec; until

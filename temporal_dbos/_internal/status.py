@@ -32,18 +32,19 @@ def to_execution_status(
     recorded error distinguishes cooperative cancellation (CANCELED) from
     failure; pass it when available.
 
-    Notes: SUCCESS continue-as-new markers (-> CONTINUED_AS_NEW) and ERROR
-    timeout markers (-> TIMED_OUT) land with their Phase 3 features.
-    MAX_RECOVERY_ATTEMPTS_EXCEEDED maps to RUNNING: the workflow is stuck,
-    not closed (documented deviation).
+    Notes: ERROR timeout markers (-> TIMED_OUT) land with workflow run
+    timeouts (Phase 3). MAX_RECOVERY_ATTEMPTS_EXCEEDED maps to RUNNING: the
+    workflow is stuck, not closed (documented deviation).
     """
-    from .payloads import SerializedWorkflowCancellation
+    from .payloads import SerializedContinueAsNew, SerializedWorkflowCancellation
 
     if dbos_status in _OPEN_DBOS_STATUSES:
         return WorkflowExecutionStatus.RUNNING
     if dbos_status == "SUCCESS":
         return WorkflowExecutionStatus.COMPLETED
     if dbos_status == "ERROR":
+        if isinstance(error, SerializedContinueAsNew):
+            return WorkflowExecutionStatus.CONTINUED_AS_NEW
         if isinstance(error, SerializedWorkflowCancellation):
             return WorkflowExecutionStatus.CANCELED
         return WorkflowExecutionStatus.FAILED

@@ -25,6 +25,7 @@ class Expectation:
     expect_output: Optional[str] = None  # substring required in stdout
     xfail: Optional[str] = None  # reason this can't pass yet
     skip: Optional[str] = None  # reason this isn't runnable in the harness
+    timeout: int = SAMPLE_TIMEOUT_SECONDS  # for samples that legitimately run long
 
 
 EXPECTATIONS = {
@@ -49,7 +50,11 @@ EXPECTATIONS = {
         "forever (identical behavior on a real Temporal server)"
     ),
     "hello_child_workflow": Expectation(expect_output="Result: Hello, World!"),
-    "hello_continue_as_new": Expectation(xfail="continue-as-new is Phase 3"),
+    "hello_continue_as_new": Expectation(
+        # 10 chained runs, each sleeping 1s (plus per-run dispatch latency).
+        expect_output="Running workflow iteration 9",
+        timeout=90,
+    ),
     "hello_cron": Expectation(xfail="cron workflows are Phase 3"),
     "hello_exception": Expectation(),
     "hello_local_activity": Expectation(expect_output="Result: Hello, World!"),
@@ -96,7 +101,7 @@ def _params() -> "list[Any]":
     return params
 
 
-@pytest.mark.timeout(SAMPLE_TIMEOUT_SECONDS + 30)
+@pytest.mark.timeout(max(e.timeout for e in EXPECTATIONS.values()) + 30)
 @pytest.mark.usefixtures("cleanup_test_databases")
 @pytest.mark.parametrize("sample_name", _params())
 def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
@@ -105,7 +110,7 @@ def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
         [sys.executable, str(RUNNER), str(rewritten_samples / f"{sample_name}.py")],
         capture_output=True,
         text=True,
-        timeout=SAMPLE_TIMEOUT_SECONDS,
+        timeout=expectation.timeout,
         env={
             **__import__("os").environ,
             "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
@@ -116,7 +121,9 @@ def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
         f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr[-4000:]}"
     )
     if expectation.expect_output:
-        assert expectation.expect_output in result.stdout, (
+        # Some samples emit their proof via logging (stderr), not print.
+        combined = result.stdout + result.stderr
+        assert expectation.expect_output in combined, (
             f"expected {expectation.expect_output!r} in output\n"
-            f"--- stdout ---\n{result.stdout}"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr[-2000:]}"
         )

@@ -43,7 +43,7 @@ SAMPLES = {
     ),
     "safe_message_handlers": Sample(
         package="message_passing.safe_message_handlers",
-        xfail="uses workflow.continue_as_new (Phase 3)",
+        expect_output="Cluster shut down successfully",
     ),
     "waiting_for_handlers": Sample(
         package="message_passing.waiting_for_handlers",

@@ -74,6 +74,19 @@ class SerializedWorkflowCancellation(SerializedWorkflowFailure):
     """
 
 
+class SerializedContinueAsNew(Exception):
+    """Recorded as the run's DBOS "error" when it continues as new (like the
+    cancellation marker): status maps to CONTINUED_AS_NEW and awaiters hop
+    the chain. Deliberately NOT a SerializedWorkflowFailure subclass so no
+    failure-handling clause swallows it. The envelope carries
+    ``{"new_run_id": str}``.
+    """
+
+    def __init__(self, envelope: Dict[str, Any]) -> None:
+        super().__init__(envelope)
+        self.envelope = envelope
+
+
 def serialize_failure(exc: BaseException) -> FailureEnvelope:
     env: FailureEnvelope
     if isinstance(exc, exceptions.ApplicationError):

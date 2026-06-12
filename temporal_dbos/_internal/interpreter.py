@@ -37,6 +37,7 @@ tests/integration/test_dbos_semantics.py):
 import asyncio
 import json
 import logging
+import os
 import secrets
 import time as time_mod
 import warnings
@@ -54,6 +55,7 @@ from ..common import RetryPolicy
 from ..workflow import (
     ActivityHandle,
     ChildWorkflowHandle,
+    ContinueAsNewError,
     HandlerUnfinishedPolicy,
     Info,
     UnfinishedSignalHandlersWarning,
@@ -80,6 +82,16 @@ class WorkflowTaskFailure(Exception):
         self.cause = cause
 
 
+class WorkflowContinuedAsNew(Exception):
+    """Internal: the run ended via continue-as-new; the next run is already
+    enqueued. The dispatcher converts this into the SerializedContinueAsNew
+    marker (the chain-hop analog of the cancellation marker)."""
+
+    def __init__(self, new_run_id: str) -> None:
+        super().__init__(new_run_id)
+        self.new_run_id = new_run_id
+
+
 class WorkflowCancelled(Exception):
     """Internal: the workflow ended via cooperative cancellation. The
     dispatcher converts this into the cancelled marker (DESIGN §6.5)."""
@@ -101,6 +113,12 @@ class _AbortDrain(Exception):
 
 # How often the child-result step polls for the child's terminal state.
 CHILD_POLL_INTERVAL_SECONDS = 0.25
+
+# is_continue_as_new_suggested() threshold on the run's checkpoint count
+# (Temporal's server suggests around 10k history events).
+CAN_SUGGESTION_THRESHOLD = int(
+    os.environ.get("TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD", "10000")
+)
 
 # Created lazily (not at import) so decoration binds to the live DBOS
 # registry — tests destroy and re-create it between cases.
@@ -169,6 +187,7 @@ def _await_child_result(child_id: str) -> Any:
             from dbos._error import DBOSAwaitedWorkflowCancelledError
 
             from .payloads import (
+                SerializedContinueAsNew,
                 SerializedWorkflowCancellation,
                 SerializedWorkflowFailure,
                 serialize_failure,
@@ -176,9 +195,17 @@ def _await_child_result(child_id: str) -> Any:
 
             dbos = _get_dbos_instance()
             try:
-                result = await dbos._sys_db.await_workflow_result_async(
-                    child_id, CHILD_POLL_INTERVAL_SECONDS
-                )
+                while True:
+                    try:
+                        result = await dbos._sys_db.await_workflow_result_async(
+                            child_id, CHILD_POLL_INTERVAL_SECONDS
+                        )
+                        break
+                    except SerializedContinueAsNew as marker:
+                        # The child continued as new: its result is the
+                        # final run's (Temporal semantics) — follow the
+                        # chain. The step records only the final outcome.
+                        child_id = marker.envelope["new_run_id"]
             except SerializedWorkflowCancellation as cancelled:
                 return {
                     "ok": False,
@@ -429,6 +456,7 @@ class Interpreter(_Runtime):
         self._own_queue_name: Optional[str] = None
         self._own_queue_resolved = False
         self._replay_horizon = 0
+        self._can_new_run_id: Optional[str] = None
         self._random = Random(0)
         self._workflow_id = ""
         self._start_time = 0.0
@@ -493,6 +521,14 @@ class Interpreter(_Runtime):
                 # Terminal outcome (not a retryable task failure): apply
                 # ParentClosePolicy to still-running children.
                 await self._sweep_children_on_close()
+            if self._outcome is not None and self._outcome[0] == "continue_as_new":
+                # Enqueue the next run BEFORE tearing down waiters: it must
+                # exist before carryover messages can be forwarded to it
+                # (FK), and the earlier it exists the sooner senders resolve
+                # the chain to it.
+                self._can_new_run_id = await self._begin_continue_as_new(
+                    self._outcome[1]
+                )
             for waiter in self._waiters:
                 waiter.task.cancel()
             if self._waiters:
@@ -500,6 +536,8 @@ class Interpreter(_Runtime):
                     *(w.task for w in self._waiters), return_exceptions=True
                 )
             self._waiters.clear()
+            if self._can_new_run_id is not None:
+                await self._forward_inbox_to(self._can_new_run_id)
 
         self._warn_if_unfinished_handlers()
         kind, value = self._outcome
@@ -507,8 +545,66 @@ class Interpreter(_Runtime):
             return value
         if kind == "cancelled":
             raise WorkflowCancelled(value)
+        if kind == "continue_as_new":
+            assert self._can_new_run_id is not None
+            raise WorkflowContinuedAsNew(self._can_new_run_id)
         assert kind == "failure"
         raise value  # a FailureError; recorded by DBOS as the workflow error
+
+    async def _begin_continue_as_new(self, can: Any) -> str:
+        """Enqueue the chain's next run. The run id is deterministic
+        (current index + 1) and DBOS records in-workflow starts, so a crash
+        anywhere between here and this run's completion replays into an
+        idempotent re-attach, never a twin run.
+        """
+        from dbos import SetWorkflowID
+
+        from . import registry
+
+        type_name = can._tdb_workflow or self._defn.name
+        dispatch_fn = registry.dbos_workflow_for(type_name)
+        base, index = ids.parse_run(self._workflow_id)
+        new_run_id = ids.run_dbos_id(base, index + 1)
+        if not self._own_queue_resolved:
+            status = await DBOS.get_workflow_status_async(self._workflow_id)
+            self._own_queue_name = status.queue_name if status else None
+            self._own_queue_resolved = True
+        queue_name = can._tdb_task_queue or self._own_queue_name
+        queue = (
+            await DBOS.retrieve_queue_async(queue_name)
+            if queue_name is not None
+            else None
+        )
+        with SetWorkflowID(new_run_id):
+            if queue is not None:
+                await queue.enqueue_async(dispatch_fn, list(can._tdb_args))
+            else:
+                # This run wasn't queue-dispatched (Phase 0 helpers): start
+                # the next run directly in-process.
+                await DBOS.start_workflow_async(dispatch_fn, list(can._tdb_args))
+        return new_run_id
+
+    async def _forward_inbox_to(self, new_run_id: str) -> None:
+        """Carryover (Temporal: undelivered signals follow a CAN to the new
+        run): forward buffered-undeliverable signals, an outstanding cancel
+        request, and any not-yet-consumed inbox messages. Every recv(0) and
+        send here is checkpointed, so the forwarding replays identically.
+        """
+        for envelopes in self._buffered_signals.values():
+            for envelope in envelopes:
+                await DBOS.send_async(new_run_id, envelope, inbox.INBOX_TOPIC)
+        self._buffered_signals.clear()
+        if self._cancel_requested:
+            await DBOS.send_async(
+                new_run_id,
+                inbox.cancel_envelope(self._cancel_reason or ""),
+                inbox.INBOX_TOPIC,
+            )
+        while True:
+            message = await DBOS.recv_async(inbox.INBOX_TOPIC, 0)
+            if message is None:
+                return
+            await DBOS.send_async(new_run_id, message, inbox.INBOX_TOPIC)
 
     # ------------------------------------------------------------------
     # Virtual loop driving
@@ -527,6 +623,8 @@ class Interpreter(_Runtime):
         try:
             result = await self._defn.run_fn(self._instance, *self._args)
             self._set_outcome(("ok", result))
+        except ContinueAsNewError as can:
+            self._set_outcome(("continue_as_new", can))
         except asyncio.CancelledError:
             cancelled = exceptions.CancelledError("Workflow cancelled")
             if self._cancel_requested:
@@ -1153,6 +1251,9 @@ class Interpreter(_Runtime):
             result = fn(self._instance, *args)
             if asyncio.iscoroutine(result):
                 await result
+        except ContinueAsNewError as can:
+            # Handlers may initiate continue-as-new (as in Temporal).
+            self._set_outcome(("continue_as_new", can))
         except BaseException as err:  # noqa: BLE001
             # Same classification as the primary coroutine (Temporal
             # semantics: a failure exception in a signal handler fails the
@@ -1279,6 +1380,11 @@ class Interpreter(_Runtime):
             result = fn(self._instance, *args)
             if asyncio.iscoroutine(result):
                 result = await result
+        except ContinueAsNewError as can:
+            # The update never completes (no result event); like Temporal,
+            # prefer initiating CAN from the primary coroutine.
+            self._set_outcome(("continue_as_new", can))
+            return
         except BaseException as err:  # noqa: BLE001
             if self._is_failure_exception(err):
                 # Post-acceptance failure exceptions fail the update, not
@@ -1422,6 +1528,13 @@ class Interpreter(_Runtime):
         if ctx is None:
             return False
         return ctx.function_id < self._replay_horizon
+
+    def runtime_history_length(self) -> int:
+        ctx = get_local_dbos_context()
+        return ctx.function_id if ctx is not None else 0
+
+    def runtime_can_suggested(self) -> bool:
+        return self.runtime_history_length() >= CAN_SUGGESTION_THRESHOLD
 
     async def runtime_wait_condition(
         self, fn: Callable[[], bool], *, timeout: Optional[float]

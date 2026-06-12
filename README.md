@@ -29,9 +29,10 @@ The conformance suite (`tests/conformance/`) runs the
 `hello/` corpus against temporal-dbos. Migration = the mechanical import
 rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 (`Client.connect` takes a `dbos.DBOSClient`; `Worker` takes a
-`dbos.DBOSConfig`). Workflow and activity code runs unmodified.
+`dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
+`message_passing/` corpus passes 5/5.
 
-Current pass rate: **12 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **13 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -51,7 +52,7 @@ harness).
 | hello_child_workflow | ✅ |
 | hello_cancellation | ⬜ Phase 3 (sync activities observe cancellation via heartbeat) |
 | hello_async_activity_completion | ⬜ Phase 3 (async completion) |
-| hello_continue_as_new | ⬜ Phase 3 (continue-as-new) |
+| hello_continue_as_new | ✅ (10 chained runs) |
 | hello_cron | ⬜ Phase 3 (cron) |
 | hello_search_attributes | ⬜ Phase 3 (search attributes) |
 | hello_query | ⬜ Phase 4 (queries on closed workflows — deviation #2) |
@@ -68,7 +69,7 @@ harness).
 | waiting_for_handlers | ✅ (`all_handlers_finished`) |
 | waiting_for_handlers_and_compensation | ✅ (`workflow.wait`, compensation patterns) |
 | update_with_start/lazy_initialization | ✅ (`WithStartWorkflowOperation`, `execute_update_with_start_workflow`) |
-| safe_message_handlers | ⬜ Phase 3 (continue-as-new) |
+| safe_message_handlers | ✅ (continue-as-new + handler-heavy traffic) — the `message_passing/` corpus is complete |
 
 ## Known deviations from Temporal
 

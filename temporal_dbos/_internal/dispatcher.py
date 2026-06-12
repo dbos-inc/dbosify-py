@@ -37,8 +37,14 @@ from .. import exceptions
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from . import activities as activities_mod
 from . import inbox, registry
-from .interpreter import Interpreter, WorkflowCancelled, WorkflowTaskFailure
+from .interpreter import (
+    Interpreter,
+    WorkflowCancelled,
+    WorkflowContinuedAsNew,
+    WorkflowTaskFailure,
+)
 from .payloads import (
+    SerializedContinueAsNew,
     SerializedWorkflowCancellation,
     SerializedWorkflowFailure,
     deserialize_failure,
@@ -106,6 +112,11 @@ def _make_dbos_workflow(
     async def dispatch(args: List[Any]) -> Any:
         try:
             return await _run_workflow_task_loop(type_name, args)
+        except WorkflowContinuedAsNew as can:
+            # The chain-hop marker: the next run is already enqueued; this
+            # run's status maps to CONTINUED_AS_NEW and awaiters follow
+            # envelope["new_run_id"].
+            raise SerializedContinueAsNew({"new_run_id": can.new_run_id}) from None
         except WorkflowCancelled as cancelled:
             # The _TemporalCancelledMarker: cooperative cancellation maps to
             # status CANCELED (§6.2), distinct from FAILED below and from
