@@ -62,7 +62,10 @@ harness).
 
 ## Known deviations from Temporal
 
-This table is maintained as features land; see `DESIGN.md` §8 for details.
+**[DEVIATIONS.md](DEVIATIONS.md) is the canonical, detailed record of
+*fundamental* deviations** — those inherent to the serverless architecture
+or deliberate design decisions. The table below is the summary; rows marked
+temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 
 | # | Deviation |
 |---|---|
