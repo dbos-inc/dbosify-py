@@ -35,8 +35,17 @@ class Expectation:
     timeout: int = SAMPLE_TIMEOUT_SECONDS  # for samples that legitimately run long
     # The sample never exits by design (e.g. hello_cron awaits forever):
     # run it in the background, prove the expected effect through the
-    # database (see DB_VERIFIERS), then tear it down.
+    # database (see DB_VERIFIERS), then tear it down. `ready_line` is the
+    # output that marks the sample as booted and started — waited for (with
+    # its own READY_TIMEOUT budget) before the DB verification clock starts,
+    # so slow CI boot can't eat the verification window.
     runs_forever: bool = False
+    ready_line: Optional[str] = None
+
+
+# Boot budget for runs-forever samples: subprocess start + DBOS init + schema
+# migrations on a fresh database + start_workflow, on a loaded CI runner.
+READY_TIMEOUT_SECONDS = 90
 
 
 EXPECTATIONS = {
@@ -72,12 +81,16 @@ EXPECTATIONS = {
         timeout=90,
     ),
     "hello_cron": Expectation(
-        # The sample starts a "* * * * *" cron and waits forever; its proof
-        # is in the database (the cron sample logs at INFO with no logging
-        # config, so there is no output line to wait for). Worst case the
-        # first fire is a full minute out.
+        # The sample starts a "* * * * *" cron and waits forever; the cron
+        # proof is in the database (the workflow logs at INFO with no
+        # logging config, so there is no completion line to wait for). The
+        # ready line marks boot + start_workflow; the timeout then covers
+        # up to a full minute to the next cron boundary plus execution.
+        # (A combined 100s budget flaked in CI: boot ate the window and the
+        # fire was still executing at the deadline.)
         runs_forever=True,
-        timeout=100,
+        ready_line="Running workflow once a minute",
+        timeout=150,
     ),
     "hello_exception": Expectation(),
     "hello_local_activity": Expectation(expect_output="Result: Hello, World!"),
@@ -126,7 +139,7 @@ def _params() -> "list[Any]":
     return params
 
 
-def _verify_hello_cron(deadline_seconds: float) -> None:
+def _verify_hello_cron(deadline_seconds: float, process: PythonProcess) -> None:
     """The cron chain's proof: run 0 of `hello-cron-workflow-id` completed
     (the schedule fired and the workflow ran) and run 1 exists (the chain
     hop enqueued the next occurrence)."""
@@ -152,9 +165,23 @@ def _verify_hello_cron(deadline_seconds: float) -> None:
                 continue
             if statuses.get(run_ids[0]) == "SUCCESS" and run_ids[1] in statuses:
                 return
+        run0 = statuses.get(run_ids[0])
+        hint = {
+            None: "the sample never started the workflow",
+            "DELAYED": "the first fire is still pending (waiting for its "
+            "cron boundary — consider a larger budget)",
+            "ENQUEUED": "the fire was released but no worker dequeued it",
+            "PENDING": "the run fired and was still executing at the "
+            "deadline (slow runner, or stuck in the workflow-task retry "
+            "loop — check the sample output below)",
+        }.get(run0, "unexpected terminal state — the run should chain")
+        # The sample's merged stdout/stderr is the difference between "slow"
+        # and "stuck": a workflow-task retry loop logs loudly here.
+        transcript = "".join(process.transcript[-40:]) or "<no output>"
         pytest.fail(
             f"hello_cron: cron did not fire and chain within "
-            f"{deadline_seconds}s (saw {statuses!r})"
+            f"{deadline_seconds}s: {hint} (saw {statuses!r})\n"
+            f"--- sample output (tail) ---\n{transcript}"
         )
     finally:
         if client is not None:
@@ -164,7 +191,13 @@ def _verify_hello_cron(deadline_seconds: float) -> None:
 DB_VERIFIERS = {"hello_cron": _verify_hello_cron}
 
 
-@pytest.mark.timeout(max(e.timeout for e in EXPECTATIONS.values()) + 30)
+@pytest.mark.timeout(
+    max(
+        e.timeout + (READY_TIMEOUT_SECONDS if e.runs_forever else 0)
+        for e in EXPECTATIONS.values()
+    )
+    + 30
+)
 @pytest.mark.usefixtures("cleanup_test_databases")
 @pytest.mark.parametrize("sample_name", _params())
 def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
@@ -177,7 +210,12 @@ def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
         )
         process.start()
         try:
-            DB_VERIFIERS[sample_name](expectation.timeout)
+            # Boot first, on its own budget: the verification clock starts
+            # only once the sample is up and has started its workflow.
+            # (wait_for_line's TimeoutError includes the output so far.)
+            assert expectation.ready_line is not None
+            process.wait_for_line(expectation.ready_line, timeout=READY_TIMEOUT_SECONDS)
+            DB_VERIFIERS[sample_name](expectation.timeout, process)
         finally:
             process.terminate_and_wait()
         return
