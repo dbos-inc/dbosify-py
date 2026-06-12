@@ -732,7 +732,10 @@ async def test_cancel_raises_on_closed_run() -> None:
     inbox."""
     async with _env() as client:
         handle = await client.start_workflow(
-            OrphanAtCloseWorkflow.run, "unused", id="cancel-closed", task_queue=TASK_QUEUE
+            OrphanAtCloseWorkflow.run,
+            "unused",
+            id="cancel-closed",
+            task_queue=TASK_QUEUE,
         )
         await handle.result()
         with pytest.raises(RuntimeError, match="already closed"):
