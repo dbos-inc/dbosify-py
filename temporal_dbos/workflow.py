@@ -28,6 +28,8 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Mapping,
+    MutableMapping,
     Optional,
     Sequence,
     Tuple,
@@ -63,6 +65,7 @@ __all__ = [
     "info",
     "init",
     "logger",
+    "LoggerAdapter",
     "now",
     "query",
     "random",
@@ -83,7 +86,68 @@ __all__ = [
     "wait_condition",
 ]
 
-logger = logging.getLogger("temporal_dbos.workflow")
+
+def _maybe_runtime() -> Optional["_Runtime"]:
+    try:
+        loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    runtime = getattr(loop, "tdb_runtime", None)
+    return runtime if isinstance(runtime, _Runtime) else None
+
+
+class LoggerAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
+    """Adapter that adds workflow details to each message and suppresses
+    output during replay (mirroring ``temporalio.workflow.LoggerAdapter``;
+    without suppression, recovery would re-emit every log line the first
+    execution already produced).
+
+    Attributes:
+        workflow_info_on_message: Append workflow info to each message.
+            Default True.
+        log_during_replay: Emit logs while replaying. Default False.
+    """
+
+    def __init__(
+        self, logger: logging.Logger, extra: Optional[Mapping[str, Any]]
+    ) -> None:
+        super().__init__(logger, extra or {})
+        self.workflow_info_on_message = True
+        self.log_during_replay = False
+
+    def process(
+        self, msg: Any, kwargs: "MutableMapping[str, Any]"
+    ) -> "tuple[Any, MutableMapping[str, Any]]":
+        if self.workflow_info_on_message:
+            runtime = _maybe_runtime()
+            if runtime is not None:
+                workflow_info = runtime.runtime_info()
+                msg_extra = {
+                    "attempt": workflow_info.attempt,
+                    "namespace": workflow_info.namespace,
+                    "run_id": workflow_info.run_id,
+                    "task_queue": workflow_info.task_queue,
+                    "workflow_id": workflow_info.workflow_id,
+                    "workflow_type": workflow_info.workflow_type,
+                }
+                msg = f"{msg} ({msg_extra})"
+        return msg, kwargs
+
+    def isEnabledFor(self, level: int) -> bool:
+        if not self.log_during_replay:
+            runtime = _maybe_runtime()
+            if runtime is not None and runtime.runtime_is_replaying():
+                return False
+        return super().isEnabledFor(level)
+
+    @property
+    def base_logger(self) -> logging.Logger:
+        """Underlying logger usable for actions such as adding handlers."""
+        assert isinstance(self.logger, logging.Logger)
+        return self.logger
+
+
+logger = LoggerAdapter(logging.getLogger("temporal_dbos.workflow"), None)
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 _CT = TypeVar("_CT", bound=type)

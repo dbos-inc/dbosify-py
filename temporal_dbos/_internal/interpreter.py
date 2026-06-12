@@ -390,6 +390,7 @@ class Interpreter(_Runtime):
         )
         self._own_queue_name: Optional[str] = None
         self._own_queue_resolved = False
+        self._replay_horizon = 0
         self._random = Random(0)
         self._workflow_id = ""
         self._start_time = 0.0
@@ -404,6 +405,20 @@ class Interpreter(_Runtime):
         ctx = get_local_dbos_context()
         assert ctx is not None, "interpreter must run inside a DBOS workflow"
         self._workflow_id = ctx.workflow_id
+
+        # The checkpoint horizon: the highest recorded function_id. While our
+        # claim cursor is below it, we are re-executing recorded history —
+        # that is what unsafe.is_replaying() reports. The read must be live
+        # (is_replaying is *about* replay state, exempt from determinism),
+        # but inside a workflow context DBOS checkpoints listWorkflowSteps
+        # itself — it would replay its own first-execution (empty) result.
+        # An executor thread has no DBOS context, so the read stays live.
+        # (Upstream wishlist: a cheap max-function_id query; this fetches
+        # and deserializes the full step list.)
+        steps = await asyncio.get_running_loop().run_in_executor(
+            None, DBOS.list_workflow_steps, self._workflow_id
+        )
+        self._replay_horizon = max((step["function_id"] for step in steps), default=0)
 
         init = await _workflow_init_step()
         self._start_time = float(init["start_time"])
@@ -1297,9 +1312,10 @@ class Interpreter(_Runtime):
         return self._handlers_running == 0
 
     def runtime_is_replaying(self) -> bool:
-        # TODO(phase 2): derive from checkpoint-cursor position to back
-        # workflow.unsafe.is_replaying() and replay log suppression.
-        return False
+        ctx = get_local_dbos_context()
+        if ctx is None:
+            return False
+        return ctx.function_id < self._replay_horizon
 
     async def runtime_wait_condition(
         self, fn: Callable[[], bool], *, timeout: Optional[float]

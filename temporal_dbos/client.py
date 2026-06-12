@@ -894,6 +894,36 @@ class WorkflowHandle:
         )
         return await handle.result(rpc_timeout=rpc_timeout)
 
+    def get_update_handle(
+        self,
+        id: str,
+        *,
+        workflow_run_id: Optional[str] = None,
+        result_type: Optional[type] = None,
+    ) -> WorkflowUpdateHandle:
+        """Get a handle for an already-sent update — e.g. to re-attach and
+        collect its result after a client restart. Requires the update to
+        have been started with a known ``id``.
+        """
+        return WorkflowUpdateHandle(
+            self._client,
+            id,
+            self._id,
+            workflow_run_id=workflow_run_id or self._run_id,
+            result_type=result_type,
+        )
+
+    def get_update_handle_for(
+        self,
+        update: Any,
+        id: str,
+        *,
+        workflow_run_id: Optional[str] = None,
+    ) -> WorkflowUpdateHandle:
+        """Get a typed handle for an already-sent update (see
+        :py:meth:`get_update_handle`)."""
+        return self.get_update_handle(id, workflow_run_id=workflow_run_id)
+
     async def describe(
         self,
         *,

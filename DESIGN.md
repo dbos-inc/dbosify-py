@@ -264,9 +264,11 @@ Virtual-loop details:
   before the class registers a handler are buffered and delivered on registration
   (the inbox makes this natural — undeliverable messages go to a pending list keyed by name,
   re-checked when handlers register; `@workflow.init` passes run args to `__init__` first).
-- **Replay flag.** Track "currently re-executing checkpointed prefix" (DBOS context exposes
-  step position; if the next checkpoint already exists, we are replaying) to back
-  `workflow.unsafe.is_replaying()` and to suppress `workflow.logger` output during replay.
+- **Replay flag (done).** At interpreter start, read the checkpoint horizon (max recorded
+  `function_id`, via `list_workflow_steps` on an executor thread — in-context the call is
+  itself checkpointed and would replay its own empty first-execution result); the claim
+  cursor below the horizon means replaying. Backs `workflow.unsafe.is_replaying()` and
+  `workflow.logger` replay suppression (a temporalio-mirroring `LoggerAdapter`).
 - **Workflow-task failure semantics (important, easy to get wrong).** In Temporal, an
   exception raised by workflow code that is *not* a `FailureError` (and not listed in
   `failure_exception_types`) fails the *workflow task*, not the workflow: the task retries
@@ -589,9 +591,12 @@ JSON converter would return plain dicts.
 
 - `ActivityEnvironment`: pure in-memory (no DB) — trivial port; do it in Phase 1 (cheap
   goodwill, used by many test suites).
-- `WorkflowEnvironment.start_local()`: ephemeral Postgres (reuse DBOS's docker helper or
-  accept an env-provided URL) + unique schema per env + teardown via
-  `reset_system_database`. Phase 2 (our own tests want it).
+- `WorkflowEnvironment.start_local()` (done, Phase 2): a uniquely named throwaway
+  database per environment on an env-provided Postgres server (never launches one),
+  dropped on `shutdown()`. Exposes `dbos_config` (DBOS-native extension) to build the
+  env's Worker from. Note: the env avoids the loop's default executor — DBOS launch
+  replaces it with its own pool and destroy shuts it down (upstream-worthy sharp edge:
+  `asyncio.to_thread` on the same loop breaks after a Worker exits).
 - `WorkflowEnvironment.start_time_skipping()`: Phase 4. Approach: a test-mode clock service —
   when all interpreters in the env are parked on timers (no inbox/activity waiters), find
   the earliest deadline and fast-forward by rewriting pending sleep deadlines in the system
@@ -689,12 +694,16 @@ against `temporal_dbos` with the import swap plus connection-setup adaptation (�
 samples needing later-phase features are xfail-tagged with their blocking phase in the
 conformance suite. Achieved: 11/19 runnable hello samples pass (table in README).
 
-**Phase 2 — Message passing & process model.** Signals (incl. buffering + signal-with-start),
-queries (active), updates + validators + update-with-start, `wait_condition`,
-deterministic helpers (`now/uuid4/random/wait/as_completed`), child workflows + external
-handles, cooperative cancel vs terminate (full §6.5 matrix), `workflow.info()`,
-workflow-task-failure retry behavior, `WorkflowEnvironment.start_local`. **Exit:**
+**Phase 2 — Message passing & process model. COMPLETE.** Signals (incl. buffering +
+signal-with-start), queries (active), updates + validators + update-with-start,
+`wait_condition`, deterministic helpers (`now/uuid4/random/wait/as_completed`), child
+workflows + external handles, cooperative cancel vs terminate (full §6.5 matrix),
+`workflow.info()`, workflow-task-failure retry behavior, real `is_replaying()` (checkpoint
+horizon) + replay log suppression, `WorkflowEnvironment.start_local`. **Exit:**
 `samples-python` `message_passing/`, plus SIGKILL-during-everything chaos tests.
+Achieved: 4/5 `message_passing/` samples pass (the fifth needs Phase 3 continue-as-new,
+xfail-tagged); chaos suite covers SIGKILL mid-cancellation-unwind, mid-child,
+mid-update-handler (accepted-but-parked), and the is_replaying probe.
 
 **Phase 3 — Operational surface.** Schedules + cron + `start_delay`, continue-as-new
 chains + workflow retry policies, id reuse/conflict policies, heartbeats + activity
