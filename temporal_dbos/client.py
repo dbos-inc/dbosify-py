@@ -15,6 +15,7 @@ import os
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import IntEnum
 from typing import Any, List, Mapping, Optional, Sequence, Type, Union
 
 from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
@@ -43,6 +44,8 @@ __all__ = [
     "WorkflowFailureError",
     "WorkflowQueryFailedError",
     "WorkflowUpdateFailedError",
+    "WorkflowUpdateHandle",
+    "WorkflowUpdateStage",
 ]
 
 logger = logging.getLogger("temporal_dbos.client")
@@ -74,6 +77,79 @@ class WorkflowUpdateFailedError(exceptions.TemporalError):
     def __init__(self, cause: BaseException) -> None:
         super().__init__("Workflow update failed")
         self.__cause__ = cause
+
+
+class WorkflowUpdateStage(IntEnum):
+    """Stage to wait for in ``start_update``, mirroring
+    ``temporalio.client.WorkflowUpdateStage``. ADMITTED is not supported
+    (same as temporalio).
+    """
+
+    ADMITTED = 1
+    ACCEPTED = 2
+    COMPLETED = 3
+
+
+class WorkflowUpdateHandle:
+    """Handle for a workflow update: poll its result with
+    :py:meth:`result`. Obtained from ``start_update``/``execute_update``.
+    """
+
+    def __init__(
+        self,
+        client: "Client",
+        id: str,
+        workflow_id: str,
+        *,
+        workflow_run_id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        known_outcome: Optional[Any] = None,
+    ) -> None:
+        self._client = client
+        self._id = id
+        self._workflow_id = workflow_id
+        self._workflow_run_id = workflow_run_id
+        self._known_outcome = known_outcome  # result_type unused (pickle)
+
+    @property
+    def id(self) -> str:
+        """ID of this update request."""
+        return self._id
+
+    @property
+    def workflow_id(self) -> str:
+        """The ID of the workflow targeted by this update."""
+        return self._workflow_id
+
+    @property
+    def workflow_run_id(self) -> Optional[str]:
+        """The run targeted by this update, if known."""
+        return self._workflow_run_id
+
+    async def result(
+        self,
+        *,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> Any:
+        """Wait for and return the update's result; raises
+        :py:class:`WorkflowUpdateFailedError` on rejection or failure.
+        """
+        _ignore_rpc_options("update result", rpc_metadata, None)
+        outcome = self._known_outcome
+        if outcome is None:
+            timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
+            outcome = await self._client._dbos_client.get_event_async(
+                self._workflow_run_id or self._workflow_id,
+                inbox.update_result_key(self._id),
+                timeout,
+            )
+            if outcome is None:
+                raise TimeoutError(f"update did not complete within {timeout}s")
+            self._known_outcome = outcome
+        if outcome["status"] == "completed":
+            return outcome["result"]
+        raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
 
 
 @dataclass(frozen=True)
@@ -590,6 +666,65 @@ class WorkflowHandle:
             return reply["result"]
         raise WorkflowQueryFailedError(str(deserialize_failure(reply["failure"])))
 
+    async def start_update(
+        self,
+        update: Any,
+        arg: Any = _arg_unset,
+        *,
+        wait_for_stage: WorkflowUpdateStage,
+        args: Sequence[Any] = [],
+        id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> WorkflowUpdateHandle:
+        """Send an update and wait until it reaches ``wait_for_stage``
+        (ACCEPTED: past its validator; COMPLETED: handler finished). Raises
+        :py:class:`WorkflowUpdateFailedError` if the update is rejected.
+        """
+        _ignore_rpc_options("start_update", rpc_metadata, None)
+        if wait_for_stage not in (
+            WorkflowUpdateStage.ACCEPTED,
+            WorkflowUpdateStage.COMPLETED,
+        ):
+            raise ValueError("Admitted wait stage not supported")
+        update_id = id or str(uuid_mod.uuid4())
+        client = self._client._dbos_client
+        target = await self._target()
+        timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
+        await client.send_async(
+            target,
+            inbox.update_envelope(
+                _update_name(update), _resolve_args(arg, args), update_id
+            ),
+            inbox.INBOX_TOPIC,
+            idempotency_key=update_id,
+        )
+        handle = WorkflowUpdateHandle(
+            self._client, update_id, self._id, workflow_run_id=target
+        )
+        if wait_for_stage == WorkflowUpdateStage.ACCEPTED:
+            acceptance = await client.get_event_async(
+                target, inbox.update_acceptance_key(update_id), timeout
+            )
+            if acceptance is None:
+                raise TimeoutError(f"update was not accepted within {timeout}s")
+            if acceptance["status"] != "accepted":
+                raise WorkflowUpdateFailedError(
+                    deserialize_failure(acceptance["failure"])
+                )
+        else:  # COMPLETED
+            outcome = await client.get_event_async(
+                target, inbox.update_result_key(update_id), timeout
+            )
+            if outcome is None:
+                raise TimeoutError(f"update did not complete within {timeout}s")
+            if outcome["status"] == "rejected":
+                # Rejection is a failure of the *start* (never accepted).
+                raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
+            handle._known_outcome = outcome
+        return handle
+
     async def execute_update(
         self,
         update: Any,
@@ -604,27 +739,17 @@ class WorkflowHandle:
         """Send an update and wait for its result; raises
         :py:class:`WorkflowUpdateFailedError` on rejection or failure.
         """
-        _ignore_rpc_options("execute_update", rpc_metadata, None)
-        update_id = id or str(uuid_mod.uuid4())
-        client = self._client._dbos_client
-        target = await self._target()
-        timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
-        await client.send_async(
-            target,
-            inbox.update_envelope(
-                _update_name(update), _resolve_args(arg, args), update_id
-            ),
-            inbox.INBOX_TOPIC,
-            idempotency_key=update_id,
+        handle = await self.start_update(
+            update,
+            arg,
+            wait_for_stage=WorkflowUpdateStage.COMPLETED,
+            args=args,
+            id=id,
+            result_type=result_type,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
         )
-        reply = await client.get_event_async(
-            target, inbox.update_result_key(update_id), timeout
-        )
-        if reply is None:
-            raise TimeoutError(f"update did not complete within {timeout}s")
-        if reply["status"] == "completed":
-            return reply["result"]
-        raise WorkflowUpdateFailedError(deserialize_failure(reply["failure"]))
+        return await handle.result(rpc_timeout=rpc_timeout)
 
     async def describe(
         self,

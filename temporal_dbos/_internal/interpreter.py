@@ -1124,6 +1124,7 @@ class Interpreter(_Runtime):
             return  # duplicate delivery; the original reply event stands
         self._seen_update_ids.add(update_id)
         reply_key = inbox.update_result_key(update_id)
+        acceptance_key = inbox.update_acceptance_key(update_id)
         defn = self._defn.updates.get(envelope["name"])
         if defn is None:
             failure = exceptions.ApplicationError(
@@ -1131,6 +1132,7 @@ class Interpreter(_Runtime):
                 type="NotFoundError",
                 non_retryable=True,
             )
+            self._reply(acceptance_key, status="rejected", failure=failure)
             self._reply(reply_key, status="rejected", failure=failure)
             return
         if defn.validator is not None:
@@ -1140,10 +1142,14 @@ class Interpreter(_Runtime):
             try:
                 defn.validator(self._instance, *envelope["args"])
             except BaseException as err:  # noqa: BLE001
+                self._reply(acceptance_key, status="rejected", failure=err)
                 self._reply(reply_key, status="rejected", failure=err)
                 return
             finally:
                 self._read_only = False
+        # Past validation: the update is accepted (WorkflowUpdateStage
+        # ACCEPTED); the handler runs as a tracked vloop task.
+        self._reply(acceptance_key, status="accepted")
         self._spawn_handler(
             self._run_update_handler(defn.fn, envelope["args"], reply_key)
         )
@@ -1286,6 +1292,9 @@ class Interpreter(_Runtime):
 
     def runtime_cancellation_reason(self) -> Optional[str]:
         return self._cancel_reason
+
+    def runtime_all_handlers_finished(self) -> bool:
+        return self._handlers_running == 0
 
     def runtime_is_replaying(self) -> bool:
         # TODO(phase 2): derive from checkpoint-cursor position to back

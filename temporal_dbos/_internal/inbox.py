@@ -74,6 +74,10 @@ def query_envelope(name: str, args: Sequence[Any], request_id: str) -> Envelope:
 CHILDREN_EVENT_KEY = "__tdb_children"
 
 
+def update_acceptance_key(update_id: str) -> str:
+    return f"__tdb_upd_{update_id}_accepted"
+
+
 def update_result_key(update_id: str) -> str:
     return f"__tdb_upd_{update_id}"
 

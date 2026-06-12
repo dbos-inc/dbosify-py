@@ -60,6 +60,16 @@ harness).
 | hello_mtls | — needs mTLS infrastructure |
 | hello_patch | — manual multi-invocation walkthrough (Phase 4) |
 
+`message_passing/` (multi-file, worker + starter as separate processes):
+
+| Sample | Status |
+|---|---|
+| introduction | ✅ (queries, updates + validators, start_update staging, signals, async update handlers running activities) |
+| waiting_for_handlers | ✅ (`all_handlers_finished`) |
+| waiting_for_handlers_and_compensation | ⬜ needs `workflow.wait` |
+| update_with_start/lazy_initialization | ⬜ needs client update-with-start |
+| safe_message_handlers | ⬜ Phase 3 (continue-as-new) |
+
 ## Known deviations from Temporal
 
 **[DEVIATIONS.md](DEVIATIONS.md) is the canonical, detailed record of

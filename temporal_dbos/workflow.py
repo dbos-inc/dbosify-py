@@ -44,6 +44,7 @@ __all__ = [
     "ExternalWorkflowHandle",
     "Info",
     "ParentClosePolicy",
+    "all_handlers_finished",
     "cancellation_reason",
     "defn",
     "execute_activity",
@@ -363,6 +364,9 @@ class _Runtime:
     def runtime_cancellation_reason(self) -> Optional[str]:
         raise NotImplementedError
 
+    def runtime_all_handlers_finished(self) -> bool:
+        raise NotImplementedError
+
     def runtime_start_activity(
         self,
         activity_name: str,
@@ -493,6 +497,13 @@ def in_workflow() -> bool:
 def info() -> Info:
     """Current workflow's info."""
     return _runtime().runtime_info()
+
+
+def all_handlers_finished() -> bool:
+    """Whether all in-progress signal/update handlers have finished. Used in
+    wait_condition predicates to avoid returning while handlers still run.
+    """
+    return _runtime().runtime_all_handlers_finished()
 
 
 def cancellation_reason() -> Optional[str]:

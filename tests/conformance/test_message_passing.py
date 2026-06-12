@@ -39,9 +39,7 @@ class Sample:
 SAMPLES = {
     "introduction": Sample(
         package="message_passing.introduction",
-        expect_output="Hello, world",
-        xfail="needs handle.start_update + WorkflowUpdateStage (update "
-        "staging; Phase 2 round-out)",
+        expect_output="language changed: ENGLISH -> CHINESE",
     ),
     "safe_message_handlers": Sample(
         package="message_passing.safe_message_handlers",
@@ -49,13 +47,11 @@ SAMPLES = {
     ),
     "waiting_for_handlers": Sample(
         package="message_passing.waiting_for_handlers",
-        xfail="needs workflow.all_handlers_finished + unfinished_policy "
-        "(Phase 2 round-out)",
+        expect_output="caller received workflow result",
     ),
     "waiting_for_handlers_and_compensation": Sample(
         package="message_passing.waiting_for_handlers_and_compensation",
-        xfail="needs workflow.all_handlers_finished + unfinished_policy "
-        "(Phase 2 round-out)",
+        xfail="needs workflow.wait (Phase 2 round-out)",
     ),
     "update_with_start_lazy_init": Sample(
         package="message_passing.update_with_start.lazy_initialization",

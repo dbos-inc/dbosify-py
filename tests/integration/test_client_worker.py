@@ -16,6 +16,7 @@ from temporal_dbos.client import (
     WorkflowExecutionStatus,
     WorkflowFailureError,
     WorkflowUpdateFailedError,
+    WorkflowUpdateStage,
 )
 from temporal_dbos.exceptions import (
     ApplicationError,
@@ -101,6 +102,38 @@ class SignalStartWorkflow:
         return self.greetings
 
 
+@workflow.defn
+class StagedUpdateWorkflow:
+    def __init__(self) -> None:
+        self.release = False
+        self.done = False
+
+    @workflow.signal
+    def unblock(self) -> None:
+        self.release = True
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.update
+    async def slow_update(self, n: int) -> int:
+        await workflow.wait_condition(lambda: self.release)
+        return n * 2
+
+    @slow_update.validator
+    def _validate_slow_update(self, n: int) -> None:
+        if n < 0:
+            raise ApplicationError("no negatives", type="Neg")
+
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.wait_condition(
+            lambda: self.done and workflow.all_handlers_finished()
+        )
+        return "done"
+
+
 @asynccontextmanager
 async def _env() -> AsyncIterator[Client]:
     """A running Worker plus a Client against the same database. The client
@@ -114,6 +147,7 @@ async def _env() -> AsyncIterator[Client]:
             AccumulatorWorkflow,
             FailingWorkflow,
             SignalStartWorkflow,
+            StagedUpdateWorkflow,
         ],
         activities=[compose_greeting],
     )
@@ -243,3 +277,32 @@ async def test_workflow_id_validation() -> None:
             await client.start_workflow(
                 GreetingWorkflow.run, "x", id="bad--r1", task_queue=TASK_QUEUE
             )
+
+
+async def test_start_update_stages() -> None:
+    """start_update(ACCEPTED) returns once past the validator, before the
+    handler finishes; the handle's result() collects the eventual value.
+    Rejection raises from start_update itself."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            StagedUpdateWorkflow.run, id="staged-wf", task_queue=TASK_QUEUE
+        )
+        update_handle = await handle.start_update(
+            StagedUpdateWorkflow.slow_update,
+            21,
+            wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+        )
+        # Accepted but parked: release the handler, then collect the result.
+        await handle.signal(StagedUpdateWorkflow.unblock)
+        assert await update_handle.result() == 42
+
+        with pytest.raises(WorkflowUpdateFailedError):
+            await handle.start_update(
+                StagedUpdateWorkflow.slow_update,
+                -1,
+                wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+            )
+
+        # The run waits on all_handlers_finished before returning.
+        await handle.signal(StagedUpdateWorkflow.finish)
+        assert await handle.result() == "done"
