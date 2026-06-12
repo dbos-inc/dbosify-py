@@ -194,7 +194,12 @@ async def test_terminate_existing_conflict_policy() -> None:
             task_queue=TASK_QUEUE,
             id_conflict_policy=WorkflowIDConflictPolicy.TERMINATE_EXISTING,
         )
-        assert second.run_id == "term-existing--r1"
-        assert (await first.describe()).status == WorkflowExecutionStatus.TERMINATED
+        assert second.result_run_id == "term-existing--r1"
+        # `first` is unbound (signals/describe follow the chain's current
+        # run, as in temporalio); pin the terminated run explicitly.
+        first_run = client.get_workflow_handle("term-existing", run_id="term-existing")
+        assert (await first_run.describe()).status == (
+            WorkflowExecutionStatus.TERMINATED
+        )
         assert (await second.describe()).status == WorkflowExecutionStatus.RUNNING
         await second.terminate()

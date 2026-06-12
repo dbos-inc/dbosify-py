@@ -556,6 +556,8 @@ class Interpreter(_Runtime):
             self._waiters.clear()
             if self._can_new_run_id is not None:
                 await self._forward_inbox_to(self._can_new_run_id)
+            if self._outcome is not None and self._outcome[0] != "task_failure":
+                await self._fail_abandoned_updates()
 
         self._warn_if_unfinished_handlers()
         kind, value = self._outcome
@@ -1132,8 +1134,11 @@ class Interpreter(_Runtime):
             if policy == 2:  # ABANDON
                 continue
             if policy == 3:  # REQUEST_CANCEL
+                # The policy applies to the child's *chain*: a child that
+                # continued as new lives at a later run now.
+                current = await self._resolve_current_run(child.child_id)
                 await DBOS.send_async(
-                    child.child_id, inbox.cancel_envelope(), inbox.INBOX_TOPIC
+                    current, inbox.cancel_envelope(), inbox.INBOX_TOPIC
                 )
             else:  # TERMINATE (1) and UNSPECIFIED (0) default to terminate
                 await self._terminate_child_tree(child.child_id, set())
@@ -1144,13 +1149,15 @@ class Interpreter(_Runtime):
         if child_id in visited:
             return
         visited.add(child_id)
-        status = await DBOS.get_workflow_status_async(child_id)
+        # Operate on the chain's current run: a child that continued as new
+        # lives at a later run, and each closed run already swept the
+        # children *it* started, so only the current run's registry matters.
+        current = await self._resolve_current_run(child_id)
+        status = await DBOS.get_workflow_status_async(current)
         if status is None or status.status not in ("PENDING", "ENQUEUED", "DELAYED"):
             return  # already terminal (or stuck); don't clobber its status
-        await DBOS.cancel_workflow_async(child_id)
-        grandchildren = await DBOS.get_event_async(
-            child_id, inbox.CHILDREN_EVENT_KEY, 0
-        )
+        await DBOS.cancel_workflow_async(current)
+        grandchildren = await DBOS.get_event_async(current, inbox.CHILDREN_EVENT_KEY, 0)
         for grandchild in grandchildren or []:
             policy = grandchild.get("policy", 1)
             if policy == 2:  # ABANDON
@@ -1301,6 +1308,28 @@ class Interpreter(_Runtime):
             self._tasks.discard(t)
 
         task.add_done_callback(_finished)
+
+    async def _fail_abandoned_updates(self) -> None:
+        """Accepted updates whose handlers the closing run abandoned get a
+        failure reply (Temporal fails them with AcceptedUpdateCompletedWorkflow
+        when the workflow completes); without this the caller would block
+        until its timeout. Checkpointed set_events in deterministic
+        (spawn) order, so replay re-emits identically.
+        """
+        from .payloads import serialize_failure
+
+        for record in self._inflight_handlers.values():
+            if record["kind"] != "update" or record["id"] is None:
+                continue
+            failure = exceptions.ApplicationError(
+                "Workflow run finished before the update handler completed",
+                type="AcceptedUpdateCompletedWorkflow",
+                non_retryable=True,
+            )
+            await DBOS.set_event_async(
+                inbox.update_result_key(record["id"]),
+                {"status": "failed", "failure": serialize_failure(failure)},
+            )
 
     def _warn_if_unfinished_handlers(self) -> None:
         """Temporal's HandlerUnfinishedPolicy behavior: a workflow that
@@ -1527,14 +1556,18 @@ class Interpreter(_Runtime):
 
     async def _resolve_current_run(self, workflow_id: str) -> str:
         """Resolve a Temporal workflow id to its current run's DBOS id
-        (§6.4 run chains)."""
-        statuses = await DBOS.list_workflows_async(workflow_id_prefix=workflow_id)
-        best: Optional[Tuple[int, str]] = None
-        for status in statuses:
-            index = ids.run_index_of(workflow_id, status.workflow_id)
-            if index is not None and (best is None or index > best[0]):
-                best = (index, status.workflow_id)
-        return best[1] if best is not None else workflow_id
+        (§6.4 run chains) via exact-id probes (ids.resolve_latest_run; no
+        prefix scan). Each batched lookup is a checkpointed management call,
+        and the probe sequence is driven by the recorded results, so the
+        resolution replays deterministically.
+        """
+
+        async def lookup(dbos_ids: Sequence[str]) -> Dict[str, Any]:
+            statuses = await DBOS.list_workflows_async(workflow_ids=list(dbos_ids))
+            return {status.workflow_id: status for status in statuses}
+
+        resolved = await ids.resolve_latest_run(workflow_id, lookup)
+        return ids.run_dbos_id(workflow_id, resolved[0]) if resolved else workflow_id
 
     def runtime_cancellation_reason(self) -> Optional[str]:
         return self._cancel_reason

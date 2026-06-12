@@ -492,8 +492,13 @@ Scheme (`_internal/ids.py`):
 - DBOS id for run *n* of Temporal id `W`: `W` for n=0, else `W--r{n}` (pick a separator
   unlikely to collide; reject user workflow ids containing it, or escape). `run_id` exposed
   to users = the DBOS id of that run (stable, unique — synthesizing UUIDs adds nothing).
-- "Current run" lookup = DBOS `list_workflows(workflow_id_prefix="W", sort_desc=True, limit=...)`
-  filtered to exact chain members. Used by `get_workflow_handle(W)` without run_id.
+- "Current run" lookup = exact-id probing (`ids.resolve_latest_run`): run ids are
+  deterministic and dense, so resolution is "largest n where `W--r{n}` exists" — one
+  batched `list_workflows(workflow_ids=[...])` primary-key lookup for chains ≤16 runs,
+  O(log) batches beyond. **Never** `workflow_id_prefix` (unindexed scan in DBOS; unsafe
+  on the send/query/result critical path). Used by `get_workflow_handle(W)` without
+  run_id and by the interpreter's external-handle resolution (where each probe is a
+  checkpointed management call, so the adaptive sequence replays deterministically).
 - **Conflict policies** (vs a RUNNING run): `USE_EXISTING` → DBOS's natural idempotent
   start. `FAIL` (Temporal default behavior) → check current run status; if running, raise
   `WorkflowAlreadyStartedError`. There is an inherent TOCTOU window — accepted for v1
@@ -513,7 +518,17 @@ Scheme (`_internal/ids.py`):
   (mirroring the cancellation marker; status maps to CONTINUED_AS_NEW).
   `handle.result(follow_runs=True)` follows markers; `follow_runs=False` raises
   `WorkflowContinuedAsNewError`; the child-result step follows chains so parents see the
-  final run's result. `is_continue_as_new_suggested()` is a threshold on the checkpoint
+  final run's result, and ParentClosePolicy sweeps resolve each child's *current* run (a
+  child that continued as new must be terminated/cancelled at its live run, not its
+  closed first run). Accepted updates abandoned at any terminal outcome get a failure
+  reply (`AcceptedUpdateCompletedWorkflow`, as in Temporal) instead of leaving callers to
+  time out. Client reply waits (update acceptance/result, query replies) walk
+  the chain on a miss: a forwarded update/query is answered under the *new* run's id, not
+  the one the client originally targeted (reply keys are globally unique, so a chain
+  sweep is unambiguous). Handles from `start_workflow` are not run-bound (temporalio
+  semantics): signals/queries/updates resolve the chain's current run per call, which is
+  what keeps them routing correctly across continue-as-new; `result()` anchors on
+  `result_run_id` (the started run) and follows forward. `is_continue_as_new_suggested()` is a threshold on the checkpoint
   cursor (`TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD`, default 10000, mirroring Temporal's
   ~10k-events scale). `workflow.info().continued_run_id` is the run's DBOS parent link
   when it points within the same chain (DBOS threads `parent_workflow_id` for in-workflow
