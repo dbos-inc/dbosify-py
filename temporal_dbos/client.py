@@ -16,7 +16,7 @@ import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import IntEnum
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Type, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Type, Union
 
 from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from dbos._error import DBOSAwaitedWorkflowCancelledError
@@ -43,6 +43,11 @@ from .workflow import _UpdateMethod
 # missed (see docs/phase0.md); DBOSClient has no public knob yet.
 CLIENT_POLL_ENV = "TEMPORAL_DBOS_CLIENT_POLL_SECONDS"
 DEFAULT_CLIENT_POLL_SECONDS = 1.0
+
+# How often reply waits (update acceptance/result, query replies) re-check
+# newer runs of the chain: a message still unconsumed when its target run
+# continues-as-new is forwarded to (and answered under) a later run's id.
+REPLY_SWEEP_INTERVAL_SECONDS = 1.0
 
 __all__ = [
     "Client",
@@ -179,7 +184,8 @@ class WorkflowUpdateHandle:
         outcome = self._known_outcome
         if outcome is None:
             timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
-            outcome = await self._client._dbos_client.get_event_async(
+            outcome = await self._client._await_reply_event(
+                self._workflow_id,
                 self._workflow_run_id or self._workflow_id,
                 inbox.update_result_key(self._id),
                 timeout,
@@ -514,8 +520,13 @@ class Client:
                 inbox.signal_envelope(start_signal, list(start_signal_args)),
                 inbox.INBOX_TOPIC,
             )
+        # Like temporalio, the returned handle is NOT run-bound: signals,
+        # queries, and updates resolve the chain's *current* run at call
+        # time, so they keep routing correctly across continue-as-new (a
+        # run-bound handle from get_workflow_handle(run_id=...) pins the
+        # run, also matching temporalio).
         return WorkflowHandle(
-            self, id, run_id=dbos_id, first_execution_run_id=ids.run_dbos_id(id, 0)
+            self, id, first_execution_run_id=ids.run_dbos_id(id, 0)
         )
 
     async def execute_workflow(
@@ -702,6 +713,48 @@ class Client:
             raise RuntimeError(f"Workflow not found: {workflow_id!r}")
         return current[1].workflow_id
 
+    async def _newer_chain_runs(self, workflow_id: str, after_index: int) -> List[str]:
+        """DBOS ids of chain runs newer than ``after_index``, newest first."""
+        statuses = await self._dbos_client.list_workflows_async(
+            workflow_id_prefix=workflow_id
+        )
+        runs: List[Tuple[int, str]] = []
+        for status in statuses:
+            index = ids.run_index_of(workflow_id, status.workflow_id)
+            if index is not None and index > after_index:
+                runs.append((index, status.workflow_id))
+        return [run_id for _, run_id in sorted(runs, reverse=True)]
+
+    async def _await_reply_event(
+        self, workflow_id: str, target: str, key: str, timeout_seconds: float
+    ) -> Optional[Any]:
+        """Wait for a reply event (update acceptance/result, query reply),
+        accounting for continue-as-new: a message still unconsumed when
+        ``target`` continued as new was forwarded to a later run, which
+        wrote the reply under *its own* id. Wait on the original target in
+        slices; on each miss, sweep newer chain runs (the reply keys are
+        globally unique, so finding one anywhere on the chain is
+        unambiguous).
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        target_index = ids.run_index_of(workflow_id, target)
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            value = await self._dbos_client.get_event_async(
+                target, key, min(REPLY_SWEEP_INTERVAL_SECONDS, remaining)
+            )
+            if value is not None:
+                return value
+            if target_index is None:
+                continue  # not a chain member; nothing to sweep
+            for run_id in await self._newer_chain_runs(workflow_id, target_index):
+                value = await self._dbos_client.get_event_async(run_id, key, 0)
+                if value is not None:
+                    return value
+
     async def _apply_parent_close_policies(
         self, parent_dbos_id: str, visited: "set[str]"
     ) -> None:
@@ -875,8 +928,8 @@ class WorkflowHandle:
             ),
             inbox.INBOX_TOPIC,
         )
-        reply = await client.get_event_async(
-            target, inbox.query_result_key(request_id), timeout
+        reply = await self._client._await_reply_event(
+            self._id, target, inbox.query_result_key(request_id), timeout
         )
         if reply is None:
             raise WorkflowQueryFailedError(
@@ -925,8 +978,8 @@ class WorkflowHandle:
             self._client, update_id, self._id, workflow_run_id=target
         )
         if wait_for_stage == WorkflowUpdateStage.ACCEPTED:
-            acceptance = await client.get_event_async(
-                target, inbox.update_acceptance_key(update_id), timeout
+            acceptance = await self._client._await_reply_event(
+                self._id, target, inbox.update_acceptance_key(update_id), timeout
             )
             if acceptance is None:
                 raise TimeoutError(f"update was not accepted within {timeout}s")
@@ -935,8 +988,8 @@ class WorkflowHandle:
                     deserialize_failure(acceptance["failure"])
                 )
         else:  # COMPLETED
-            outcome = await client.get_event_async(
-                target, inbox.update_result_key(update_id), timeout
+            outcome = await self._client._await_reply_event(
+                self._id, target, inbox.update_result_key(update_id), timeout
             )
             if outcome is None:
                 raise TimeoutError(f"update did not complete within {timeout}s")

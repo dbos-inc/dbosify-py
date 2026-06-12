@@ -9,6 +9,7 @@ import pytest
 from dbos import DBOSClient
 
 from temporal_dbos import workflow
+from temporal_dbos._internal import inbox
 from temporal_dbos.client import (
     Client,
     WorkflowContinuedAsNewError,
@@ -61,6 +62,35 @@ class CarryoverWorkflow:
 
 
 @workflow.defn
+class UpdateCarryWorkflow:
+    def __init__(self) -> None:
+        self.total = 0
+        self.hop = False
+        self.done = False
+
+    @workflow.signal
+    def hop_now(self) -> None:
+        self.hop = True
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.update
+    def add(self, n: int) -> int:
+        self.total += n
+        return self.total
+
+    @workflow.run
+    async def run(self, carried: int) -> int:
+        self.total += carried
+        await workflow.wait_condition(lambda: self.hop or self.done)
+        if self.hop:
+            workflow.continue_as_new(self.total)
+        return self.total
+
+
+@workflow.defn
 class LinkProbeWorkflow:
     @workflow.run
     async def run(self, links: List[Optional[str]], rounds: int) -> List[Optional[str]]:
@@ -101,6 +131,7 @@ async def _env() -> AsyncIterator[Client]:
             CanParent,
             LinkProbeWorkflow,
             LinkParent,
+            UpdateCarryWorkflow,
         ],
         activities=[],
     )
@@ -190,3 +221,30 @@ async def test_continued_run_id() -> None:
         assert await client.execute_workflow(
             LinkParent.run, id="link-parent", task_queue=TASK_QUEUE
         ) == [None]
+
+
+async def test_update_forwarded_across_can() -> None:
+    """An update still unconsumed when its target run continues as new is
+    forwarded to and executed by the new run — and the client still gets
+    the result, because reply waits walk the chain (the new run writes
+    acceptance/result events under its own id, not the one the client
+    originally targeted)."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            UpdateCarryWorkflow.run, 0, id="upd-carry-wf", task_queue=TASK_QUEUE
+        )
+        # FIFO: the hop is consumed first, the run stops consuming, and the
+        # update (sent right behind it) rides carryover to run --r1.
+        await handle.signal(UpdateCarryWorkflow.hop_now)
+        assert (
+            await handle.execute_update(UpdateCarryWorkflow.add, 5, id="carried-upd")
+            == 5
+        )
+        # Prove the forward actually happened: the result event lives on the
+        # new run, and the originally-targeted run never wrote one.
+        dbos_client = client._dbos_client
+        key = inbox.update_result_key("carried-upd")
+        assert await dbos_client.get_event_async("upd-carry-wf--r1", key, 1.0)
+        assert await dbos_client.get_event_async("upd-carry-wf", key, 0) is None
+        await handle.signal(UpdateCarryWorkflow.finish)
+        assert await handle.result() == 5
