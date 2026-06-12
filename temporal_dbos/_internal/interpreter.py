@@ -1527,14 +1527,18 @@ class Interpreter(_Runtime):
 
     async def _resolve_current_run(self, workflow_id: str) -> str:
         """Resolve a Temporal workflow id to its current run's DBOS id
-        (§6.4 run chains)."""
-        statuses = await DBOS.list_workflows_async(workflow_id_prefix=workflow_id)
-        best: Optional[Tuple[int, str]] = None
-        for status in statuses:
-            index = ids.run_index_of(workflow_id, status.workflow_id)
-            if index is not None and (best is None or index > best[0]):
-                best = (index, status.workflow_id)
-        return best[1] if best is not None else workflow_id
+        (§6.4 run chains) via exact-id probes (ids.resolve_latest_run; no
+        prefix scan). Each batched lookup is a checkpointed management call,
+        and the probe sequence is driven by the recorded results, so the
+        resolution replays deterministically.
+        """
+
+        async def lookup(dbos_ids: Sequence[str]) -> Dict[str, Any]:
+            statuses = await DBOS.list_workflows_async(workflow_ids=list(dbos_ids))
+            return {status.workflow_id: status for status in statuses}
+
+        resolved = await ids.resolve_latest_run(workflow_id, lookup)
+        return ids.run_dbos_id(workflow_id, resolved[0]) if resolved else workflow_id
 
     def runtime_cancellation_reason(self) -> Optional[str]:
         return self._cancel_reason

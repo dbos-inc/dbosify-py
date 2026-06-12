@@ -492,8 +492,13 @@ Scheme (`_internal/ids.py`):
 - DBOS id for run *n* of Temporal id `W`: `W` for n=0, else `W--r{n}` (pick a separator
   unlikely to collide; reject user workflow ids containing it, or escape). `run_id` exposed
   to users = the DBOS id of that run (stable, unique — synthesizing UUIDs adds nothing).
-- "Current run" lookup = DBOS `list_workflows(workflow_id_prefix="W", sort_desc=True, limit=...)`
-  filtered to exact chain members. Used by `get_workflow_handle(W)` without run_id.
+- "Current run" lookup = exact-id probing (`ids.resolve_latest_run`): run ids are
+  deterministic and dense, so resolution is "largest n where `W--r{n}` exists" — one
+  batched `list_workflows(workflow_ids=[...])` primary-key lookup for chains ≤16 runs,
+  O(log) batches beyond. **Never** `workflow_id_prefix` (unindexed scan in DBOS; unsafe
+  on the send/query/result critical path). Used by `get_workflow_handle(W)` without
+  run_id and by the interpreter's external-handle resolution (where each probe is a
+  checkpointed management call, so the adaptive sequence replays deterministically).
 - **Conflict policies** (vs a RUNNING run): `USE_EXISTING` → DBOS's natural idempotent
   start. `FAIL` (Temporal default behavior) → check current run status; if running, raise
   `WorkflowAlreadyStartedError`. There is an inherent TOCTOU window — accepted for v1

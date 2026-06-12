@@ -10,9 +10,17 @@ run id. Scheme (resolved decision §10.3):
   - user workflow ids containing the separator are rejected outright
 """
 
-from typing import Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 RUN_SEPARATOR = "--r"
+
+# Chain resolution probes (see resolve_latest_run): chains up to this many
+# runs resolve in a single batched primary-key lookup.
+DENSE_PROBE_LIMIT = 16
+# Exponential ladder ceiling: 2**20 ≈ 1M runs; longer chains keep doubling.
+MAX_PROBE_EXPONENT = 20
+# Evenly-spaced probes per refinement round (log base for convergence).
+REFINE_BATCH = 16
 
 
 def validate_workflow_id(workflow_id: str) -> None:
@@ -42,11 +50,7 @@ def parse_run(dbos_id: str) -> "tuple[str, int]":
 
 
 def run_index_of(workflow_id: str, dbos_id: str) -> Optional[int]:
-    """If ``dbos_id`` is a run of ``workflow_id``, its run index; else None.
-
-    Used to filter ``list_workflows(workflow_id_prefix=workflow_id)`` results
-    down to exact chain members (the prefix also matches e.g. "{id}x").
-    """
+    """If ``dbos_id`` is a run of ``workflow_id``, its run index; else None."""
     if dbos_id == workflow_id:
         return 0
     if not dbos_id.startswith(workflow_id + RUN_SEPARATOR):
@@ -55,3 +59,66 @@ def run_index_of(workflow_id: str, dbos_id: str) -> Optional[int]:
     if suffix.isdigit():
         return int(suffix)
     return None
+
+
+# A batched exact-id status lookup: dbos ids -> status object per id found.
+# Backed by ``list_workflows(workflow_ids=[...])`` — primary-key lookups, so
+# every probe is index-backed.
+ChainLookup = Callable[[Sequence[str]], Awaitable[Dict[str, Any]]]
+
+
+async def resolve_latest_run(
+    workflow_id: str, lookup: ChainLookup
+) -> Optional[Tuple[int, Any]]:
+    """The chain's newest run ``(index, status)`` — or None if no run exists
+    — using exact-id lookups only.
+
+    ``list_workflows(workflow_id_prefix=...)`` is an unindexed scan in DBOS,
+    unsafe on the send/query/result critical path. But run ids are
+    deterministic and dense (``W``, ``W--r1``, ..., ``W--r{n}``, gapless by
+    construction), so resolution is "largest n whose exact id exists":
+
+    1. One batched probe over a ladder — indexes 0..16 densely, then powers
+       of two — answers chains up to DENSE_PROBE_LIMIT runs in a single
+       round trip and brackets longer ones (front gaps from operator
+       deletion/GC of old runs are tolerated: the max found anchors).
+    2. Longer chains refine the bracket with REFINE_BATCH evenly spaced
+       probes per round (a 500k-run chain resolves in ~5 round trips).
+    """
+    ladder = list(range(DENSE_PROBE_LIMIT + 1)) + [
+        1 << e for e in range(5, MAX_PROBE_EXPONENT + 1)
+    ]
+
+    async def probe(indexes: List[int]) -> Dict[int, Any]:
+        by_id = {run_dbos_id(workflow_id, i): i for i in indexes}
+        statuses = await lookup(list(by_id))
+        return {by_id[did]: status for did, status in statuses.items()}
+
+    found = await probe(ladder)
+    if not found:
+        return None
+    lo = max(found)
+    lo_status = found[lo]
+    # Exclusive upper bound: the smallest probed index above lo that was
+    # missing. None means lo was the ladder top: keep doubling (absurdly
+    # long chain) until the bracket closes.
+    hi = next((c for c in ladder if c > lo and c not in found), None)
+    while hi is None:
+        extension = [lo << k for k in range(1, 5)]
+        found = await probe(extension)
+        missing = [c for c in extension if c not in found]
+        if found:
+            lo = max(found)
+            lo_status = found[lo]
+        hi = next((c for c in missing if c > lo), None)
+    while hi - lo > 1:
+        step = max(1, (hi - lo) // (REFINE_BATCH + 1))
+        points = list(range(lo + step, hi, step))[:REFINE_BATCH]
+        found = await probe(points)
+        if found:
+            lo = max(found)
+            lo_status = found[lo]
+            hi = next((p for p in points if p > lo and p not in found), hi)
+        else:
+            hi = points[0]
+    return lo, lo_status

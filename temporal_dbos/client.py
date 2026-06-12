@@ -694,19 +694,19 @@ class Client:
     # Internals
     # ------------------------------------------------------------------
 
+    async def _chain_lookup(self, dbos_ids: Sequence[str]) -> Dict[str, Any]:
+        """Batched exact-id status lookup (primary-key reads; never a
+        prefix scan — unindexed in DBOS and unsafe on the critical path)."""
+        statuses = await self._dbos_client.list_workflows_async(
+            workflow_ids=list(dbos_ids)
+        )
+        return {status.workflow_id: status for status in statuses}
+
     async def _current_run(
         self, workflow_id: str
     ) -> Optional[tuple[int, WorkflowStatus]]:
         """The highest-index run of a Temporal workflow id, if any."""
-        statuses = await self._dbos_client.list_workflows_async(
-            workflow_id_prefix=workflow_id
-        )
-        best: Optional[tuple[int, WorkflowStatus]] = None
-        for status in statuses:
-            index = ids.run_index_of(workflow_id, status.workflow_id)
-            if index is not None and (best is None or index > best[0]):
-                best = (index, status)
-        return best
+        return await ids.resolve_latest_run(workflow_id, self._chain_lookup)
 
     async def _resolve_dbos_id(self, workflow_id: str, run_id: Optional[str]) -> str:
         if run_id is not None:
@@ -717,16 +717,18 @@ class Client:
         return current[1].workflow_id
 
     async def _newer_chain_runs(self, workflow_id: str, after_index: int) -> List[str]:
-        """DBOS ids of chain runs newer than ``after_index``, newest first."""
-        statuses = await self._dbos_client.list_workflows_async(
-            workflow_id_prefix=workflow_id
-        )
-        runs: List[Tuple[int, str]] = []
-        for status in statuses:
-            index = ids.run_index_of(workflow_id, status.workflow_id)
-            if index is not None and index > after_index:
-                runs.append((index, status.workflow_id))
-        return [run_id for _, run_id in sorted(runs, reverse=True)]
+        """DBOS ids of chain runs newer than ``after_index``, newest first.
+        Run ids between a known index and the resolved latest exist by
+        construction (chains are dense), so no further lookups are needed.
+        """
+        resolved = await self._current_run(workflow_id)
+        if resolved is None:
+            return []
+        latest = resolved[0]
+        return [
+            ids.run_dbos_id(workflow_id, index)
+            for index in range(latest, after_index, -1)
+        ]
 
     async def _await_reply_event(
         self, workflow_id: str, target: str, key: str, timeout_seconds: float
