@@ -80,7 +80,10 @@ instead reassigns workflow tasks to *any* live poller on the queue within
 seconds via task timeouts. This is the most important operational deviation:
 plan worker supervision accordingly. Relatedly, a crash mid-activity
 re-executes that attempt under the *same* attempt number on recovery, where
-Temporal's timeout-driven retry would increment the attempt count.
+Temporal's timeout-driven retry would increment the attempt count — and
+heartbeat details live in worker memory (Temporal persists them
+server-side, throttled), so a worker restart presents the retry attempt
+with empty ``heartbeat_details``.
 
 ### D7. Start policies are enforced client-side, with TOCTOU windows
 

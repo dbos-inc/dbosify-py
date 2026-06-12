@@ -408,9 +408,13 @@ def init(init_fn: _F) -> _F:
 
 class ActivityCancellationType(IntEnum):
     """How a workflow cancels an activity, mirroring
-    ``temporalio.workflow.ActivityCancellationType``. Phase 2 honors
-    TRY_CANCEL and ABANDON; WAIT_CANCELLATION_COMPLETED is approximated as
-    TRY_CANCEL until Phase 3's activity-side cancellation observation.
+    ``temporalio.workflow.ActivityCancellationType``. All three are honored:
+    cancellation is delivered into the running attempt (observed at its next
+    ``activity.heartbeat()``), and WAIT_CANCELLATION_COMPLETED resolves an
+    explicit ``handle.cancel()`` only on the activity's confirmation.
+    (During a workflow-cancellation unwind the awaiting coroutine is already
+    cancelled, so WAIT behaves like TRY_CANCEL there — the request is still
+    delivered.)
     """
 
     TRY_CANCEL = 0
@@ -546,15 +550,18 @@ class _Runtime:
 
 
 class ActivityHandle:
-    """Handle to a started activity: awaitable for its result.
-
-    Cancellation reaches it implicitly (workflow cancel, ``wait_for``
-    timeouts); an explicit ``cancel()`` lands with Phase 3's activity-side
-    observation.
+    """Handle to a started activity: awaitable for its result. Cancellation
+    reaches it implicitly (workflow cancel, ``wait_for`` timeouts) or via
+    :py:meth:`cancel`, honoring the activity's ``cancellation_type``.
     """
 
-    def __init__(self, future: "asyncio.Future[Any]") -> None:
+    def __init__(
+        self,
+        future: "asyncio.Future[Any]",
+        on_cancel: Optional[Callable[[], None]] = None,
+    ) -> None:
         self._future = future
+        self._on_cancel = on_cancel
 
     def __await__(self) -> Any:
         return self._future.__await__()
@@ -564,6 +571,17 @@ class ActivityHandle:
 
     def result(self) -> Any:
         return self._future.result()
+
+    def cancel(self, msg: Optional[Any] = None) -> bool:
+        """Request cancellation of the activity. With
+        WAIT_CANCELLATION_COMPLETED the await resolves only once the
+        activity has observed the request and unwound; the default
+        TRY_CANCEL resolves immediately.
+        """
+        if self._on_cancel is not None:
+            self._on_cancel()
+            return True
+        return self._future.cancel(msg)
 
 
 class ChildWorkflowHandle:

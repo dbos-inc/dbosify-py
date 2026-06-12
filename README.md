@@ -32,7 +32,7 @@ rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 `dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
 `message_passing/` corpus passes 5/5.
 
-Current pass rate: **13 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **15 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -50,8 +50,8 @@ harness).
 | hello_signal | ✅ |
 | hello_update | ✅ |
 | hello_child_workflow | ✅ |
-| hello_cancellation | ⬜ Phase 3 (sync activities observe cancellation via heartbeat) |
-| hello_async_activity_completion | ⬜ Phase 3 (async completion) |
+| hello_cancellation | ✅ (sync activity observes cancellation via heartbeat; cleanup runs in the unwind) |
+| hello_async_activity_completion | ✅ (`raise_complete_async` + task-token completion) |
 | hello_continue_as_new | ✅ (10 chained runs) |
 | hello_cron | ⬜ Phase 3 (cron) |
 | hello_search_attributes | ⬜ Phase 3 (search attributes) |

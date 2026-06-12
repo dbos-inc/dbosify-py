@@ -27,6 +27,13 @@ AttemptStep = Callable[
     [List[Any], Optional[float], Dict[str, Any]], Coroutine[Any, Any, Dict[str, Any]]
 ]
 
+
+def activity_api_complete_async_error() -> "type[BaseException]":
+    from .. import activity as activity_api
+
+    return activity_api._CompleteAsyncError
+
+
 _attempt_steps: Dict[str, AttemptStep] = {}
 
 
@@ -54,16 +61,22 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
 
         defn = registry.lookup_activity(activity_name)
 
+        attempt_key = (str(meta.get("workflow_run_id", "")), int(meta.get("seq", -1)))
+
         async def call_user_activity() -> Dict[str, Any]:
             # The activity context (activity.info()/heartbeat()) rides a
             # contextvar; asyncio.to_thread copies the context, so sync
-            # activities see it too.
-            token = activity_api._current_context.set(
-                activity_api._Context(
-                    info=activity_api._make_info(meta),
-                    on_heartbeat=lambda *details: None,
-                )
+            # activities see it too. Registering the context lets the
+            # interpreter deliver cancellation into a running attempt (the
+            # threading.Event outlives task cancellation, so an abandoned
+            # sync thread still observes it at its next heartbeat).
+            ctx = activity_api._Context(
+                info=activity_api._make_info(meta),
+                on_heartbeat=lambda *details: None,
+                attempt_key=attempt_key,
             )
+            activity_api._register_attempt(attempt_key, ctx)
+            token = activity_api._current_context.set(ctx)
             try:
                 if defn.is_async:
                     result = await defn.fn(*args)
@@ -77,6 +90,7 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
                 }
             finally:
                 activity_api._current_context.reset(token)
+                activity_api._unregister_attempt(attempt_key)
             return {"ok": True, "result": result, "ended_at": time_mod.time()}
 
         try:
@@ -84,6 +98,11 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             # converted inside call_user_activity, so a TimeoutError here is
             # unambiguously the start-to-close enforcement firing.
             return await asyncio.wait_for(call_user_activity(), timeout=start_to_close)
+        except activity_api_complete_async_error():
+            # raise_complete_async(): the function returned, but the
+            # activity stays pending until externally completed (the
+            # checkpointed marker makes the parked state replay-stable).
+            return {"async_pending": True, "ended_at": time_mod.time()}
         except (asyncio.TimeoutError, TimeoutError):
             timeout_failure = exceptions.TimeoutError(
                 "activity Start-To-Close timeout",

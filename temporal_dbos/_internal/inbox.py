@@ -57,6 +57,38 @@ def cancel_envelope(reason: str = "") -> Envelope:
     }
 
 
+def activity_result_envelope(
+    seq: int,
+    *,
+    result: Any = None,
+    failure: Any = None,
+    cancelled: bool = False,
+) -> Envelope:
+    """External completion of an async activity (raise_complete_async)."""
+    return {
+        "kind": "activity_result",
+        "name": "",
+        "args": [],
+        "seq": seq,
+        "ok": failure is None and not cancelled,
+        "result": result,
+        "failure": failure,
+        "cancelled": cancelled,
+        "sent_at": time.time(),
+    }
+
+
+def activity_heartbeat_envelope(seq: int, details: Sequence[Any]) -> Envelope:
+    return {
+        "kind": "activity_heartbeat",
+        "name": "",
+        "args": [],
+        "seq": seq,
+        "details": list(details),
+        "sent_at": time.time(),
+    }
+
+
 def query_envelope(name: str, args: Sequence[Any], request_id: str) -> Envelope:
     return {
         "kind": "query",

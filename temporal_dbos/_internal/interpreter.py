@@ -50,6 +50,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tu
 from dbos import DBOS
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
 
+from .. import activity as activity_api
 from .. import exceptions
 from ..common import RetryPolicy
 from ..workflow import (
@@ -394,6 +395,8 @@ class _ActivityExec:
     attempt: int = 1
     in_backoff: bool = False
     last_failure: Optional[FailureEnvelope] = None
+    cancel_requested: bool = False  # WAIT_CANCELLATION_COMPLETED in flight
+    async_pending: bool = False  # raise_complete_async(): awaiting external
 
 
 @dataclass
@@ -833,7 +836,24 @@ class Interpreter(_Runtime):
                 else None
             )
         )
-        return ActivityHandle(exec_state.future)
+        return ActivityHandle(
+            exec_state.future,
+            on_cancel=lambda: self._request_activity_cancel(seq),
+        )
+
+    def _request_activity_cancel(self, seq: int) -> None:
+        """Explicit handle.cancel(): WAIT_CANCELLATION_COMPLETED requests
+        cancellation and lets the in-flight attempt unwind (the await
+        resolves on its confirmation); other types cancel the future, which
+        routes through the deterministic sweep."""
+        exec_state = self._pending_activities.get(seq)
+        if exec_state is None:
+            return
+        if exec_state.cancellation_type == 1:  # WAIT_CANCELLATION_COMPLETED
+            exec_state.cancel_requested = True
+            activity_api._request_cancel((self._workflow_id, seq))
+            return
+        exec_state.future.cancel()
 
     async def _process_commands(self) -> bool:
         """Turn queued commands into real-loop waiter tasks. Returns True if
@@ -968,6 +988,11 @@ class Interpreter(_Runtime):
             exec_state = self._pending_activities.pop(seq, None)
             if exec_state is None:
                 continue
+            if exec_state.cancellation_type != 2:  # ABANDON never requests
+                # Mark the (possibly threaded, still-running) attempt so it
+                # observes cancellation at its next heartbeat.
+                activity_api._request_cancel((self._workflow_id, seq))
+            activity_api._forget_attempt_state((self._workflow_id, seq))
             for waiter in list(self._waiters):
                 if waiter.kind == "activity" and waiter.seq == seq:
                     self._waiters.remove(waiter)
@@ -1007,7 +1032,8 @@ class Interpreter(_Runtime):
             "activity_id": exec_state.activity_id,
             "activity_type": exec_state.activity_name,
             "attempt": exec_state.attempt,
-            "workflow_id": self._workflow_id,
+            "seq": exec_state.seq,
+            "workflow_id": ids.parse_run(self._workflow_id)[0],
             "workflow_run_id": self._workflow_id,
             "workflow_type": self._defn.name,
         }
@@ -1071,12 +1097,29 @@ class Interpreter(_Runtime):
             return
         envelope: Dict[str, Any] = waiter.task.result()
         self._advance_time(envelope.get("ended_at"))
+        if envelope.get("async_pending"):
+            # raise_complete_async(): the function returned but the activity
+            # stays pending; an activity_result inbox envelope resolves it.
+            # The marker is checkpointed, so recovery re-parks identically.
+            exec_state.async_pending = True
+            return
         if envelope["ok"]:
             del self._pending_activities[waiter.seq]
+            activity_api._forget_attempt_state((self._workflow_id, waiter.seq))
             exec_state.future.set_result(envelope["result"])
             return
         failure: FailureEnvelope = envelope["failure"]
         exec_state.last_failure = failure
+        if exec_state.cancel_requested and isinstance(
+            deserialize_failure(failure), exceptions.CancelledError
+        ):
+            # WAIT_CANCELLATION_COMPLETED confirmation: the attempt observed
+            # the request and unwound; only now does the awaiter see the
+            # cancellation.
+            del self._pending_activities[waiter.seq]
+            activity_api._forget_attempt_state((self._workflow_id, waiter.seq))
+            exec_state.future.cancel()
+            return
         retry_delay, retry_state = self._retry_decision(exec_state, failure)
         if retry_delay is not None:
             exec_state.in_backoff = True
@@ -1085,6 +1128,7 @@ class Interpreter(_Runtime):
             )
             return
         del self._pending_activities[waiter.seq]
+        activity_api._forget_attempt_state((self._workflow_id, waiter.seq))
         error = exceptions.ActivityError(
             "Activity task failed",
             scheduled_event_id=0,
@@ -1227,11 +1271,59 @@ class Interpreter(_Runtime):
             await self._apply_update(envelope)
         elif kind == "query":
             self._apply_query(envelope)
+        elif kind == "activity_result":
+            self._apply_activity_result(envelope)
+        elif kind == "activity_heartbeat":
+            self._apply_activity_heartbeat(envelope)
         elif kind == "cancel":
             self._apply_cancel(envelope)
         else:
             logger.warning(
                 "Workflow %s: unknown inbox envelope kind %r", self._workflow_id, kind
+            )
+
+    def _apply_activity_result(self, envelope: inbox.Envelope) -> None:
+        """External completion of an async activity
+        (client.get_async_activity_handle). Checkpointed inbox delivery, so
+        the resolution replays identically. v1: an external `fail` is final
+        (Temporal would schedule a retry attempt)."""
+        seq = int(envelope.get("seq", -1))
+        exec_state = self._pending_activities.get(seq)
+        if exec_state is None or not exec_state.async_pending:
+            logger.debug(
+                "Workflow %s: dropping activity_result for unknown/non-async "
+                "activity seq %s",
+                self._workflow_id,
+                seq,
+            )
+            return
+        del self._pending_activities[seq]
+        activity_api._forget_attempt_state((self._workflow_id, seq))
+        if envelope.get("cancelled"):
+            exec_state.future.cancel()
+        elif envelope["ok"]:
+            exec_state.future.set_result(envelope.get("result"))
+        else:
+            error = exceptions.ActivityError(
+                "Activity task failed",
+                scheduled_event_id=0,
+                started_event_id=0,
+                identity="",
+                activity_type=exec_state.activity_name,
+                activity_id=exec_state.activity_id,
+                retry_state=exceptions.RetryState.NON_RETRYABLE_FAILURE,
+            )
+            error.__cause__ = deserialize_failure(envelope["failure"])
+            exec_state.future.set_exception(error)
+
+    def _apply_activity_heartbeat(self, envelope: inbox.Envelope) -> None:
+        """Heartbeat for an async-pending activity from the external
+        completer; details surface on the next retry attempt (in-process,
+        like in-activity heartbeats)."""
+        seq = int(envelope.get("seq", -1))
+        if seq in self._pending_activities:
+            activity_api._heartbeat_store[(self._workflow_id, seq)] = list(
+                envelope.get("details", [])
             )
 
     def _apply_cancel(self, envelope: inbox.Envelope) -> None:

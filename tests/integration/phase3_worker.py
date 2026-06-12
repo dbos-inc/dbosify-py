@@ -8,6 +8,11 @@ Scenarios:
           must resume the in-flight run from its checkpoints and finish the
           chain — each run's activity exactly once, no twin runs (the next
           run id is deterministic, so a replayed enqueue re-attaches).
+  asyncact  async activity completion: the activity writes its task token to
+          the effects file and raises complete-async; the kill lands while
+          the activity is parked awaiting external completion. Recovery
+          must re-park it from the checkpointed marker (without re-running
+          the activity function); the test then completes it by token.
 """
 
 import asyncio
@@ -32,6 +37,24 @@ async def record_run(path: str, index: int) -> None:
         f.write(f"run{index}\n")
 
 
+@activity.defn
+async def write_token(path: str) -> str:
+    with open(path, "w") as f:
+        f.write(activity.info().task_token.decode())
+    print("TOKEN_WRITTEN", flush=True)
+    activity.raise_complete_async()
+
+
+@workflow.defn
+class AsyncActWorkflow:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        result: str = await workflow.execute_activity(
+            write_token, path, start_to_close_timeout=timedelta(seconds=120)
+        )
+        return result
+
+
 @workflow.defn
 class TimedChainWorkflow:
     @workflow.run
@@ -49,20 +72,24 @@ class TimedChainWorkflow:
 async def main() -> None:
     mode, workflow_id, effects_path = sys.argv[1], sys.argv[2], sys.argv[3]
     scenario, _, action = mode.partition("-")
-    assert scenario == "chain"
+    run_refs = {"chain": TimedChainWorkflow.run, "asyncact": AsyncActWorkflow.run}
+    run_ref = run_refs[scenario]
     async with Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[TimedChainWorkflow],
-        activities=[record_run],
+        workflows=[TimedChainWorkflow, AsyncActWorkflow],
+        activities=[record_run, write_token],
     ):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
             client = await Client.connect(dbos_client)
             if action == "start":
+                start_args = (
+                    [effects_path, 0] if scenario == "chain" else [effects_path]
+                )
                 handle = await client.start_workflow(
-                    TimedChainWorkflow.run,
-                    args=[effects_path, 0],
+                    run_ref,
+                    args=start_args,
                     id=workflow_id,
                     task_queue=TASK_QUEUE,
                 )

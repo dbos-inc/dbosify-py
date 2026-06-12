@@ -29,6 +29,7 @@ from ._internal.payloads import (
     SerializedContinueAsNew,
     SerializedWorkflowFailure,
     deserialize_failure,
+    serialize_failure,
 )
 from ._internal.status import WorkflowExecutionStatus
 from .common import (
@@ -50,6 +51,7 @@ DEFAULT_CLIENT_POLL_SECONDS = 1.0
 REPLY_SWEEP_INTERVAL_SECONDS = 1.0
 
 __all__ = [
+    "AsyncActivityHandle",
     "Client",
     "WithStartWorkflowOperation",
     "WorkflowContinuedAsNewError",
@@ -196,6 +198,81 @@ class WorkflowUpdateHandle:
         if outcome["status"] == "completed":
             return outcome["result"]
         raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
+
+
+class AsyncActivityHandle:
+    """Handle to an activity completing asynchronously
+    (``activity.raise_complete_async()``), addressed by its task token.
+    Operations deliver checkpointed inbox envelopes to the activity's run.
+    """
+
+    def __init__(self, client: "Client", id_or_token: Any) -> None:
+        if not isinstance(id_or_token, bytes):
+            raise NotImplementedError(
+                "id-reference addressing is not supported yet; use the "
+                "task_token from activity.info().task_token"
+            )
+        self._client = client
+        run_id, _, seq = id_or_token.decode().rpartition("::")
+        self._run_id = run_id
+        self._seq = int(seq)
+
+    async def _send(self, envelope: Dict[str, Any]) -> None:
+        await self._client._dbos_client.send_async(
+            self._run_id, envelope, inbox.INBOX_TOPIC
+        )
+
+    async def complete(
+        self,
+        result: Optional[Any] = _arg_unset,
+        *,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
+        """Complete the activity with a result."""
+        _ignore_rpc_options("async activity complete", rpc_metadata, rpc_timeout)
+        await self._send(
+            inbox.activity_result_envelope(
+                self._seq, result=None if result is _arg_unset else result
+            )
+        )
+
+    async def fail(
+        self,
+        error: Exception,
+        *,
+        last_heartbeat_details: Sequence[Any] = [],
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
+        """Fail the activity. v1: final (Temporal would consult the retry
+        policy and schedule another attempt)."""
+        _ignore_rpc_options("async activity fail", rpc_metadata, rpc_timeout)
+        await self._send(
+            inbox.activity_result_envelope(self._seq, failure=serialize_failure(error))
+        )
+
+    async def heartbeat(
+        self,
+        *details: Any,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
+        """Send a heartbeat for the activity."""
+        _ignore_rpc_options("async activity heartbeat", rpc_metadata, rpc_timeout)
+        await self._send(inbox.activity_heartbeat_envelope(self._seq, list(details)))
+
+    async def report_cancellation(
+        self,
+        *details: Any,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
+        """Report the activity as cancelled."""
+        _ignore_rpc_options(
+            "async activity report_cancellation", rpc_metadata, rpc_timeout
+        )
+        await self._send(inbox.activity_result_envelope(self._seq, cancelled=True))
 
 
 class WithStartWorkflowOperation:
@@ -691,6 +768,24 @@ class Client:
             rpc_timeout=rpc_timeout,
         )
         return await handle.result(rpc_timeout=rpc_timeout)
+
+    def get_async_activity_handle(
+        self,
+        *,
+        workflow_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        activity_id: Optional[str] = None,
+        task_token: Optional[bytes] = None,
+    ) -> AsyncActivityHandle:
+        """Get a handle for completing an activity asynchronously. v1
+        supports task-token addressing only (``activity.info().task_token``).
+        """
+        if task_token is None:
+            raise NotImplementedError(
+                "id-reference addressing (workflow_id/run_id/activity_id) is "
+                "not supported yet; use task_token"
+            )
+        return AsyncActivityHandle(self, task_token)
 
     # ------------------------------------------------------------------
     # Internals
