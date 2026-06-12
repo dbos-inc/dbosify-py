@@ -1266,11 +1266,20 @@ class WorkflowHandle:
         """Request cooperative cancellation (§6.5): the workflow's primary
         coroutine gets CancelledError at its next event boundary; cleanup
         code runs and may still execute activities. The workflow may also
-        swallow the cancel and complete normally.
+        swallow the cancel and complete normally. Raises if the targeted
+        run is already closed (as in Temporal); the status check is
+        client-side, so a tiny race window remains (D7 family).
         """
         _ignore_rpc_options("cancel", rpc_metadata, rpc_timeout)
+        target = await self._target()
+        status = await self._client._status_of(target)
+        mapped = _status.to_execution_status(status.status, error=status.error)
+        if mapped != WorkflowExecutionStatus.RUNNING:
+            raise RuntimeError(
+                f"Workflow run already closed: {target!r} ({mapped.name})"
+            )
         await self._client._dbos_client.send_async(
-            await self._target(), inbox.cancel_envelope(reason), inbox.INBOX_TOPIC
+            target, inbox.cancel_envelope(reason), inbox.INBOX_TOPIC
         )
 
     async def terminate(

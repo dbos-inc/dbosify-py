@@ -113,6 +113,21 @@ class CancelStopsAsyncFnWorkflow:
 
 
 @workflow.defn
+class OrphanAtCloseWorkflow:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        # Start but never await: the workflow closes with the (threaded,
+        # heartbeating) attempt still running.
+        workflow.start_activity(
+            heartbeating_forever,
+            path,
+            start_to_close_timeout=timedelta(seconds=60),
+        )
+        await workflow.sleep(0.3)
+        return "closed"
+
+
+@workflow.defn
 class CancellationWorkflow:
     @workflow.run
     async def run(self, path: str) -> None:
@@ -289,6 +304,7 @@ async def _env() -> AsyncIterator[Client]:
             DuplicateIdWorkflow,
             AsyncCanWorkflow,
             CancelStopsAsyncFnWorkflow,
+            OrphanAtCloseWorkflow,
         ],
         activities=[
             heartbeating_forever,
@@ -689,3 +705,35 @@ async def test_cancel_stops_async_activity_function(tmp_path: Path) -> None:
         await asyncio.sleep(0.8)
         # An orphaned function would still be appending (~16 more lines).
         assert len(effects.read_text().splitlines()) <= lines_at_done + 2
+
+
+async def test_close_unwinds_orphaned_activities(tmp_path: Path) -> None:
+    """A workflow closing with a still-running activity marks it cancelled
+    (its thread unwinds at the next heartbeat instead of spinning forever)
+    and drops its cross-attempt worker state."""
+    effects = tmp_path / "effects"
+    async with _env() as client:
+        handle = await client.start_workflow(
+            OrphanAtCloseWorkflow.run,
+            str(effects),
+            id="orphan-close",
+            task_queue=TASK_QUEUE,
+        )
+        assert await handle.result() == "closed"
+        # The orphaned thread observes the close-time cancel.
+        await _wait_for_file_line(effects, "observed")
+        leaked = [k for k in activity._heartbeat_store if k[0] == "orphan-close"]
+        assert not leaked
+
+
+async def test_cancel_raises_on_closed_run() -> None:
+    """cancel() on an already-closed run raises (Temporal's
+    already-completed semantics) instead of silently sending into a dead
+    inbox."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            OrphanAtCloseWorkflow.run, "unused", id="cancel-closed", task_queue=TASK_QUEUE
+        )
+        await handle.result()
+        with pytest.raises(RuntimeError, match="already closed"):
+            await handle.cancel()

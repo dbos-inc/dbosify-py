@@ -92,7 +92,7 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
                 }
             finally:
                 activity_api._current_context.reset(token)
-                activity_api._unregister_attempt(attempt_key)
+                activity_api._unregister_attempt(attempt_key, ctx)
             return {"ok": True, "result": result, "ended_at": time_mod.time()}
 
         async def run_attempt() -> Dict[str, Any]:

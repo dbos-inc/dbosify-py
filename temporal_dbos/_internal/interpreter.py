@@ -572,6 +572,13 @@ class Interpreter(_Runtime):
                             inbox.async_activity_gone_key(exec_state.activity_id),
                             True,
                         )
+                    # Unwind orphans: a still-running (possibly threaded)
+                    # attempt observes the cancel at its next heartbeat
+                    # instead of spinning forever; then drop its
+                    # cross-attempt worker state.
+                    key = (self._workflow_id, exec_state.seq)
+                    activity_api._request_cancel(key)
+                    activity_api._forget_attempt_state(key)
 
         self._warn_if_unfinished_handlers()
         kind, value = self._outcome

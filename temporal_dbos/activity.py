@@ -133,8 +133,11 @@ def _register_attempt(key: Tuple[str, int], ctx: "_Context") -> None:
         ctx.cancelled.set()
 
 
-def _unregister_attempt(key: Tuple[str, int]) -> None:
-    _live_attempts.pop(key, None)
+def _unregister_attempt(key: Tuple[str, int], ctx: "_Context") -> None:
+    # Identity-guarded: a cancelled attempt whose unwind outlasts the retry
+    # backoff must not pop its successor's registration.
+    if _live_attempts.get(key) is ctx:
+        del _live_attempts[key]
 
 
 def _request_cancel(key: Tuple[str, int]) -> None:
@@ -190,11 +193,15 @@ def heartbeat(*details: Any) -> None:
     ctx = _context()
     ctx.last_heartbeat = details
     ctx.last_heartbeat_at = time_mod.monotonic()
+    if ctx.cancelled.is_set():
+        # Raise BEFORE recording to the cross-attempt store: a cancelled
+        # attempt's final beat must not re-populate state the workflow side
+        # already cleaned up (and its details could never be read anyway —
+        # the activity ends cancelled).
+        raise exceptions.CancelledError("Activity cancelled")
     if ctx.attempt_key is not None:
         _heartbeat_store[ctx.attempt_key] = list(details)
     ctx.on_heartbeat(*details)
-    if ctx.cancelled.is_set():
-        raise exceptions.CancelledError("Activity cancelled")
 
 
 def raise_complete_async() -> NoReturn:

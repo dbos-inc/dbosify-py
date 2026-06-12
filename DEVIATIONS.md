@@ -117,8 +117,10 @@ parallelism needs multiple worker processes.
 ### D10. Signals, cancels, and updates are durable messages, not RPCs
 
 There is no server to validate targets, so the error surface differs:
-operations on *closed* workflows are silent no-ops (the message is never
-consumed) where Temporal raises "already completed"; operations on
+signals and updates to *closed* workflows are silent no-ops / timeouts (the
+message is never consumed) where Temporal raises "already completed" —
+``cancel()`` and ``terminate()`` do pre-check the run's status and raise,
+at the cost of one read on those (rare) paths; operations on
 *nonexistent* workflows surface a database foreign-key error rather than
 NOT_FOUND; there is no `cancel_requested` visibility before delivery. In
 exchange, all external events share one totally-ordered durable inbox —
