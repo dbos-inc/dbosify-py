@@ -55,8 +55,7 @@ SAMPLES = {
     ),
     "update_with_start_lazy_init": Sample(
         package="message_passing.update_with_start.lazy_initialization",
-        xfail="needs client update-with-start "
-        "(execute_update_with_start_workflow; Phase 2 round-out)",
+        expect_output="final order:",
     ),
 }
 

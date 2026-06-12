@@ -132,6 +132,10 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "versioning_override",
     },
     "client.Client.execute_workflow": {"versioning_override"},
+    "client.WithStartWorkflowOperation.__init__": {
+        "stack_level",
+        "versioning_override",
+    },
     # Activity cancellation details: Phase 3.
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
 }

@@ -13,11 +13,13 @@ from dbos import DBOSClient
 from temporal_dbos import activity, workflow
 from temporal_dbos.client import (
     Client,
+    WithStartWorkflowOperation,
     WorkflowExecutionStatus,
     WorkflowFailureError,
     WorkflowUpdateFailedError,
     WorkflowUpdateStage,
 )
+from temporal_dbos.common import WorkflowIDConflictPolicy
 from temporal_dbos.exceptions import (
     ApplicationError,
     WorkflowAlreadyStartedError,
@@ -306,3 +308,41 @@ async def test_start_update_stages() -> None:
         # The run waits on all_handlers_finished before returning.
         await handle.signal(StagedUpdateWorkflow.finish)
         assert await handle.result() == "done"
+
+
+async def test_update_with_start() -> None:
+    """execute_update_with_start_workflow lazily creates the workflow on the
+    first call (USE_EXISTING), attaches on subsequent calls, exposes the
+    workflow handle on the operation, and operations are single-use."""
+
+    def _op() -> WithStartWorkflowOperation:
+        return WithStartWorkflowOperation(
+            AccumulatorWorkflow.run,
+            id="uws-wf",
+            task_queue=TASK_QUEUE,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+        )
+
+    async with _env() as client:
+        first_op = _op()
+        assert (
+            await client.execute_update_with_start_workflow(
+                AccumulatorWorkflow.add, 5, start_workflow_operation=first_op
+            )
+            == 5
+        )
+        # Second call attaches to the existing workflow: state accumulates.
+        assert (
+            await client.execute_update_with_start_workflow(
+                AccumulatorWorkflow.add, 3, start_workflow_operation=_op()
+            )
+            == 8
+        )
+        # The handle is available on the used operation; single-use enforced.
+        handle = await first_op.workflow_handle()
+        with pytest.raises(RuntimeError, match="reuse"):
+            await client.execute_update_with_start_workflow(
+                AccumulatorWorkflow.add, 1, start_workflow_operation=first_op
+            )
+        await handle.signal(AccumulatorWorkflow.finish)
+        assert await handle.result() == 8

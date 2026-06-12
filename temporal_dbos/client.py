@@ -16,7 +16,7 @@ import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import IntEnum
-from typing import Any, List, Mapping, Optional, Sequence, Type, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Type, Union
 
 from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from dbos._error import DBOSAwaitedWorkflowCancelledError
@@ -37,6 +37,7 @@ DEFAULT_CLIENT_POLL_SECONDS = 1.0
 
 __all__ = [
     "Client",
+    "WithStartWorkflowOperation",
     "WorkflowHandle",
     "WorkflowExecution",
     "WorkflowExecutionDescription",
@@ -150,6 +151,80 @@ class WorkflowUpdateHandle:
         if outcome["status"] == "completed":
             return outcome["result"]
         raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
+
+
+class WithStartWorkflowOperation:
+    """Defines the workflow-start half of an update-with-start request
+    (mirroring ``temporalio.client.WithStartWorkflowOperation``): start the
+    workflow per ``id_conflict_policy`` (typically USE_EXISTING — "create
+    the cart if it doesn't exist") and deliver the update to it. The
+    workflow handle is available via :py:meth:`workflow_handle` even if the
+    update itself fails. Single-use.
+    """
+
+    def __init__(
+        self,
+        workflow: Any,
+        arg: Any = _arg_unset,
+        *,
+        args: Sequence[Any] = [],
+        id: str,
+        task_queue: str,
+        id_conflict_policy: WorkflowIDConflictPolicy,
+        result_type: Optional[type] = None,
+        execution_timeout: Optional[timedelta] = None,
+        run_timeout: Optional[timedelta] = None,
+        task_timeout: Optional[timedelta] = None,
+        id_reuse_policy: WorkflowIDReusePolicy = WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+        retry_policy: Optional[RetryPolicy] = None,
+        cron_schedule: str = "",
+        memo: Optional[Mapping[str, Any]] = None,
+        search_attributes: Optional[Any] = None,
+        static_summary: Optional[str] = None,
+        static_details: Optional[str] = None,
+        start_delay: Optional[timedelta] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+        priority: Optional[Any] = None,
+    ) -> None:
+        # Required (no default), matching temporalio; explicit UNSPECIFIED
+        # is also rejected.
+        if id_conflict_policy == WorkflowIDConflictPolicy.UNSPECIFIED:
+            raise ValueError("WithStartWorkflowOperation requires id_conflict_policy")
+        self._start_kwargs: Dict[str, Any] = dict(
+            args=_resolve_args(arg, args),
+            id=id,
+            task_queue=task_queue,
+            id_conflict_policy=id_conflict_policy,
+            result_type=result_type,
+            execution_timeout=execution_timeout,
+            run_timeout=run_timeout,
+            task_timeout=task_timeout,
+            id_reuse_policy=id_reuse_policy,
+            retry_policy=retry_policy,
+            cron_schedule=cron_schedule,
+            memo=memo,
+            search_attributes=search_attributes,
+            static_summary=static_summary,
+            static_details=static_details,
+            start_delay=start_delay,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+            priority=priority,
+        )
+        self._workflow = workflow
+        self._handle: Optional["WorkflowHandle"] = None
+        self._used = False
+
+    async def workflow_handle(self) -> "WorkflowHandle":
+        """The handle for the started (or attached-to) workflow. Available
+        once the operation has been used, even if the update failed."""
+        if self._handle is None:
+            raise RuntimeError(
+                "WithStartWorkflowOperation has not been used in an "
+                "update-with-start call yet"
+            )
+        return self._handle
 
 
 @dataclass(frozen=True)
@@ -479,6 +554,74 @@ class Client:
         return self.get_workflow_handle(
             workflow_id, run_id=run_id, first_execution_run_id=first_execution_run_id
         )
+
+    async def start_update_with_start_workflow(
+        self,
+        update: Any,
+        arg: Any = _arg_unset,
+        *,
+        start_workflow_operation: WithStartWorkflowOperation,
+        wait_for_stage: WorkflowUpdateStage,
+        args: Sequence[Any] = [],
+        id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> WorkflowUpdateHandle:
+        """Start a workflow (per the operation's id_conflict_policy,
+        typically USE_EXISTING) and send it an update, waiting for
+        ``wait_for_stage``. Not atomic: the start commits before the update
+        is sent (DEVIATIONS.md D7 family); the operation's workflow handle
+        is available even if the update fails.
+        """
+        op = start_workflow_operation
+        if op._used:
+            raise RuntimeError("WithStartWorkflowOperation cannot be reused")
+        op._used = True
+        start_args = op._start_kwargs["args"]
+        start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
+        op._handle = await self.start_workflow(
+            op._workflow, args=start_args, **start_kwargs
+        )
+        return await op._handle.start_update(
+            update,
+            arg,
+            wait_for_stage=wait_for_stage,
+            args=args,
+            id=id,
+            result_type=result_type,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+        )
+
+    async def execute_update_with_start_workflow(
+        self,
+        update: Any,
+        arg: Any = _arg_unset,
+        *,
+        start_workflow_operation: WithStartWorkflowOperation,
+        args: Sequence[Any] = [],
+        id: Optional[str] = None,
+        result_type: Optional[type] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> Any:
+        """Start a workflow (if needed) and execute an update on it,
+        returning the update result. See
+        :py:meth:`start_update_with_start_workflow`.
+        """
+        handle = await self.start_update_with_start_workflow(
+            update,
+            arg,
+            start_workflow_operation=start_workflow_operation,
+            wait_for_stage=WorkflowUpdateStage.COMPLETED,
+            args=args,
+            id=id,
+            result_type=result_type,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+        )
+        return await handle.result(rpc_timeout=rpc_timeout)
 
     # ------------------------------------------------------------------
     # Internals

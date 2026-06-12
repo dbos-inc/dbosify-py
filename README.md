@@ -67,7 +67,7 @@ harness).
 | introduction | ✅ (queries, updates + validators, start_update staging, signals, async update handlers running activities) |
 | waiting_for_handlers | ✅ (`all_handlers_finished`) |
 | waiting_for_handlers_and_compensation | ✅ (`workflow.wait`, compensation patterns) |
-| update_with_start/lazy_initialization | ⬜ needs client update-with-start |
+| update_with_start/lazy_initialization | ✅ (`WithStartWorkflowOperation`, `execute_update_with_start_workflow`) |
 | safe_message_handlers | ⬜ Phase 3 (continue-as-new) |
 
 ## Known deviations from Temporal
