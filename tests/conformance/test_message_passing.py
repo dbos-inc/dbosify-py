@@ -51,7 +51,7 @@ SAMPLES = {
     ),
     "waiting_for_handlers_and_compensation": Sample(
         package="message_passing.waiting_for_handlers_and_compensation",
-        xfail="needs workflow.wait (Phase 2 round-out)",
+        expect_output="caller received workflow result",
     ),
     "update_with_start_lazy_init": Sample(
         package="message_passing.update_with_start.lazy_initialization",

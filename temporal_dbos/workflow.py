@@ -23,10 +23,14 @@ from enum import IntEnum
 from random import Random
 from typing import (
     Any,
+    Awaitable,
     Callable,
+    Iterable,
+    Iterator,
     List,
     Optional,
     Sequence,
+    Tuple,
     Type,
     TypeVar,
     Union,
@@ -45,6 +49,7 @@ __all__ = [
     "Info",
     "ParentClosePolicy",
     "all_handlers_finished",
+    "as_completed",
     "cancellation_reason",
     "defn",
     "execute_activity",
@@ -74,6 +79,7 @@ __all__ = [
     "unsafe",
     "update",
     "uuid4",
+    "wait",
     "wait_condition",
 ]
 
@@ -666,6 +672,130 @@ async def execute_activity(
         summary=summary,
         priority=priority,
     )
+
+
+def as_completed(
+    fs: "Iterable[Awaitable[Any]]", *, timeout: Optional[float] = None
+) -> "Iterator[Awaitable[Any]]":
+    """Return an iterator whose values are coroutines.
+
+    This is a deterministic version of :py:func:`asyncio.as_completed` (the
+    stdlib one iterates sets, whose order varies between processes). Adapted
+    from temporalio's, itself adapted from CPython (both MIT).
+    """
+    if asyncio.isfuture(fs) or asyncio.iscoroutine(fs):
+        raise TypeError(f"expect an iterable of futures, not {type(fs).__name__}")
+
+    done: "asyncio.Queue[Optional[asyncio.Future[Any]]]" = asyncio.Queue()
+
+    loop = asyncio.get_event_loop()
+    todo: "List[asyncio.Future[Any]]" = [
+        asyncio.ensure_future(f, loop=loop) for f in list(fs)
+    ]
+    timeout_handle = None
+
+    def _on_timeout() -> None:
+        for f in todo:
+            f.remove_done_callback(_on_completion)
+            done.put_nowait(None)  # Queue a dummy value for _wait_for_one().
+        todo.clear()  # Can't do todo.remove(f) in the loop.
+
+    def _on_completion(f: "asyncio.Future[Any]") -> None:
+        if not todo:
+            return  # _on_timeout() was here first.
+        todo.remove(f)
+        done.put_nowait(f)
+        if not todo and timeout_handle is not None:
+            timeout_handle.cancel()
+
+    async def _wait_for_one() -> Any:
+        f = await done.get()
+        if f is None:
+            # Dummy value from _on_timeout().
+            raise asyncio.TimeoutError
+        return f.result()  # May raise f.exception().
+
+    for f in todo:
+        f.add_done_callback(_on_completion)
+    if todo and timeout is not None:
+        timeout_handle = loop.call_later(timeout, _on_timeout)
+    for _ in range(len(todo)):
+        yield _wait_for_one()
+
+
+async def wait(
+    fs: "Iterable[Any]",
+    *,
+    timeout: Optional[float] = None,
+    return_when: str = asyncio.ALL_COMPLETED,
+) -> "Tuple[Any, Any]":
+    """Wait for the Futures or Tasks given by fs to complete.
+
+    This is a deterministic version of :py:func:`asyncio.wait`: done and
+    pending are *lists in input order*, not sets (whose iteration order
+    varies between processes — replay poison). Adapted from temporalio's,
+    itself adapted from CPython (both MIT).
+    """
+    if asyncio.isfuture(fs) or asyncio.iscoroutine(fs):
+        raise TypeError(f"Expect an iterable of Tasks/Futures, not {type(fs).__name__}")
+    if not fs:
+        raise ValueError("Sequence of Tasks/Futures must not be empty.")
+    if return_when not in (
+        asyncio.FIRST_COMPLETED,
+        asyncio.FIRST_EXCEPTION,
+        asyncio.ALL_COMPLETED,
+    ):
+        raise ValueError(f"Invalid return_when value: {return_when}")
+
+    fs_list = list(fs)
+
+    if any(asyncio.iscoroutine(f) for f in fs_list):
+        raise TypeError("Passing coroutines is forbidden, use tasks explicitly.")
+
+    loop = asyncio.get_running_loop()
+    waiter: "asyncio.Future[None]" = loop.create_future()
+    timeout_handle = None
+    if timeout is not None:
+        timeout_handle = loop.call_later(timeout, _release_waiter, waiter)
+    counter = len(fs_list)
+
+    def _on_completion(f: "asyncio.Future[Any]") -> None:
+        nonlocal counter
+        counter -= 1
+        if (
+            counter <= 0
+            or return_when == asyncio.FIRST_COMPLETED
+            or return_when == asyncio.FIRST_EXCEPTION
+            and (not f.cancelled() and f.exception() is not None)
+        ):
+            if timeout_handle is not None:
+                timeout_handle.cancel()
+            if not waiter.done():
+                waiter.set_result(None)
+
+    for f in fs_list:
+        f.add_done_callback(_on_completion)
+
+    try:
+        await waiter
+    finally:
+        if timeout_handle is not None:
+            timeout_handle.cancel()
+        for f in fs_list:
+            f.remove_done_callback(_on_completion)
+
+    done, pending = [], []
+    for f in fs_list:
+        if f.done():
+            done.append(f)
+        else:
+            pending.append(f)
+    return done, pending
+
+
+def _release_waiter(waiter: "asyncio.Future[Any]", *_args: Any) -> None:
+    if not waiter.done():
+        waiter.set_result(None)
 
 
 def _resolve_workflow_type(workflow: Any) -> str:
