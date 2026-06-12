@@ -41,11 +41,18 @@ def run_dbos_id(workflow_id: str, run_index: int) -> str:
 
 
 def parse_run(dbos_id: str) -> "tuple[str, int]":
-    """Split a DBOS run id into (workflow_id, run_index). Safe because user
-    workflow ids may not contain the separator."""
+    """Split a DBOS run id into (workflow_id, run_index).
+
+    User workflow ids may not contain the separator, but *auto-generated
+    child ids may*: a child of run ``W--r2`` is ``W--r2_5``. The suffix
+    must be pure digits to count as a run index — and ``str.isdigit`` is
+    the load-bearing check, because ``int("2_5")`` happily parses
+    underscore-separated digits as 25.
+    """
     if RUN_SEPARATOR in dbos_id:
         base, _, suffix = dbos_id.rpartition(RUN_SEPARATOR)
-        return base, int(suffix)
+        if suffix.isdigit():
+            return base, int(suffix)
     return dbos_id, 0
 
 

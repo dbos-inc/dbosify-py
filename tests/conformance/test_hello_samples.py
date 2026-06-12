@@ -45,12 +45,15 @@ EXPECTATIONS = {
     ),
     "hello_activity_retry": Expectation(expect_output="Result: Hello, World!"),
     "hello_async_activity_completion": Expectation(
-        xfail="async activity completion is Phase 3", timeout=10
+        # ~3s of client-side heartbeating before external completion.
+        expect_output="Result: Hello, World!",
+        timeout=30,
     ),
     "hello_cancellation": Expectation(
-        xfail="its sync activity observes cancellation via heartbeat "
-        "(Phase 3); until then the activity thread never exits",
-        timeout=10,
+        # Waits 2s before cancelling; the sync activity observes the cancel
+        # at its next heartbeat and the cleanup activity runs in the unwind.
+        expect_output="Got expected exception",
+        timeout=30,
     ),
     "hello_change_log_level": Expectation(
         skip="never exits by design: awaits a workflow whose task fails "

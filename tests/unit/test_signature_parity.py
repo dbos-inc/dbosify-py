@@ -102,7 +102,6 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "scheduled_time",
         "start_to_close_timeout",
         "started_time",
-        "task_token",
         "workflow_namespace",
     },
     "client.WorkflowExecution.__init__": {
@@ -145,6 +144,8 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "stack_level",
         "versioning_override",
     },
+    # Custom data converters arrive with the Phase 3 conversion pipeline.
+    "client.AsyncActivityHandle.__init__": {"data_converter_override"},
     # Activity cancellation details: Phase 3.
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
 }

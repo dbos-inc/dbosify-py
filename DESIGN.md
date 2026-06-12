@@ -518,9 +518,15 @@ Scheme (`_internal/ids.py`):
   (mirroring the cancellation marker; status maps to CONTINUED_AS_NEW).
   `handle.result(follow_runs=True)` follows markers; `follow_runs=False` raises
   `WorkflowContinuedAsNewError`; the child-result step follows chains so parents see the
-  final run's result, and ParentClosePolicy sweeps resolve each child's *current* run (a
-  child that continued as new must be terminated/cancelled at its live run, not its
-  closed first run). Accepted updates abandoned at any terminal outcome get a failure
+  final run's result, and ParentClosePolicy sweeps, in-flight child cancellation, and
+  `ChildWorkflowHandle.signal` all resolve each child's *current* run (a child that
+  continued as new must be reached at its live run, not its closed first run).
+  `terminate()` is chain-aware: a run-bound terminate on a closed run raises instead of
+  clobbering its recorded marker (DBOS cancel overwrites terminal statuses), and an
+  unbound terminate follows continue-as-new hops — successors are identified by their
+  same-chain parent link (a reuse-created successor is a new logical execution and is
+  left alone) — so terminating a CAN-looping entity workflow converges instead of
+  silently missing. Accepted updates abandoned at any terminal outcome get a failure
   reply (`AcceptedUpdateCompletedWorkflow`, as in Temporal) instead of leaving callers to
   time out. Client reply waits (update acceptance/result, query replies) walk
   the chain on a miss: a forwarded update/query is answered under the *new* run's id, not
@@ -742,7 +748,18 @@ mid-update-handler (accepted-but-parked), and the is_replaying probe.
 `hello_continue_as_new` and `safe_message_handlers` — `message_passing/` is 5/5),
 dynamic workflows/handlers + handler descriptions,
 workflow retry policies, id reuse/conflict policies, heartbeats + activity
-cancellation types + async activity completion, `list_workflows` query parser +
+cancellation types + async activity completion (done: heartbeat-delivered
+cancellation incl. sync activities, WAIT_CANCELLATION_COMPLETED,
+heartbeat-timeout enforcement via an in-process watchdog (TimeoutType.HEARTBEAT,
+retried per policy), in-memory heartbeat details across attempts,
+`raise_complete_async` + task-token or workflow_id/activity_id-reference
+completion via inbox envelopes, external fails consulting the retry policy,
+start-to-close and heartbeat timeouts enforced while parked (durable-sleep
+waiters; the heartbeat window counts envelopes between checkpointed timer
+fires, no clock reads), and completers notified of workflow-side cancellation
+via a checkpointed gone-event their heartbeat/complete polls
+(AsyncActivityCancelledError) — flipped `hello_cancellation` and
+`hello_async_activity_completion`, hello 15/19), `list_workflows` query parser +
 `count_workflows`, client + activity interceptors, the data-conversion pipeline (default
 JSON conversion — moved from Phase 1 — plus custom DataConverters + PayloadCodec; until
 it lands, payloads ride DBOS's default pickle serializer, a documented temporary

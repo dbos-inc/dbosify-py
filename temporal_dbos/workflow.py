@@ -408,9 +408,13 @@ def init(init_fn: _F) -> _F:
 
 class ActivityCancellationType(IntEnum):
     """How a workflow cancels an activity, mirroring
-    ``temporalio.workflow.ActivityCancellationType``. Phase 2 honors
-    TRY_CANCEL and ABANDON; WAIT_CANCELLATION_COMPLETED is approximated as
-    TRY_CANCEL until Phase 3's activity-side cancellation observation.
+    ``temporalio.workflow.ActivityCancellationType``. All three are honored:
+    cancellation is delivered into the running attempt (observed at its next
+    ``activity.heartbeat()``), and WAIT_CANCELLATION_COMPLETED resolves an
+    explicit ``handle.cancel()`` only on the activity's confirmation.
+    (During a workflow-cancellation unwind the awaiting coroutine is already
+    cancelled, so WAIT behaves like TRY_CANCEL there — the request is still
+    delivered.)
     """
 
     TRY_CANCEL = 0
@@ -519,6 +523,7 @@ class _Runtime:
         retry_policy: Optional[RetryPolicy],
         activity_id: Optional[str],
         cancellation_type: int = 0,
+        heartbeat_timeout: Optional[timedelta] = None,
     ) -> "ActivityHandle":
         raise NotImplementedError
 
@@ -546,15 +551,18 @@ class _Runtime:
 
 
 class ActivityHandle:
-    """Handle to a started activity: awaitable for its result.
-
-    Cancellation reaches it implicitly (workflow cancel, ``wait_for``
-    timeouts); an explicit ``cancel()`` lands with Phase 3's activity-side
-    observation.
+    """Handle to a started activity: awaitable for its result. Cancellation
+    reaches it implicitly (workflow cancel, ``wait_for`` timeouts) or via
+    :py:meth:`cancel`, honoring the activity's ``cancellation_type``.
     """
 
-    def __init__(self, future: "asyncio.Future[Any]") -> None:
+    def __init__(
+        self,
+        future: "asyncio.Future[Any]",
+        on_cancel: Optional[Callable[[], None]] = None,
+    ) -> None:
         self._future = future
+        self._on_cancel = on_cancel
 
     def __await__(self) -> Any:
         return self._future.__await__()
@@ -564,6 +572,17 @@ class ActivityHandle:
 
     def result(self) -> Any:
         return self._future.result()
+
+    def cancel(self, msg: Optional[Any] = None) -> bool:
+        """Request cancellation of the activity. With
+        WAIT_CANCELLATION_COMPLETED the await resolves only once the
+        activity has observed the request and unwound; the default
+        TRY_CANCEL resolves immediately.
+        """
+        if self._on_cancel is not None:
+            self._on_cancel()
+            return True
+        return self._future.cancel(msg)
 
 
 class ChildWorkflowHandle:
@@ -605,8 +624,13 @@ class ChildWorkflowHandle:
             if isinstance(signal, str)
             else getattr(signal, _registry.SIGNAL_ATTR)
         )
+        # Resolve the chain: the child may have continued as new, and the
+        # signal must reach its *current* run (replay-safe: the send is
+        # checkpointed, so resolution happens once).
         await self._runtime.runtime_send_to_workflow(
-            self._id, _inbox.signal_envelope(str(name), _resolve_args(arg, args))
+            self._id,
+            _inbox.signal_envelope(str(name), _resolve_args(arg, args)),
+            resolve_chain=True,
         )
 
 
@@ -736,9 +760,11 @@ def start_activity(
 ) -> ActivityHandle:
     """Start an activity and return its handle.
 
-    Phase 1 honors arg/args, ``start_to_close_timeout``,
-    ``schedule_to_close_timeout``, ``retry_policy``, and ``activity_id``;
-    the remaining parameters are accepted and ignored (debug-logged).
+    Honors arg/args, ``start_to_close_timeout``, ``schedule_to_close_timeout``,
+    ``heartbeat_timeout`` (a non-heartbeating attempt fails with
+    ``TimeoutType.HEARTBEAT`` and retries), ``retry_policy``,
+    ``cancellation_type``, and ``activity_id``; the remaining parameters are
+    accepted and ignored (debug-logged).
     ``result_type`` is a no-op: payloads round-trip through the DBOS
     serializer, so no type hint is needed to reconstruct them.
     """
@@ -749,7 +775,6 @@ def start_activity(
     ignored = {
         "task_queue": task_queue,
         "schedule_to_start_timeout": schedule_to_start_timeout,
-        "heartbeat_timeout": heartbeat_timeout,
         "versioning_intent": versioning_intent,
         "summary": summary,
         "priority": priority,
@@ -769,6 +794,7 @@ def start_activity(
             if cancellation_type is not None
             else ActivityCancellationType.TRY_CANCEL
         ),
+        heartbeat_timeout=heartbeat_timeout,
     )
 
 

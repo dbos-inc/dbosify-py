@@ -10,6 +10,7 @@ Parameters not yet honored are accepted and ignored with a debug log.
 """
 
 import asyncio
+import json
 import logging
 import os
 import uuid as uuid_mod
@@ -29,6 +30,7 @@ from ._internal.payloads import (
     SerializedContinueAsNew,
     SerializedWorkflowFailure,
     deserialize_failure,
+    serialize_failure,
 )
 from ._internal.status import WorkflowExecutionStatus
 from .common import (
@@ -50,6 +52,8 @@ DEFAULT_CLIENT_POLL_SECONDS = 1.0
 REPLY_SWEEP_INTERVAL_SECONDS = 1.0
 
 __all__ = [
+    "AsyncActivityCancelledError",
+    "AsyncActivityHandle",
     "Client",
     "WithStartWorkflowOperation",
     "WorkflowContinuedAsNewError",
@@ -196,6 +200,132 @@ class WorkflowUpdateHandle:
         if outcome["status"] == "completed":
             return outcome["result"]
         raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
+
+
+class AsyncActivityCancelledError(exceptions.TemporalError):
+    """The async activity was cancelled (or its run closed): further
+    completion attempts are pointless. Raised from the handle's
+    heartbeat/complete/fail once the workflow side marks the activity gone.
+    """
+
+    def __init__(self, details: Optional[Any] = None) -> None:
+        super().__init__("Activity cancelled")
+        self.details = details
+
+
+class AsyncActivityHandle:
+    """Handle to an activity completing asynchronously
+    (``activity.raise_complete_async()``), addressed by its task token or by
+    a (workflow_id, run_id, activity_id) reference. Operations deliver
+    checkpointed inbox envelopes to the activity's run.
+    """
+
+    def __init__(self, client: "Client", id_or_token: Any) -> None:
+        self._client = client
+        self._workflow_id: Optional[str] = None
+        self._run_id: Optional[str] = None
+        if isinstance(id_or_token, bytes):
+            token = json.loads(id_or_token.decode())
+            self._run_id = token["run"]
+            self._activity_id: str = token["aid"]
+        else:
+            workflow_id, run_id, activity_id = id_or_token
+            if not workflow_id or not activity_id:
+                raise ValueError(
+                    "reference addressing requires workflow_id and activity_id"
+                )
+            self._workflow_id = workflow_id
+            self._run_id = run_id
+            self._activity_id = activity_id
+
+    async def _target(self) -> str:
+        if self._run_id is not None:
+            return self._run_id
+        assert self._workflow_id is not None
+        resolved = await self._client._current_run(self._workflow_id)
+        if resolved is None:
+            raise RuntimeError(f"Workflow not found: {self._workflow_id!r}")
+        return resolved[1].workflow_id
+
+    async def _send(self, envelope: Dict[str, Any]) -> None:
+        target = await self._target()
+        await self._send_checked(target, envelope)
+
+    async def _send_checked(self, target: str, envelope: Dict[str, Any]) -> None:
+        # The gone-event is set (checkpointed) when the activity is
+        # cancelled or its run closes while parked: raise instead of
+        # delivering into the void.
+        gone = await self._client._dbos_client.get_event_async(
+            target, inbox.async_activity_gone_key(self._activity_id), 0
+        )
+        if gone:
+            raise AsyncActivityCancelledError()
+        await self._client._dbos_client.send_async(target, envelope, inbox.INBOX_TOPIC)
+
+    async def complete(
+        self,
+        result: Optional[Any] = _arg_unset,
+        *,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
+        """Complete the activity with a result."""
+        _ignore_rpc_options("async activity complete", rpc_metadata, rpc_timeout)
+        await self._send(
+            inbox.activity_result_envelope(
+                self._activity_id, result=None if result is _arg_unset else result
+            )
+        )
+
+    async def fail(
+        self,
+        error: Exception,
+        *,
+        last_heartbeat_details: Sequence[Any] = [],
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
+        """Fail the activity; the activity's retry policy applies (a
+        retryable failure schedules another attempt, re-running the
+        function)."""
+        _ignore_rpc_options("async activity fail", rpc_metadata, rpc_timeout)
+        await self._send(
+            inbox.activity_result_envelope(
+                self._activity_id, failure=serialize_failure(error)
+            )
+        )
+
+    async def heartbeat(
+        self,
+        *details: Any,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
+        """Send a heartbeat for the activity."""
+        _ignore_rpc_options("async activity heartbeat", rpc_metadata, rpc_timeout)
+        await self._send(
+            inbox.activity_heartbeat_envelope(self._activity_id, list(details))
+        )
+
+    async def report_cancellation(
+        self,
+        *details: Any,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> None:
+        """Report the activity as cancelled. Never raises on an
+        already-gone activity: this call IS the acknowledgment in the
+        canonical completer pattern (heartbeat raises
+        AsyncActivityCancelledError -> report_cancellation confirms).
+        """
+        _ignore_rpc_options(
+            "async activity report_cancellation", rpc_metadata, rpc_timeout
+        )
+        await self._client._dbos_client.send_async(
+            await self._target(),
+            inbox.activity_result_envelope(self._activity_id, cancelled=True),
+            inbox.INBOX_TOPIC,
+        )
 
 
 class WithStartWorkflowOperation:
@@ -692,6 +822,22 @@ class Client:
         )
         return await handle.result(rpc_timeout=rpc_timeout)
 
+    def get_async_activity_handle(
+        self,
+        *,
+        workflow_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        activity_id: Optional[str] = None,
+        task_token: Optional[bytes] = None,
+    ) -> AsyncActivityHandle:
+        """Get a handle for completing an activity asynchronously, by task
+        token (``activity.info().task_token``) or by workflow_id +
+        activity_id (run_id optional: the chain's current run is resolved).
+        """
+        if task_token is not None:
+            return AsyncActivityHandle(self, task_token)
+        return AsyncActivityHandle(self, (workflow_id, run_id, activity_id))
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -1120,11 +1266,20 @@ class WorkflowHandle:
         """Request cooperative cancellation (§6.5): the workflow's primary
         coroutine gets CancelledError at its next event boundary; cleanup
         code runs and may still execute activities. The workflow may also
-        swallow the cancel and complete normally.
+        swallow the cancel and complete normally. Raises if the targeted
+        run is already closed (as in Temporal); the status check is
+        client-side, so a tiny race window remains (D7 family).
         """
         _ignore_rpc_options("cancel", rpc_metadata, rpc_timeout)
+        target = await self._target()
+        status = await self._client._status_of(target)
+        mapped = _status.to_execution_status(status.status, error=status.error)
+        if mapped != WorkflowExecutionStatus.RUNNING:
+            raise RuntimeError(
+                f"Workflow run already closed: {target!r} ({mapped.name})"
+            )
         await self._client._dbos_client.send_async(
-            await self._target(), inbox.cancel_envelope(reason), inbox.INBOX_TOPIC
+            target, inbox.cancel_envelope(reason), inbox.INBOX_TOPIC
         )
 
     async def terminate(
@@ -1142,8 +1297,46 @@ class WorkflowHandle:
         if args or reason:
             logger.debug("terminate: reason/details are not stored")
         target = await self._target()
-        await self._client._dbos_client.cancel_workflow_async(target)
-        # Termination runs no workflow code, so the parent's close sweep
-        # never fires: apply the durably-recorded ParentClosePolicy of each
-        # child (and, recursively, of terminated descendants) from here.
-        await self._client._apply_parent_close_policies(target, set())
+        # Terminate must land on a LIVE run. Two hazards (Temporal's server
+        # handles both atomically): a DBOS cancel on a closed run would
+        # CLOBBER its recorded status (eating a continue-as-new marker), so
+        # closed targets raise instead; and a workflow hopping via
+        # continue-as-new mid-request must not escape, so after each cancel
+        # we follow any CAN-created successor (identified by its same-chain
+        # parent link — a reuse-created successor is a new logical
+        # execution and is left alone) and terminate it too.
+        bound = self._run_id is not None
+        cancelled_any = False
+        for _ in range(64):
+            status = await self._client._status_of(target)
+            mapped = _status.to_execution_status(status.status, error=status.error)
+            if mapped == WorkflowExecutionStatus.CONTINUED_AS_NEW and (
+                not bound or cancelled_any
+            ):
+                # Unbound terminates address the workflow: follow the hop.
+                # (A run-bound terminate on a closed run raises below, as in
+                # Temporal.)
+                base, index = ids.parse_run(target)
+                target = ids.run_dbos_id(base, index + 1)
+                continue
+            if mapped != WorkflowExecutionStatus.RUNNING:
+                raise RuntimeError(
+                    f"Workflow run already closed: {target!r} ({mapped.name})"
+                )
+            await self._client._dbos_client.cancel_workflow_async(target)
+            # Termination runs no workflow code, so the close sweep never
+            # fires: apply the durably-recorded ParentClosePolicy of each
+            # child (recursively) from here.
+            await self._client._apply_parent_close_policies(target, set())
+            cancelled_any = True
+            base, index = ids.parse_run(target)
+            next_id = ids.run_dbos_id(base, index + 1)
+            successors = await self._client._dbos_client.list_workflows_async(
+                workflow_ids=[next_id]
+            )
+            if not successors or successors[0].parent_workflow_id != target:
+                return
+            target = next_id
+        raise RuntimeError(
+            "terminate did not converge: the workflow kept continuing-as-new"
+        )

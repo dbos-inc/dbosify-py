@@ -4,7 +4,7 @@ message carryover, and child chains.
 
 import asyncio
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Awaitable, Callable, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, List, Optional
 
 import pytest
 from dbos import DBOSClient
@@ -15,6 +15,7 @@ from temporal_dbos.client import (
     Client,
     WorkflowContinuedAsNewError,
     WorkflowExecutionStatus,
+    WorkflowFailureError,
 )
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
@@ -187,6 +188,76 @@ class TypeSwitchWorkflow:
 
 
 @workflow.defn
+class CanThenChildWorkflow:
+    @workflow.run
+    async def run(self, hopped: bool) -> List[Any]:
+        if not hopped:
+            workflow.continue_as_new(True)
+        # This run is --r1: its auto child id embeds "--r1" (the shape that
+        # would mis-parse without the digit guard), and the child itself
+        # continues as new, extending ITS OWN chain.
+        handle = await workflow.start_child_workflow(
+            LinkProbeWorkflow.run, args=[[], 1]
+        )
+        links = await handle
+        return [links, handle.id]
+
+
+@workflow.defn
+class BadChildIdWorkflow:
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.start_child_workflow(
+            LinkProbeWorkflow.run, args=[[], 0], id="explicit--r1"
+        )
+
+
+@workflow.defn
+class AutoHopChild:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.signal
+    def finish_child(self) -> None:
+        self.done = True
+
+    @workflow.run
+    async def run(self, hopped: bool) -> str:
+        if not hopped:
+            workflow.continue_as_new(True)
+        await workflow.wait_condition(lambda: self.done)
+        return "child-done"
+
+
+@workflow.defn
+class SignalHoppedChildParent:
+    @workflow.run
+    async def run(self) -> str:
+        handle = await workflow.start_child_workflow(AutoHopChild.run, False)
+        await workflow.sleep(0.5)  # let the child hop to --r1
+        await handle.signal(AutoHopChild.finish_child)
+        result: str = await handle
+        return result
+
+
+@workflow.defn
+class AbandonedHoppedChildParent:
+    @workflow.run
+    async def run(self) -> str:
+        handle = await workflow.start_child_workflow(
+            AutoHopChild.run,
+            False,
+            id="abandoned-hop-child",
+            parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+        )
+        # Awaiting the child is what routes the parent's cancellation into
+        # the child future (the in-flight cancellation sweep under test);
+        # ABANDON keeps the close sweep out of the picture.
+        result: str = await handle
+        return result
+
+
+@workflow.defn
 class CanParent:
     @workflow.run
     async def run(self) -> List[str]:
@@ -213,6 +284,11 @@ async def _env() -> AsyncIterator[Client]:
             CancelHopWorkflow,
             HandlerHopWorkflow,
             TypeSwitchWorkflow,
+            CanThenChildWorkflow,
+            BadChildIdWorkflow,
+            AutoHopChild,
+            SignalHoppedChildParent,
+            AbandonedHoppedChildParent,
         ],
         activities=[],
     )
@@ -432,3 +508,113 @@ async def test_continue_as_new_to_different_workflow() -> None:
         assert result == ["switched"]
         hopped = client.get_workflow_handle("type-switch", run_id="type-switch--r1")
         assert (await hopped.describe()).workflow_type == "LoopingWorkflow"
+
+
+async def test_children_of_continued_runs() -> None:
+    """A child of a CAN-created run gets an auto id embedding the parent's
+    chain suffix; it must still be a *standalone* chain base: no false
+    continuation link, a real parent in describe, and its own CAN extends
+    its own chain (not the parent's)."""
+    async with _env() as client:
+        links, child_id = await client.execute_workflow(
+            CanThenChildWorkflow.run, False, id="can-host", task_queue=TASK_QUEUE
+        )
+        assert "--r1_" in child_id  # the colliding shape was exercised
+        # The child CANed once: run 0 has no continuation link, run 1 links
+        # to run 0 of the CHILD's chain (not the host's).
+        assert links == [None, child_id]
+        child_run0 = client.get_workflow_handle(child_id, run_id=child_id)
+        description = await child_run0.describe()
+        assert description.parent_id == "can-host--r1"
+        # The child's chain extended under its own id.
+        hopped = client.get_workflow_handle(child_id)
+        assert (await hopped.describe()).run_id == f"{child_id}--r1"
+
+
+async def test_explicit_child_id_with_separator_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit child ids obey the same `--r` reservation as client-side
+    starts (auto ids are exempt by construction)."""
+    monkeypatch.setenv("TEMPORAL_DBOS_FAIL_FAST", "1")
+    async with _env() as client:
+        handle = await client.start_workflow(
+            BadChildIdWorkflow.run, id="bad-child-id", task_queue=TASK_QUEUE
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await handle.result()
+        assert "--r" in str(exc_info.value.cause)
+
+
+async def test_child_handle_signal_follows_chain() -> None:
+    """Signals through a ChildWorkflowHandle reach the child's *current*
+    run after it continues as new (and the parent's child-result wait
+    follows the chain to the final result)."""
+    async with _env() as client:
+        result = await client.execute_workflow(
+            SignalHoppedChildParent.run, id="sig-hop-parent", task_queue=TASK_QUEUE
+        )
+        assert result == "child-done"
+
+
+async def test_unwind_child_cancel_follows_chain() -> None:
+    """A parent's cancellation unwind delivers the child's cooperative
+    cancel to the child's *current* run, not the run it originally started
+    (ABANDON close policy isolates this path from the close sweep)."""
+    async with _env() as client:
+        parent = await client.start_workflow(
+            AbandonedHoppedChildParent.run, id="unwind-parent", task_queue=TASK_QUEUE
+        )
+
+        async def child_hopped() -> bool:
+            return await _exists(client, "abandoned-hop-child--r1")
+
+        await _wait_for(child_hopped)
+        await parent.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await parent.result()
+
+        async def child_cancelled() -> bool:
+            return (
+                await _status_of(client, "abandoned-hop-child--r1")
+            ) == WorkflowExecutionStatus.CANCELED
+
+        await _wait_for(child_cancelled)
+
+
+async def test_terminate_follows_can_and_never_clobbers() -> None:
+    """terminate() on a run that already continued as new raises instead of
+    clobbering its recorded marker status; an unbound terminate resolves and
+    kills the chain's live run."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            CarryoverWorkflow.run, [], id="term-can", task_queue=TASK_QUEUE
+        )
+        await handle.signal(CarryoverWorkflow.hop_now)
+
+        async def hopped() -> bool:
+            return await _exists(client, "term-can--r1")
+
+        await _wait_for(hopped)
+
+        async def first_run_closed() -> bool:
+            # CAN enqueues the successor BEFORE recording its own marker;
+            # wait until run 0 is actually closed (terminating it in that
+            # window is legal — the convergence loop follows the successor).
+            return (
+                await _status_of(client, "term-can")
+            ) == WorkflowExecutionStatus.CONTINUED_AS_NEW
+
+        await _wait_for(first_run_closed)
+        # Bound terminate on the closed first run: refused, marker intact.
+        first = client.get_workflow_handle("term-can", run_id="term-can")
+        with pytest.raises(RuntimeError, match="already closed"):
+            await first.terminate()
+        assert (await first.describe()).status == (
+            WorkflowExecutionStatus.CONTINUED_AS_NEW
+        )
+        # Unbound terminate resolves the live run and kills it.
+        await handle.terminate()
+        assert (
+            await _status_of(client, "term-can--r1")
+        ) == WorkflowExecutionStatus.TERMINATED
