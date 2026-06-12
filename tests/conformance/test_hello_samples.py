@@ -17,7 +17,12 @@ from tests.conformance.samples import ensure_samples, rewrite_sample
 from tests.dbconfig import system_database_url
 
 RUNNER = Path(__file__).parent / "runner.py"
-SAMPLE_TIMEOUT_SECONDS = 10
+# Generous by default: each sample subprocess pays full DBOS init plus all
+# schema migrations on a fresh database before any workflow runs, which can
+# eat several seconds on a loaded CI runner (observed flake:
+# hello_activity_retry, whose ~5s of retry backoff sat right at a 10s line).
+# Known-hanging xfail samples pin timeout=10 so they don't slow CI down.
+SAMPLE_TIMEOUT_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -35,15 +40,17 @@ EXPECTATIONS = {
     "hello_activity_heartbeat": Expectation(expect_output="Result: Hello, World!"),
     "hello_activity_method": Expectation(expect_output="Database update executed"),
     "hello_activity_multiprocess": Expectation(
-        xfail="multiprocess activity executors (SharedStateManager) unsupported"
+        xfail="multiprocess activity executors (SharedStateManager) unsupported",
+        timeout=10,
     ),
     "hello_activity_retry": Expectation(expect_output="Result: Hello, World!"),
     "hello_async_activity_completion": Expectation(
-        xfail="async activity completion is Phase 3"
+        xfail="async activity completion is Phase 3", timeout=10
     ),
     "hello_cancellation": Expectation(
         xfail="its sync activity observes cancellation via heartbeat "
-        "(Phase 3); until then the activity thread never exits"
+        "(Phase 3); until then the activity thread never exits",
+        timeout=10,
     ),
     "hello_change_log_level": Expectation(
         skip="never exits by design: awaits a workflow whose task fails "
@@ -55,7 +62,7 @@ EXPECTATIONS = {
         expect_output="Running workflow iteration 9",
         timeout=90,
     ),
-    "hello_cron": Expectation(xfail="cron workflows are Phase 3"),
+    "hello_cron": Expectation(xfail="cron workflows are Phase 3", timeout=10),
     "hello_exception": Expectation(),
     "hello_local_activity": Expectation(expect_output="Result: Hello, World!"),
     "hello_mtls": Expectation(skip="requires mTLS certificates and a TLS endpoint"),
@@ -65,10 +72,12 @@ EXPECTATIONS = {
     ),
     "hello_query": Expectation(
         xfail="queries a completed workflow: v1 requires RUNNING (README "
-        "deviation #2; rehydrate-by-replay is Phase 4)"
+        "deviation #2; rehydrate-by-replay is Phase 4)",
+        timeout=10,
     ),
     "hello_search_attributes": Expectation(
-        xfail="search-attribute storage + describe() exposure is Phase 3"
+        xfail="search-attribute storage + describe() exposure is Phase 3",
+        timeout=10,
     ),
     "hello_signal": Expectation(expect_output="Result:"),
     "hello_update": Expectation(expect_output="Workflow Result:"),
