@@ -129,7 +129,6 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "typed_search_attributes",
     },
     "client.WorkflowHandle.__init__": {
-        "result_run_id",
         "result_type",
         "start_workflow_response",
     },

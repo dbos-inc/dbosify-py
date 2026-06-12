@@ -249,7 +249,7 @@ async def test_id_conflict_and_reuse() -> None:
         second = await client.start_workflow(
             AccumulatorWorkflow.run, id="reuse-wf", task_queue=TASK_QUEUE
         )
-        assert second.run_id == "reuse-wf--r1"
+        assert second.result_run_id == "reuse-wf--r1"
         await second.signal(AccumulatorWorkflow.finish)
         assert await second.result() == 0
 

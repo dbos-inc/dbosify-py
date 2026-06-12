@@ -526,7 +526,10 @@ class Client:
         # run-bound handle from get_workflow_handle(run_id=...) pins the
         # run, also matching temporalio).
         return WorkflowHandle(
-            self, id, first_execution_run_id=ids.run_dbos_id(id, 0)
+            self,
+            id,
+            result_run_id=dbos_id,
+            first_execution_run_id=ids.run_dbos_id(id, 0),
         )
 
     async def execute_workflow(
@@ -803,11 +806,13 @@ class WorkflowHandle:
         id: str,
         *,
         run_id: Optional[str] = None,
+        result_run_id: Optional[str] = None,
         first_execution_run_id: Optional[str] = None,
     ) -> None:
         self._client = client
         self._id = id
         self._run_id = run_id
+        self._result_run_id = result_run_id
         self._first_execution_run_id = first_execution_run_id
 
     @property
@@ -817,8 +822,15 @@ class WorkflowHandle:
 
     @property
     def run_id(self) -> Optional[str]:
-        """Run ID this handle is bound to, if any."""
+        """Run ID used for signals/queries/updates if bound (signals on an
+        unbound handle target the chain's current run, as in temporalio)."""
         return self._run_id
+
+    @property
+    def result_run_id(self) -> Optional[str]:
+        """Run ID that :py:meth:`result` anchors on (the run a
+        ``start_workflow`` created), following the chain from there."""
+        return self._result_run_id
 
     @property
     def first_execution_run_id(self) -> Optional[str]:
@@ -841,7 +853,9 @@ class WorkflowHandle:
         not the total wait, so it is accepted and ignored here.)
         """
         _ignore_rpc_options("result", rpc_metadata, rpc_timeout)
-        dbos_id = await self._target()
+        # Anchor on the run this handle's start created when known (so a
+        # later id-reuse can't redirect the wait), else the current run.
+        dbos_id = self._result_run_id or await self._target()
         runtime_client = self._client._dbos_client
         while True:
             handle: Any = await runtime_client.retrieve_workflow_async(dbos_id)
