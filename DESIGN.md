@@ -594,9 +594,11 @@ JSON converter would return plain dicts.
 - `WorkflowEnvironment.start_local()` (done, Phase 2): a uniquely named throwaway
   database per environment on an env-provided Postgres server (never launches one),
   dropped on `shutdown()`. Exposes `dbos_config` (DBOS-native extension) to build the
-  env's Worker from. Note: the env avoids the loop's default executor — DBOS launch
-  replaces it with its own pool and destroy shuts it down (upstream-worthy sharp edge:
-  `asyncio.to_thread` on the same loop breaks after a Worker exits).
+  env's Worker from. Note: DBOS's async APIs install DBOS's pool as the calling loop's
+  default executor and destroy shuts it down without restoring; since DBOS adopts the
+  Worker's loop, the Worker restores a live default executor on exit so the app's
+  `asyncio.to_thread` keeps working (regression-tested; upstream-worthy: DBOS could
+  restore it in destroy).
 - `WorkflowEnvironment.start_time_skipping()`: Phase 4. Approach: a test-mode clock service —
   when all interpreters in the env are parked on timers (no inbox/activity waiters), find
   the earliest deadline and fast-forward by rewriting pending sleep deadlines in the system

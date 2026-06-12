@@ -3,6 +3,7 @@ way a temporal-dbos app is: a Worker built from a DBOSConfig (owning the
 process's DBOS lifecycle), a Client wrapping a DBOSClient.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, AsyncIterator, List, Optional
@@ -346,3 +347,16 @@ async def test_update_with_start() -> None:
             )
         await handle.signal(AccumulatorWorkflow.finish)
         assert await handle.result() == 8
+
+
+async def test_loop_default_executor_survives_worker_exit() -> None:
+    """DBOS's async APIs install DBOS's thread pool as the calling loop's
+    default executor and destroy() shuts that pool down; the Worker restores
+    a live default executor on exit so the application's asyncio.to_thread
+    keeps working after `async with Worker(...)`."""
+    async with _env() as client:
+        # Force executor swaps both in run() and in workflow execution.
+        await client.execute_workflow(
+            GreetingWorkflow.run, "exec", id="executor-wf", task_queue=TASK_QUEUE
+        )
+    assert await asyncio.to_thread(lambda: 42) == 42

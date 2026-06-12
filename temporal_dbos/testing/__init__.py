@@ -8,7 +8,6 @@ dev server to download — Postgres *is* the server). Time-skipping is Phase 4
 """
 
 import asyncio
-import concurrent.futures
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -97,17 +96,6 @@ class ActivityEnvironment:
             _activity._current_context.reset(token)
 
 
-async def _in_thread(fn: Callable[[], _R]) -> _R:
-    """Run blocking work on a private thread — never the loop's default
-    executor, which DBOS replaces at launch and shuts down at destroy (so it
-    may be dead between Workers)."""
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    try:
-        return await asyncio.get_running_loop().run_in_executor(pool, fn)
-    finally:
-        pool.shutdown(wait=False)
-
-
 def _server_url_from_env() -> str:
     """The Postgres to host throwaway environment databases on:
     ``DBOS_SYSTEM_DATABASE_URL`` if set, else ``PG*`` variables with the
@@ -172,7 +160,7 @@ class WorkflowEnvironment:
             finally:
                 engine.dispose()
 
-        await _in_thread(_create)
+        await asyncio.to_thread(_create)
         dbos_client = DBOSClient(system_database_url=env_url)
         env = cls(Client(dbos_client))
         env._dbos_client = dbos_client
@@ -228,7 +216,7 @@ class WorkflowEnvironment:
         """Tear the environment down: destroy its client and drop its
         database (no-op for :py:meth:`from_client` environments)."""
         if self._dbos_client is not None:
-            await _in_thread(self._dbos_client.destroy)
+            await asyncio.to_thread(self._dbos_client.destroy)
             self._dbos_client = None
         if self._database is not None:
             maintenance_url, database = self._maintenance_url, self._database
@@ -249,7 +237,7 @@ class WorkflowEnvironment:
                 finally:
                     engine.dispose()
 
-            await _in_thread(_drop)
+            await asyncio.to_thread(_drop)
 
     async def __aenter__(self) -> "WorkflowEnvironment":
         return self

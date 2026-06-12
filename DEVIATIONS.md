@@ -98,18 +98,6 @@ one workflow-task thread as in Temporal. Could be engineered away
 Sync activities run on threads via `asyncio.to_thread`; CPU-bound activity
 parallelism needs multiple worker processes.
 
-### D9a. Worker shutdown leaves the event loop's default executor dead
-
-DBOS launch replaces the running loop's default executor with its own
-thread pool, and DBOS destroy shuts that pool down. After a Worker exits,
-`asyncio.to_thread` / `run_in_executor(None, ...)` on the *same* event loop
-raises `RuntimeError: cannot schedule new futures after shutdown` — a
-temporalio worker's shutdown does not touch the loop. Affects code that
-runs more event-loop work after `async with Worker(...)` exits (common in
-tests). Workaround: a private `ThreadPoolExecutor` (as
-`temporal_dbos.testing.WorkflowEnvironment` does internally). Upstreamable:
-DBOS could restore the previous default executor on destroy.
-
 ## Request/response semantics
 
 ### D10. Signals, cancels, and updates are durable messages, not RPCs
