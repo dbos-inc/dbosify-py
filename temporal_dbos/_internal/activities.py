@@ -61,6 +61,7 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
 
         defn = registry.lookup_activity(activity_name)
 
+        attempt_started_at = time_mod.time()
         attempt_key = (str(meta.get("workflow_run_id", "")), int(meta.get("seq", -1)))
         heartbeat_timeout = meta.get("heartbeat_timeout")
         # The activity context (activity.info()/heartbeat()) rides a
@@ -133,7 +134,14 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             # raise_complete_async(): the function returned, but the
             # activity stays pending until externally completed (the
             # checkpointed marker makes the parked state replay-stable).
-            return {"async_pending": True, "ended_at": time_mod.time()}
+            # started_at lets the interpreter arm the *remaining*
+            # start-to-close for the parked wait (per-attempt, as in
+            # Temporal).
+            return {
+                "async_pending": True,
+                "started_at": attempt_started_at,
+                "ended_at": time_mod.time(),
+            }
         except (asyncio.TimeoutError, TimeoutError):
             timeout_failure = exceptions.TimeoutError(
                 "activity Start-To-Close timeout",

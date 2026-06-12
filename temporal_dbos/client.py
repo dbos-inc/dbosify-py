@@ -313,12 +313,18 @@ class AsyncActivityHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Report the activity as cancelled."""
+        """Report the activity as cancelled. Never raises on an
+        already-gone activity: this call IS the acknowledgment in the
+        canonical completer pattern (heartbeat raises
+        AsyncActivityCancelledError -> report_cancellation confirms).
+        """
         _ignore_rpc_options(
             "async activity report_cancellation", rpc_metadata, rpc_timeout
         )
-        await self._send(
-            inbox.activity_result_envelope(self._activity_id, cancelled=True)
+        await self._client._dbos_client.send_async(
+            await self._target(),
+            inbox.activity_result_envelope(self._activity_id, cancelled=True),
+            inbox.INBOX_TOPIC,
         )
 
 

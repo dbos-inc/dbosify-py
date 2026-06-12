@@ -174,14 +174,35 @@ class AsyncRetryWorkflow:
 @workflow.defn
 class AsyncTimeoutWorkflow:
     @workflow.run
-    async def run(self, s2c: float, hb: Optional[float]) -> str:
+    async def run(self, s2c: float, hb: Optional[float], max_attempts: int = 1) -> str:
         result: str = await workflow.execute_activity(
             complete_externally,
             start_to_close_timeout=timedelta(seconds=s2c),
             heartbeat_timeout=timedelta(seconds=hb) if hb else None,
-            retry_policy=RetryPolicy(maximum_attempts=1),
+            retry_policy=RetryPolicy(
+                initial_interval=timedelta(milliseconds=50),
+                maximum_attempts=max_attempts,
+            ),
         )
         return result
+
+
+@workflow.defn
+class DuplicateIdWorkflow:
+    @workflow.run
+    async def run(self) -> None:
+        workflow.start_activity(
+            heartbeating_forever,
+            "unused",
+            start_to_close_timeout=timedelta(seconds=60),
+            activity_id="same-id",
+        )
+        workflow.start_activity(
+            heartbeating_forever,
+            "unused",
+            start_to_close_timeout=timedelta(seconds=60),
+            activity_id="same-id",
+        )
 
 
 @workflow.defn
@@ -224,6 +245,7 @@ async def _env() -> AsyncIterator[Client]:
             AsyncRetryWorkflow,
             AsyncTimeoutWorkflow,
             AsyncCustomIdWorkflow,
+            DuplicateIdWorkflow,
         ],
         activities=[
             heartbeating_forever,
@@ -517,6 +539,9 @@ async def test_completer_learns_of_cancellation() -> None:
             await asyncio.sleep(0.1)
         with pytest.raises(AsyncActivityCancelledError):
             await async_handle.complete("too late")
+        # The acknowledgment itself must never raise (canonical pattern:
+        # heartbeat raises -> report_cancellation confirms).
+        await async_handle.report_cancellation()
 
 
 async def test_async_activity_reference_addressing() -> None:
@@ -532,3 +557,41 @@ async def test_async_activity_reference_addressing() -> None:
         )
         await async_handle.complete("by-reference")
         assert await handle.result() == "by-reference"
+
+
+async def test_parked_heartbeat_timeout_retries_then_completes() -> None:
+    """A parked heartbeat timeout consults the retry policy: the function
+    re-runs, parks again, and a live completer finishes the second
+    attempt."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AsyncTimeoutWorkflow.run,
+            args=[30.0, 0.4, 2],
+            id="parked-hb-retry",
+            task_queue=TASK_QUEUE,
+        )
+        await _token()
+        deadline = asyncio.get_running_loop().time() + 15
+        while len(TOKENS) < 2:  # attempt 2's park
+            assert asyncio.get_running_loop().time() < deadline, "no retry"
+            await asyncio.sleep(0.1)
+        await client.get_async_activity_handle(task_token=TOKENS[-1]).complete(
+            "second-attempt"
+        )
+        assert await handle.result() == "second-attempt"
+
+
+async def test_duplicate_open_activity_id_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Duplicate open activity ids are rejected (Temporal's server rejects
+    the command; here, like any rejected command, it fails the workflow
+    task — surfaced via FAIL_FAST for the test)."""
+    monkeypatch.setenv("TEMPORAL_DBOS_FAIL_FAST", "1")
+    async with _env() as client:
+        handle = await client.start_workflow(
+            DuplicateIdWorkflow.run, id="dup-act-id", task_queue=TASK_QUEUE
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await handle.result()
+        assert "already in use" in str(exc_info.value.cause)

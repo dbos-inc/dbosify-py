@@ -814,6 +814,18 @@ class Interpreter(_Runtime):
         self._assert_not_read_only("start an activity")
         activities_mod.attempt_step_for(activity_name)  # raise early if unknown
         seq = self._next_seq("activity")
+        resolved_activity_id = activity_id or f"{seq}"
+        if any(
+            existing.activity_id == resolved_activity_id
+            for existing in self._pending_activities.values()
+        ):
+            # Temporal's server rejects duplicate open activity ids (which
+            # would also cross-wire our id-keyed async completion routing);
+            # like a rejected command, this fails the workflow task.
+            raise ValueError(
+                f"Activity id {resolved_activity_id!r} is already in use by "
+                "an open activity"
+            )
         policy = retry_policy if retry_policy is not None else RetryPolicy()
         policy._validate()
         exec_state = _ActivityExec(
@@ -831,7 +843,7 @@ class Interpreter(_Runtime):
                 if schedule_to_close_timeout
                 else None
             ),
-            activity_id=activity_id or f"{seq}",
+            activity_id=resolved_activity_id,
             scheduled_at=self._vloop.time(),
             future=self._vloop.create_future(),
             cancellation_type=cancellation_type,
@@ -1141,10 +1153,14 @@ class Interpreter(_Runtime):
             # attempt-start) and a re-arming heartbeat-window check.
             exec_state.async_pending = True
             if exec_state.start_to_close is not None:
+                elapsed = float(envelope.get("ended_at", 0.0)) - float(
+                    envelope.get("started_at", envelope.get("ended_at", 0.0))
+                )
+                remaining = max(0.05, exec_state.start_to_close - max(elapsed, 0.0))
                 self._launch_waiter(
                     "act_s2c",
                     exec_state.seq,
-                    DBOS.sleep_async(exec_state.start_to_close),
+                    DBOS.sleep_async(remaining),
                 )
             if exec_state.heartbeat_timeout is not None:
                 exec_state.async_hb_seen = False
