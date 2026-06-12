@@ -73,7 +73,9 @@ the default `executor_id` of "local" makes single-fleet setups recover on
 any restart), or via management action (Conductor, admin recovery). Temporal
 instead reassigns workflow tasks to *any* live poller on the queue within
 seconds via task timeouts. This is the most important operational deviation:
-plan worker supervision accordingly.
+plan worker supervision accordingly. Relatedly, a crash mid-activity
+re-executes that attempt under the *same* attempt number on recovery, where
+Temporal's timeout-driven retry would increment the attempt count.
 
 ### D7. Start policies are enforced client-side, with TOCTOU windows
 
@@ -82,7 +84,11 @@ id-reuse policies (`FAIL`, `REJECT_DUPLICATE`, the duplicate-child-id
 check) are check-then-start from the client or parent worker, leaving small
 race windows under concurrent starts (DESIGN §6.4; narrowable with claim
 rows, not eliminable without a central arbiter). The terminate-vs-child-start
-window is closed by claim-then-start ordering; the others remain.
+window is closed by claim-then-start ordering; the others remain. Compound
+starts are likewise non-atomic: signal-with-start and update-with-start
+commit the start, then send the message — a client crash between the two
+leaves the workflow started without its signal/update, where Temporal's are
+a single atomic request. (Upstreamable: DBOS atomic enqueue-with-message.)
 
 ### D8. Blocking workflow code stalls the whole worker
 
@@ -110,6 +116,15 @@ NOT_FOUND; there is no `cancel_requested` visibility before delivery. In
 exchange, all external events share one totally-ordered durable inbox —
 stronger ordering than Temporal's activation batching.
 
+Two further consequences. Transport-layer error *types* differ: waits that
+exhaust their timeout raise builtin `TimeoutError` (not
+`WorkflowUpdateRPCTimeoutOrCancelledError` / `RPCError(DEADLINE_EXCEEDED)`),
+and resolving a nonexistent workflow raises `RuntimeError` (not
+`RPCError(NOT_FOUND)`) — `except RPCError` clauses won't match. And while
+updates are deduplicated by update id (resends are safe), signals and
+cancels carry no request id: an application-level resend delivers twice,
+where Temporal's server dedups the RPC.
+
 ### D11. Terminate stores no reason or details
 
 DBOS cancellation has no reason field, so `handle.terminate(reason=...)`
@@ -127,6 +142,14 @@ exception is `asyncio.CancelledError` (catch via `is_cancelled_exception`
 for portability; `except temporalio.exceptions.CancelledError` clauses
 won't match).
 
+### D17. Query handlers are synchronous-only
+
+`@workflow.query` rejects `async def` handlers at definition time, where
+temporalio still accepts them with a `DeprecationWarning`. We enforce what
+Temporal deprecates: queries answer inline from drained workflow state and
+must not suspend. Migrating code with async query handlers must drop the
+`async` (such handlers cannot usefully await in temporalio either).
+
 ## Determinism and data
 
 ### D13. No workflow sandbox
@@ -136,11 +159,31 @@ workflow code) surface at recovery/replay as nondeterminism errors instead
 of being caught at development time. A dev-mode double-execution lint is a
 possible future mitigation (DESIGN §8), not a plan of record.
 
+The contract also extends one step further than Temporal's: update
+*validators* re-run on every replay (acceptance is re-derived, where
+Temporal records it in history), so validators must be deterministic
+functions of workflow state and arguments — a nondeterministic validator
+that flips its verdict on replay corrupts the execution.
+
+### D18. Workflow time is assembled from participant clocks
+
+`workflow.now()` starts at the first executor's wall clock (checkpointed)
+and advances monotonically to timer deadlines and to each delivered
+message's sender-clock `sent_at` (also checkpointed, so replay-stable).
+There is no authoritative server clock: a skewed client can step workflow
+time *ahead of* (never behind) the worker's clock. Code comparing workflow
+time against external wall clocks should tolerate participant skew.
+
 ### D14. Payloads live in the system database, uncapped
 
 Workflow/activity payloads are rows in Postgres. Temporal's 2MB/4MB payload
 caps are not enforced; the practical limits are Postgres's. Large payloads
-degrade the checkpoint ledger rather than being rejected.
+degrade the checkpoint ledger rather than being rejected. The same applies
+to history *length*: Temporal warns around 10k events and terminates
+workflows around 50k, pushing long-lived workflows toward continue-as-new;
+our checkpoint ledger grows without limit, and any
+`is_continue_as_new_suggested()` signal (Phase 3) will be a configurable
+threshold, not a server-enforced cap.
 
 ### D15. Visibility is a documented subset
 
