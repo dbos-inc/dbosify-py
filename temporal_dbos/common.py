@@ -11,6 +11,7 @@ from enum import IntEnum
 from typing import Optional, Sequence
 
 __all__ = [
+    "QueryRejectCondition",
     "RetryPolicy",
     "WorkflowIDReusePolicy",
     "WorkflowIDConflictPolicy",
@@ -62,6 +63,15 @@ class RetryPolicy:
                 )
         if self.maximum_attempts < 0:
             raise ValueError("Maximum attempts cannot be negative")
+
+
+class QueryRejectCondition(IntEnum):
+    """When a query should be rejected based on workflow status, mirroring
+    ``temporalio.common.QueryRejectCondition``."""
+
+    NONE = 1
+    NOT_OPEN = 2
+    NOT_COMPLETED_CLEANLY = 3
 
 
 class WorkflowIDReusePolicy(IntEnum):

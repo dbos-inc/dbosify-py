@@ -259,11 +259,12 @@ Virtual-loop details:
   `asyncio.Lock`, `wait_for`, etc. Because their coroutines run on *our* loop, standard
   asyncio primitives are deterministic for free (this is exactly how Temporal's SDK works —
   see `_workflow_instance.py`). Provide `workflow.wait` / `workflow.as_completed` mirrors.
-- **Handler lifecycle.** Implement `workflow.all_handlers_finished()`, the
-  `HandlerUnfinishedPolicy` warn-on-exit behavior, and signal buffering: signals that arrive
-  before the class registers a handler are buffered and delivered on registration
-  (the inbox makes this natural — undeliverable messages go to a pending list keyed by name,
-  re-checked when handlers register; `@workflow.init` passes run args to `__init__` first).
+- **Handler lifecycle (done).** `workflow.all_handlers_finished()`; the
+  `HandlerUnfinishedPolicy` warn-on-exit behavior (in-flight handler records in the
+  interpreter; temporalio-style `Unfinished{Signal,Update}HandlersWarning` with the
+  TMPRL1102 text on terminal outcomes); signal buffering for handlers not (yet)
+  registered — delivery-on-registration becomes meaningful with dynamic handlers
+  (Phase 3); `@workflow.init` passes run args to `__init__` first.
 - **Replay flag (done).** At interpreter start, read the checkpoint horizon (max recorded
   `function_id`, via `list_workflow_steps` on an executor thread — in-context the call is
   itself checkpointed and would replay its own empty first-execution result); the claim
@@ -700,14 +701,17 @@ conformance suite. Achieved: 11/19 runnable hello samples pass (table in README)
 signal-with-start), queries (active), updates + validators + update-with-start,
 `wait_condition`, deterministic helpers (`now/uuid4/random/wait/as_completed`), child
 workflows + external handles, cooperative cancel vs terminate (full §6.5 matrix),
-`workflow.info()`, workflow-task-failure retry behavior, real `is_replaying()` (checkpoint
-horizon) + replay log suppression, `WorkflowEnvironment.start_local`. **Exit:**
+`workflow.info()`, workflow-task-failure retry behavior, handler lifecycle
+(`all_handlers_finished`, signal buffering, `HandlerUnfinishedPolicy` warn-on-exit),
+query reject conditions, real `is_replaying()` (checkpoint horizon) + replay log
+suppression, `WorkflowEnvironment.start_local`. **Exit:**
 `samples-python` `message_passing/`, plus SIGKILL-during-everything chaos tests.
 Achieved: 4/5 `message_passing/` samples pass (the fifth needs Phase 3 continue-as-new,
 xfail-tagged); chaos suite covers SIGKILL mid-cancellation-unwind, mid-child,
 mid-update-handler (accepted-but-parked), and the is_replaying probe.
 
-**Phase 3 — Operational surface.** Schedules + cron + `start_delay`, continue-as-new
+**Phase 3 — Operational surface.** Schedules + cron + `start_delay`, continue-as-new,
+dynamic workflows/handlers + handler descriptions,
 chains + workflow retry policies, id reuse/conflict policies, heartbeats + activity
 cancellation types + async activity completion, `list_workflows` query parser +
 `count_workflows`, client + activity interceptors, the data-conversion pipeline (default

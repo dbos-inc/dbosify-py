@@ -27,7 +27,12 @@ from ._internal import registry as _registry
 from ._internal import status as _status
 from ._internal.payloads import SerializedWorkflowFailure, deserialize_failure
 from ._internal.status import WorkflowExecutionStatus
-from .common import RetryPolicy, WorkflowIDConflictPolicy, WorkflowIDReusePolicy
+from .common import (
+    QueryRejectCondition,
+    RetryPolicy,
+    WorkflowIDConflictPolicy,
+    WorkflowIDReusePolicy,
+)
 from .workflow import _UpdateMethod
 
 # Worst-case latency for client-side get_event when a LISTEN/NOTIFY wakeup is
@@ -38,6 +43,7 @@ DEFAULT_CLIENT_POLL_SECONDS = 1.0
 __all__ = [
     "Client",
     "WithStartWorkflowOperation",
+    "WorkflowQueryRejectedError",
     "WorkflowHandle",
     "WorkflowExecution",
     "WorkflowExecutionDescription",
@@ -62,6 +68,20 @@ class WorkflowFailureError(exceptions.TemporalError):
     def __init__(self, *, cause: BaseException) -> None:
         super().__init__("Workflow execution failed")
         self.__cause__ = cause
+
+
+class WorkflowQueryRejectedError(exceptions.TemporalError):
+    """The query was rejected by its ``reject_condition``: the workflow's
+    status matched the condition before the query was sent."""
+
+    def __init__(self, status: Optional["WorkflowExecutionStatus"]) -> None:
+        super().__init__(f"Query rejected, status: {status}")
+        self._status = status
+
+    @property
+    def status(self) -> Optional["WorkflowExecutionStatus"]:
+        """The workflow execution status that caused the rejection."""
+        return self._status
 
 
 class WorkflowQueryFailedError(exceptions.TemporalError):
@@ -325,8 +345,14 @@ class Client:
     via the async :py:meth:`connect` (kept for temporalio shape).
     """
 
-    def __init__(self, dbos_client: DBOSClient) -> None:
+    def __init__(
+        self,
+        dbos_client: DBOSClient,
+        *,
+        default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
+    ) -> None:
         self._dbos_client = dbos_client
+        self._default_query_reject_condition = default_workflow_query_reject_condition
         # Bound the LISTEN/NOTIFY-miss latency for get_event-based replies
         # (updates/queries). Private until DBOS exposes an option.
         self._dbos_client._sys_db._notification_fallback_polling_interval = float(
@@ -334,9 +360,17 @@ class Client:
         )
 
     @classmethod
-    async def connect(cls, dbos_client: DBOSClient) -> "Client":
+    async def connect(
+        cls,
+        dbos_client: DBOSClient,
+        *,
+        default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
+    ) -> "Client":
         """Create a client from a ``dbos.DBOSClient``."""
-        return cls(dbos_client)
+        return cls(
+            dbos_client,
+            default_workflow_query_reject_condition=default_workflow_query_reject_condition,
+        )
 
     # ------------------------------------------------------------------
     # Workflow start
@@ -781,11 +815,27 @@ class WorkflowHandle:
         *,
         args: Sequence[Any] = [],
         result_type: Optional[type] = None,
+        reject_condition: Optional[QueryRejectCondition] = None,
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> Any:
-        """Query the workflow (v1: requires a RUNNING workflow)."""
+        """Query the workflow (v1: requires a RUNNING workflow). Raises
+        :py:class:`WorkflowQueryRejectedError` if the workflow's status
+        matches ``reject_condition`` (or the client default).
+        """
         _ignore_rpc_options("query", rpc_metadata, None)
+        condition = reject_condition or self._client._default_query_reject_condition
+        if condition is not None and condition != QueryRejectCondition.NONE:
+            # Client-side check (no server arbiter — DEVIATIONS D7 family):
+            # the status read and the query send are not atomic.
+            status = (await self.describe()).status
+            rejected = (
+                status != WorkflowExecutionStatus.RUNNING
+                if condition == QueryRejectCondition.NOT_OPEN
+                else status != WorkflowExecutionStatus.COMPLETED
+            )
+            if rejected:
+                raise WorkflowQueryRejectedError(status)
         request_id = str(uuid_mod.uuid4())
         client = self._client._dbos_client
         target = await self._target()

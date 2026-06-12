@@ -18,6 +18,7 @@ WORKFLOW_DEFN_ATTR = "__temporal_workflow_definition"
 RUN_ATTR = "__temporal_workflow_run"
 WORKFLOW_NAME_ATTR = "__temporal_workflow_name"
 SIGNAL_ATTR = "__temporal_signal_definition"
+SIGNAL_POLICY_ATTR = "__temporal_signal_unfinished_policy"
 QUERY_ATTR = "__temporal_query_definition"
 INIT_ATTR = "__temporal_workflow_init"
 ACTIVITY_DEFN_ATTR = "__temporal_activity_definition"
@@ -27,6 +28,9 @@ ACTIVITY_DEFN_ATTR = "__temporal_activity_definition"
 class SignalDefinition:
     name: str
     fn: Callable[..., Any]
+    # HandlerUnfinishedPolicy value (int to avoid importing workflow here);
+    # 1 = WARN_AND_ABANDON (the temporalio default).
+    unfinished_policy: int = 1
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,7 @@ class UpdateDefinition:
     name: str
     fn: Callable[..., Any]
     validator: Optional[Callable[..., Any]] = None
+    unfinished_policy: int = 1
 
 
 @dataclass(frozen=True)
@@ -172,7 +177,11 @@ def build_workflow_definition(
         if signal_name is not None:
             if signal_name in signals:
                 raise ValueError(f"Multiple signal methods found for {signal_name!r}")
-            signals[signal_name] = SignalDefinition(name=signal_name, fn=member)
+            signals[signal_name] = SignalDefinition(
+                name=signal_name,
+                fn=member,
+                unfinished_policy=int(getattr(member, SIGNAL_POLICY_ATTR, 1)),
+            )
         query_name = getattr(member, QUERY_ATTR, None)
         if query_name is not None:
             if query_name in queries:
@@ -185,7 +194,10 @@ def build_workflow_definition(
             if member.name in updates:
                 raise ValueError(f"Multiple update methods found for {member.name!r}")
             updates[member.name] = UpdateDefinition(
-                name=member.name, fn=member.fn, validator=member.validator_fn
+                name=member.name,
+                fn=member.fn,
+                validator=member.validator_fn,
+                unfinished_policy=int(member.unfinished_policy),
             )
 
     if run_fn is None:

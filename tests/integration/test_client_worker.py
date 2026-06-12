@@ -4,6 +4,7 @@ process's DBOS lifecycle), a Client wrapping a DBOSClient.
 """
 
 import asyncio
+import warnings
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any, AsyncIterator, List, Optional
@@ -17,10 +18,11 @@ from temporal_dbos.client import (
     WithStartWorkflowOperation,
     WorkflowExecutionStatus,
     WorkflowFailureError,
+    WorkflowQueryRejectedError,
     WorkflowUpdateFailedError,
     WorkflowUpdateStage,
 )
-from temporal_dbos.common import WorkflowIDConflictPolicy
+from temporal_dbos.common import QueryRejectCondition, WorkflowIDConflictPolicy
 from temporal_dbos.exceptions import (
     ApplicationError,
     WorkflowAlreadyStartedError,
@@ -137,6 +139,29 @@ class StagedUpdateWorkflow:
         return "done"
 
 
+@workflow.defn
+class UnfinishedHandlersWorkflow:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.update
+    async def stuck_update(self) -> None:
+        await workflow.wait_condition(lambda: False)
+
+    @workflow.signal(unfinished_policy=workflow.HandlerUnfinishedPolicy.ABANDON)
+    async def stuck_signal(self) -> None:
+        await workflow.wait_condition(lambda: False)
+
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.wait_condition(lambda: self.done)
+        return "done"
+
+
 @asynccontextmanager
 async def _env() -> AsyncIterator[Client]:
     """A running Worker plus a Client against the same database. The client
@@ -151,6 +176,7 @@ async def _env() -> AsyncIterator[Client]:
             FailingWorkflow,
             SignalStartWorkflow,
             StagedUpdateWorkflow,
+            UnfinishedHandlersWorkflow,
         ],
         activities=[compose_greeting],
     )
@@ -360,3 +386,67 @@ async def test_loop_default_executor_survives_worker_exit() -> None:
             GreetingWorkflow.run, "exec", id="executor-wf", task_queue=TASK_QUEUE
         )
     assert await asyncio.to_thread(lambda: 42) == 42
+
+
+async def test_unfinished_handler_warnings() -> None:
+    """A workflow that reaches a terminal outcome with handlers mid-flight
+    warns per WARN_AND_ABANDON handler (Temporal's HandlerUnfinishedPolicy);
+    ABANDON handlers are abandoned silently."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            UnfinishedHandlersWorkflow.run, id="unfinished-wf", task_queue=TASK_QUEUE
+        )
+        await handle.start_update(
+            UnfinishedHandlersWorkflow.stuck_update,
+            wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+            id="stuck-upd",
+        )
+        await handle.signal(UnfinishedHandlersWorkflow.stuck_signal)
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            await handle.signal(UnfinishedHandlersWorkflow.finish)
+            assert await handle.result() == "done"
+        kinds = [type(w.message) for w in captured]
+        assert workflow.UnfinishedUpdateHandlersWarning in kinds
+        # The stuck signal handler opted out via ABANDON.
+        assert workflow.UnfinishedSignalHandlersWarning not in kinds
+        message = str(
+            next(
+                w.message
+                for w in captured
+                if isinstance(w.message, workflow.UnfinishedUpdateHandlersWarning)
+            )
+        )
+        assert "stuck_update" in message and "stuck-upd" in message
+
+
+async def test_query_reject_condition() -> None:
+    """reject_condition (per-call or client default) rejects queries by
+    workflow status before sending, raising WorkflowQueryRejectedError."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AccumulatorWorkflow.run, id="qrc-wf", task_queue=TASK_QUEUE
+        )
+        # Open workflow: the condition passes and the query runs.
+        total = await handle.query(
+            AccumulatorWorkflow.total_so_far,
+            reject_condition=QueryRejectCondition.NOT_OPEN,
+        )
+        assert total == 0
+        await handle.signal(AccumulatorWorkflow.finish)
+        await handle.result()
+        with pytest.raises(WorkflowQueryRejectedError) as exc_info:
+            await handle.query(
+                AccumulatorWorkflow.total_so_far,
+                reject_condition=QueryRejectCondition.NOT_OPEN,
+            )
+        assert exc_info.value.status == WorkflowExecutionStatus.COMPLETED
+
+        # The client-level default applies when the call passes nothing.
+        strict_client = await Client.connect(
+            client._dbos_client,
+            default_workflow_query_reject_condition=QueryRejectCondition.NOT_OPEN,
+        )
+        strict_handle = strict_client.get_workflow_handle("qrc-wf")
+        with pytest.raises(WorkflowQueryRejectedError):
+            await strict_handle.query(AccumulatorWorkflow.total_so_far)

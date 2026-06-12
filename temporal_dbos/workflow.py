@@ -61,6 +61,7 @@ __all__ = [
     "execute_local_activity_method",
     "get_external_workflow_handle",
     "get_external_workflow_handle_for",
+    "HandlerUnfinishedPolicy",
     "in_workflow",
     "info",
     "init",
@@ -80,6 +81,8 @@ __all__ = [
     "time",
     "time_ns",
     "unsafe",
+    "UnfinishedSignalHandlersWarning",
+    "UnfinishedUpdateHandlersWarning",
     "update",
     "uuid4",
     "wait",
@@ -155,6 +158,25 @@ _CT = TypeVar("_CT", bound=type)
 _arg_unset = object()
 
 
+class HandlerUnfinishedPolicy(IntEnum):
+    """What to do when a workflow finishes while a signal/update handler is
+    still running, mirroring ``temporalio.workflow.HandlerUnfinishedPolicy``.
+    Either way the handler is abandoned (cancelled with the execution); the
+    policy controls whether that emits a warning.
+    """
+
+    WARN_AND_ABANDON = 1
+    ABANDON = 2
+
+
+class UnfinishedUpdateHandlersWarning(RuntimeWarning):
+    """The workflow exited before all update handlers completed."""
+
+
+class UnfinishedSignalHandlersWarning(RuntimeWarning):
+    """The workflow exited before all signal handlers completed."""
+
+
 # ---------------------------------------------------------------------------
 # Definition decorators
 # ---------------------------------------------------------------------------
@@ -209,16 +231,24 @@ def signal(fn: _F) -> _F: ...
 
 
 @overload
-def signal(*, name: str) -> Callable[[_F], _F]: ...
+def signal(
+    *,
+    name: Optional[str] = None,
+    unfinished_policy: HandlerUnfinishedPolicy = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
+) -> Callable[[_F], _F]: ...
 
 
 def signal(
-    fn: Optional[_F] = None, *, name: Optional[str] = None
+    fn: Optional[_F] = None,
+    *,
+    name: Optional[str] = None,
+    unfinished_policy: HandlerUnfinishedPolicy = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
 ) -> Union[_F, Callable[[_F], _F]]:
     """Decorator for a workflow signal handler method."""
 
     def decorator(fn: _F) -> _F:
         setattr(fn, _registry.SIGNAL_ATTR, name if name is not None else fn.__name__)
+        setattr(fn, _registry.SIGNAL_POLICY_ATTR, int(unfinished_policy))
         return fn
 
     if fn is not None:
@@ -257,9 +287,15 @@ class _UpdateMethod:
     its name, and an optional validator registered via ``@handler.validator``.
     """
 
-    def __init__(self, fn: Callable[..., Any], name: Optional[str]) -> None:
+    def __init__(
+        self,
+        fn: Callable[..., Any],
+        name: Optional[str],
+        unfinished_policy: "HandlerUnfinishedPolicy" = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
+    ) -> None:
         self.fn = fn
         self.name = name if name is not None else fn.__name__
+        self.unfinished_policy = unfinished_policy
         self.validator_fn: Optional[Callable[..., Any]] = None
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -329,18 +365,25 @@ def update(fn: Callable[..., Any]) -> _UpdateMethod: ...
 
 
 @overload
-def update(*, name: str) -> Callable[[Callable[..., Any]], _UpdateMethod]: ...
+def update(
+    *,
+    name: Optional[str] = None,
+    unfinished_policy: HandlerUnfinishedPolicy = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
+) -> Callable[[Callable[..., Any]], _UpdateMethod]: ...
 
 
 def update(
-    fn: Optional[Callable[..., Any]] = None, *, name: Optional[str] = None
+    fn: Optional[Callable[..., Any]] = None,
+    *,
+    name: Optional[str] = None,
+    unfinished_policy: HandlerUnfinishedPolicy = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
 ) -> Union[_UpdateMethod, Callable[[Callable[..., Any]], _UpdateMethod]]:
     """Decorator for a workflow update handler method. Attach a validator
     with ``@my_update.validator``.
     """
 
     def decorator(fn: Callable[..., Any]) -> _UpdateMethod:
-        return _UpdateMethod(fn, name)
+        return _UpdateMethod(fn, name, unfinished_policy)
 
     if fn is not None:
         return decorator(fn)

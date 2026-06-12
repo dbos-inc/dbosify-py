@@ -35,10 +35,12 @@ tests/integration/test_dbos_semantics.py):
 """
 
 import asyncio
+import json
 import logging
 import secrets
 import time as time_mod
-from collections import deque
+import warnings
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from random import Random
@@ -49,7 +51,15 @@ from dbos._context import get_local_dbos_context  # see docs/phase0.md
 
 from .. import exceptions
 from ..common import RetryPolicy
-from ..workflow import ActivityHandle, ChildWorkflowHandle, Info, _Runtime
+from ..workflow import (
+    ActivityHandle,
+    ChildWorkflowHandle,
+    HandlerUnfinishedPolicy,
+    Info,
+    UnfinishedSignalHandlersWarning,
+    UnfinishedUpdateHandlersWarning,
+    _Runtime,
+)
 from . import activities as activities_mod
 from . import ids, inbox
 from .payloads import FailureEnvelope, deserialize_failure
@@ -376,7 +386,9 @@ class Interpreter(_Runtime):
         self._waiters: List[_Waiter] = []
         self._buffered_signals: Dict[str, List[inbox.Envelope]] = {}
         self._seen_update_ids: Set[str] = set()
-        self._handlers_running = 0
+        # Live signal/update handler tasks -> {kind, name, id, policy};
+        # backs all_handlers_finished() and the unfinished-handler warnings.
+        self._inflight_handlers: "Dict[asyncio.Task[Any], Dict[str, Any]]" = {}
         self._read_only = False
         self._cancel_requested = False
         self._cancel_reason: Optional[str] = None
@@ -463,13 +475,7 @@ class Interpreter(_Runtime):
                 )
             self._waiters.clear()
 
-        if self._handlers_running:
-            logger.warning(
-                "Workflow %s finished with %d signal/update handler(s) still "
-                "running; their effects after this point are lost",
-                self._workflow_id,
-                self._handlers_running,
-            )
+        self._warn_if_unfinished_handlers()
         kind, value = self._outcome
         if kind == "ok":
             return value
@@ -1107,7 +1113,12 @@ class Interpreter(_Runtime):
                 envelope["name"],
             )
             return
-        self._spawn_handler(self._run_signal_handler(defn.fn, envelope["args"]))
+        self._spawn_handler(
+            self._run_signal_handler(defn.fn, envelope["args"]),
+            kind="signal",
+            name=defn.name,
+            policy=defn.unfinished_policy,
+        )
 
     async def _run_signal_handler(
         self, fn: Callable[..., Any], args: Sequence[Any]
@@ -1122,16 +1133,65 @@ class Interpreter(_Runtime):
             # workflow; anything else fails the workflow task).
             self._record_workflow_error(err)
 
-    def _spawn_handler(self, coro: Any) -> None:
-        self._handlers_running += 1
+    def _spawn_handler(
+        self,
+        coro: Any,
+        *,
+        kind: str,
+        name: str,
+        policy: int,
+        handler_id: Optional[str] = None,
+    ) -> None:
         task: asyncio.Task[Any] = asyncio.Task(coro, loop=self._vloop)
+        self._inflight_handlers[task] = {
+            "kind": kind,
+            "name": name,
+            "id": handler_id,
+            "policy": policy,
+        }
         self._tasks.add(task)
 
         def _finished(t: "asyncio.Task[Any]") -> None:
-            self._handlers_running -= 1
+            self._inflight_handlers.pop(t, None)
             self._tasks.discard(t)
 
         task.add_done_callback(_finished)
+
+    def _warn_if_unfinished_handlers(self) -> None:
+        """Temporal's HandlerUnfinishedPolicy behavior: a workflow that
+        reaches a terminal outcome while handlers are mid-flight abandons
+        them, and warns for each handler whose policy is WARN_AND_ABANDON.
+        Guard with `await workflow.wait_condition(lambda:
+        workflow.all_handlers_finished())` before returning.
+        """
+        warnable = [
+            record
+            for record in self._inflight_handlers.values()
+            if record["policy"] == HandlerUnfinishedPolicy.WARN_AND_ABANDON
+        ]
+        updates = [r for r in warnable if r["kind"] == "update"]
+        if updates:
+            warnings.warn(
+                UnfinishedUpdateHandlersWarning(
+                    _unfinished_handler_message(
+                        "update",
+                        "the client that sent "
+                        "the update will never receive its result",
+                    )
+                    + json.dumps([{"name": r["name"], "id": r["id"]} for r in updates])
+                )
+            )
+        signals = [r for r in warnable if r["kind"] == "signal"]
+        if signals:
+            counts = Counter(r["name"] for r in signals)
+            warnings.warn(
+                UnfinishedSignalHandlersWarning(
+                    _unfinished_handler_message("signal", "its work was interrupted")
+                    + json.dumps(
+                        [{"name": n, "count": c} for n, c in counts.most_common()]
+                    )
+                )
+            )
 
     def _apply_update(self, envelope: inbox.Envelope) -> None:
         update_id: str = envelope["update_id"]
@@ -1166,7 +1226,11 @@ class Interpreter(_Runtime):
         # ACCEPTED); the handler runs as a tracked vloop task.
         self._reply(acceptance_key, status="accepted")
         self._spawn_handler(
-            self._run_update_handler(defn.fn, envelope["args"], reply_key)
+            self._run_update_handler(defn.fn, envelope["args"], reply_key),
+            kind="update",
+            name=defn.name,
+            policy=defn.unfinished_policy,
+            handler_id=envelope["update_id"],
         )
 
     async def _run_update_handler(
@@ -1309,7 +1373,7 @@ class Interpreter(_Runtime):
         return self._cancel_reason
 
     def runtime_all_handlers_finished(self) -> bool:
-        return self._handlers_running == 0
+        return not self._inflight_handlers
 
     def runtime_is_replaying(self) -> bool:
         ctx = get_local_dbos_context()
@@ -1326,3 +1390,20 @@ class Interpreter(_Runtime):
             await asyncio.wait_for(fut, timeout)
         else:
             await fut
+
+
+def _unfinished_handler_message(kind: str, consequence: str) -> str:
+    """Mirrors temporalio's [TMPRL1102] unfinished-handler warning text,
+    adapted to our delivery model."""
+    return (
+        f"[TMPRL1102] Workflow finished while {kind} handlers are still running. "
+        f"This may have interrupted work that the {kind} handler was doing, and "
+        f"{consequence}. You can wait for all update and signal handlers to "
+        "complete by using `await workflow.wait_condition(lambda: "
+        "workflow.all_handlers_finished())`. Alternatively, if you are okay with "
+        "interrupting running handlers when the workflow finishes, then you can "
+        "disable this warning via the handler decorator: "
+        f"`@workflow.{kind}(unfinished_policy="
+        f"workflow.HandlerUnfinishedPolicy.ABANDON)`. The following {kind}s were "
+        "unfinished (and warnings were not disabled for their handler): "
+    )
