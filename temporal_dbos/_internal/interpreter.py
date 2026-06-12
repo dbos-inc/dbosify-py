@@ -107,6 +107,7 @@ CHILD_POLL_INTERVAL_SECONDS = 0.25
 _init_step: Optional[Callable[[], Any]] = None
 _child_result_step: Optional[Callable[[str], Any]] = None
 _child_exists_step: Optional[Callable[[str], Any]] = None
+_update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
 
 
 def _workflow_init_step() -> Any:
@@ -122,6 +123,31 @@ def _workflow_init_step() -> Any:
 
         _init_step = init_step
     return _init_step()
+
+
+def _validate_update(validate: Callable[[], None]) -> Any:
+    """Checkpoint the update validator's verdict so the validator runs
+    exactly once: replay returns the recorded verdict without re-executing
+    it. This is Temporal's semantics — acceptance is recorded in history and
+    validators are skipped on replay — so a nondeterministic validator
+    cannot flip its verdict and corrupt the execution. The callable argument
+    is never serialized (steps record only their results).
+    """
+    global _update_validate_step
+    if _update_validate_step is None:
+
+        @DBOS.step(name="__tdb_upd_validate")
+        async def update_validate_step(validate: Callable[[], None]) -> Dict[str, Any]:
+            from .payloads import serialize_failure
+
+            try:
+                validate()
+            except BaseException as err:  # noqa: BLE001
+                return {"accepted": False, "failure": serialize_failure(err)}
+            return {"accepted": True}
+
+        _update_validate_step = update_validate_step
+    return _update_validate_step(validate)
 
 
 def _await_child_result(child_id: str) -> Any:
@@ -461,7 +487,7 @@ class Interpreter(_Runtime):
                     [w.task for w in self._waiters],
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                self._deliver(done)
+                await self._deliver(done)
         finally:
             if self._outcome is not None and self._outcome[0] != "task_failure":
                 # Terminal outcome (not a retryable task failure): apply
@@ -893,13 +919,13 @@ class Interpreter(_Runtime):
         if to_seconds is not None and to_seconds > self._vloop.time_seconds:
             self._vloop.time_seconds = to_seconds
 
-    def _deliver(self, done: Set["asyncio.Task[Any]"]) -> None:
+    async def _deliver(self, done: Set["asyncio.Task[Any]"]) -> None:
         for waiter in list(self._waiters):
             if waiter.task not in done:
                 continue
             self._waiters.remove(waiter)
             if waiter.kind == "inbox":
-                self._deliver_inbox(waiter.task.result())
+                await self._deliver_inbox(waiter.task.result())
             elif waiter.kind == "timer":
                 self._deliver_timer(waiter.seq)
             elif waiter.kind == "activity":
@@ -1059,7 +1085,7 @@ class Interpreter(_Runtime):
     # Inbox routing
     # ------------------------------------------------------------------
 
-    def _deliver_inbox(self, message: Any) -> None:
+    async def _deliver_inbox(self, message: Any) -> None:
         if message is None:
             return  # recv timeout (checkpointed; deterministic); re-armed next round
         if not isinstance(message, dict) or "kind" not in message:
@@ -1075,7 +1101,7 @@ class Interpreter(_Runtime):
         if kind == "signal":
             self._apply_signal(envelope)
         elif kind == "update":
-            self._apply_update(envelope)
+            await self._apply_update(envelope)
         elif kind == "query":
             self._apply_query(envelope)
         elif kind == "cancel":
@@ -1193,7 +1219,7 @@ class Interpreter(_Runtime):
                 )
             )
 
-    def _apply_update(self, envelope: inbox.Envelope) -> None:
+    async def _apply_update(self, envelope: inbox.Envelope) -> None:
         update_id: str = envelope["update_id"]
         if update_id in self._seen_update_ids:
             return  # duplicate delivery; the original reply event stands
@@ -1211,17 +1237,30 @@ class Interpreter(_Runtime):
             self._reply(reply_key, status="rejected", failure=failure)
             return
         if defn.validator is not None:
-            # Validators run synchronously, read-only, against current state;
-            # a rejected update must leave no trace in workflow state.
-            self._read_only = True
-            try:
-                defn.validator(self._instance, *envelope["args"])
-            except BaseException as err:  # noqa: BLE001
-                self._reply(acceptance_key, status="rejected", failure=err)
-                self._reply(reply_key, status="rejected", failure=err)
+            validator = defn.validator
+
+            def run_validator() -> None:
+                # Synchronous, read-only, against current state; a rejected
+                # update must leave no trace in workflow state.
+                self._read_only = True
+                try:
+                    validator(self._instance, *envelope["args"])
+                finally:
+                    self._read_only = False
+
+            # The verdict is a checkpoint: the validator runs exactly once,
+            # at first delivery; replay reads the recorded verdict.
+            verdict = await _validate_update(run_validator)
+            if not verdict["accepted"]:
+                self._reply(
+                    acceptance_key,
+                    status="rejected",
+                    failure_envelope=verdict["failure"],
+                )
+                self._reply(
+                    reply_key, status="rejected", failure_envelope=verdict["failure"]
+                )
                 return
-            finally:
-                self._read_only = False
         # Past validation: the update is accepted (WorkflowUpdateStage
         # ACCEPTED); the handler runs as a tracked vloop task.
         self._reply(acceptance_key, status="accepted")
@@ -1278,11 +1317,14 @@ class Interpreter(_Runtime):
         status: str,
         result: Any = None,
         failure: Optional[BaseException] = None,
+        failure_envelope: Optional[Any] = None,
     ) -> None:
         from .payloads import serialize_failure
 
         payload: Dict[str, Any] = {"status": status}
-        if failure is not None:
+        if failure_envelope is not None:
+            payload["failure"] = failure_envelope
+        elif failure is not None:
             payload["failure"] = serialize_failure(failure)
         else:
             payload["result"] = result

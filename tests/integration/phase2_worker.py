@@ -141,6 +141,11 @@ class UpdateChaosWorkflow:
 
     @slow_update.validator
     def _validate_slow_update(self, path: str, n: int) -> None:
+        # Side effects prove run-once: the verdict is checkpointed, so
+        # replay must not re-execute the validator (Temporal semantics).
+        print(f"VALIDATOR_RAN {n}", flush=True)
+        with open(path, "a") as f:
+            f.write(f"v{n}\n")
         if n < 0:
             raise ValueError("no negatives")
 

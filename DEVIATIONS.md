@@ -157,13 +157,9 @@ must not suspend. Migrating code with async query handlers must drop the
 Determinism violations (wall-clock reads, uncontrolled randomness, I/O in
 workflow code) surface at recovery/replay as nondeterminism errors instead
 of being caught at development time. A dev-mode double-execution lint is a
-possible future mitigation (DESIGN §8), not a plan of record.
-
-The contract also extends one step further than Temporal's: update
-*validators* re-run on every replay (acceptance is re-derived, where
-Temporal records it in history), so validators must be deterministic
-functions of workflow state and arguments — a nondeterministic validator
-that flips its verdict on replay corrupts the execution.
+possible future mitigation (DESIGN §8), not a plan of record. (Update
+validators are exempt, as in Temporal: their verdict is checkpointed at
+first delivery and replay reads the record instead of re-running them.)
 
 ### D18. Workflow time is assembled from participant clocks
 

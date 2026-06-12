@@ -222,7 +222,7 @@ loop:
         timer fired      -> resolve that timer future, advance virtual clock to its deadline
         activity done    -> resolve handle future with result/raise wrapped error (§6.3)
         inbox message    -> route: signal -> spawn/queue handler coroutine
-                                   update -> run validator; reject via set_event, or spawn handler
+                                   update -> validate (verdict checkpointed; run-once), reject via set_event, or spawn handler
                                    query  -> answer from current state via set_event (no state change)
                                    cancel -> raise asyncio.CancelledError in main task (§6.5)
     re-evaluate all wait_condition predicates
@@ -419,7 +419,10 @@ the compat table until then.
   event payload → `WorkflowUpdateFailedError`. Update IDs: default `uuid4`; dedup via send
   `idempotency_key=update_id` + interpreter-side seen-set (rebuilt on replay).
   `WorkflowUpdateStage.ACCEPTED` vs `COMPLETED`: acceptance event
-  (`__tdb_upd_{id}_accepted`) set after validator passes. Query reply via a per-request
+  (`__tdb_upd_{id}_accepted`) set after the validator passes; the validator's verdict is
+  itself a checkpointed step (`__tdb_upd_validate`), so validators run exactly once and
+  replay reads the recorded verdict — Temporal's semantics (acceptance lives in history;
+  validators are skipped on replay). Query reply via a per-request
   event key. **DEVIATION:** queries require an *active* (RUNNING) workflow in v1 and write
   to the system DB; Temporal serves queries on closed workflows within retention —
   Phase 4 adds rehydrate-by-replay (re-execute from checkpoints read-only, answer, discard).

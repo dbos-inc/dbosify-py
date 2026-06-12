@@ -88,7 +88,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 7 | Different latency/throughput profile: every effect is a Postgres write. Benchmarks will be published. |
 | 8 | Payloads live in the DBOS system database; Temporal's 2MB/4MB payload caps are not enforced, and history length is ungoverned (no ~50k-event cap pushing toward continue-as-new). |
 | 9 | Signal-with-start / update-with-start are two steps, not one atomic request; transport-ish failures raise builtin `TimeoutError`/`RuntimeError` rather than Temporal's RPC error types; signal/cancel resends are not deduplicated (updates are). |
-| 10 | Workflow time derives from checkpointed participant clocks: monotonic, but client clock skew can step it forward; update validators re-run on replay and must be deterministic. |
+| 10 | Workflow time derives from checkpointed participant clocks: monotonic, but client clock skew can step it forward. |
 | 11 | `@workflow.query` handlers must be synchronous (temporalio deprecates async ones; we reject them). |
 | 12 | (Temporary, until the Phase 3 data-conversion pipeline) Payloads are serialized with pickle, not JSON: exact objects round-trip even without type hints, where temporalio's default converter would return plain dicts. Checkpoints written under pickle will not survive the switch. |
 

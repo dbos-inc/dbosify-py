@@ -142,6 +142,11 @@ async def test_sigkill_with_updates_in_flight(tmp_path: Path) -> None:
     assert history[:3] == ["upd-start:1", "sig:a", "upd-start:2"]
     assert sorted(history[3:5]) == ["upd-end:1", "upd-end:2"]
     assert history[5:] == ["sig:b"]
-    # Each update's activity effect happened exactly once, post-recovery.
-    assert sorted(effects.read_text().splitlines()) == ["u1", "u2"]
+    # Each update's activity effect happened exactly once (post-recovery),
+    # and each validator ran exactly once (pre-kill): the verdict is
+    # checkpointed, so replay must not re-run validators (Temporal records
+    # acceptance in history; we record the verdict as a step).
+    assert sorted(effects.read_text().splitlines()) == ["u1", "u2", "v1", "v2"]
     assert not [l for l in first.transcript if "UPDATE_EFFECT" in l]
+    assert len([l for l in first.transcript if "VALIDATOR_RAN" in l]) == 2
+    assert not [l for l in second.transcript if "VALIDATOR_RAN" in l]

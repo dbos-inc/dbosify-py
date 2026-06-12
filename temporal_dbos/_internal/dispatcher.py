@@ -67,6 +67,7 @@ def _reset_for_tests() -> None:
     interpreter._init_step = None
     interpreter._child_result_step = None
     interpreter._child_exists_step = None
+    interpreter._update_validate_step = None
 
 
 def register_worker(
