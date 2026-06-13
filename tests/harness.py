@@ -88,6 +88,21 @@ class PythonProcess:
         assert self._proc is not None, "process not started"
         self._proc.send_signal(signal.SIGKILL)
 
+    def sigabrt_for_stacks(self, grace_seconds: float = 3.0) -> None:
+        """SIGABRT the process to collect a faulthandler all-threads stack
+        dump in the transcript (requires PYTHONFAULTHANDLER=1 in its env),
+        then give the reader thread a moment to capture it. Diagnostic-only:
+        the process is dead afterwards."""
+        if self._proc is None or self._proc.poll() is not None:
+            return
+        self._proc.send_signal(signal.SIGABRT)
+        try:
+            self._proc.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+        if self._reader is not None:
+            self._reader.join(timeout=grace_seconds)
+
     def wait(self, timeout: float = 30.0) -> int:
         """Wait for exit and return the return code (-9 after a SIGKILL)."""
         assert self._proc is not None, "process not started"

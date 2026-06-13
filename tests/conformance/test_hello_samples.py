@@ -142,12 +142,21 @@ def _params() -> "list[Any]":
 def _verify_hello_cron(deadline_seconds: float, process: PythonProcess) -> None:
     """The cron chain's proof: run 0 of `hello-cron-workflow-id` completed
     (the schedule fired and the workflow ran) and run 1 exists (the chain
-    hop enqueued the next occurrence)."""
+    hop enqueued the next occurrence).
+
+    On failure this reports everything needed to diagnose remotely (the
+    failure mode seen in CI — run 0 parked in PENDING with a clean log —
+    has not reproduced locally): a status-transition timeline, the run's
+    bookkeeping columns, and a faulthandler all-threads stack dump of the
+    sample (SIGABRT; the runner sets PYTHONFAULTHANDLER=1).
+    """
     from dbos import DBOSClient
 
     run_ids = ["hello-cron-workflow-id", "hello-cron-workflow-id--r1"]
-    deadline = time.monotonic() + deadline_seconds
+    start = time.monotonic()
+    deadline = start + deadline_seconds
     statuses: "dict[str, str]" = {}
+    timeline: "list[str]" = []
     client: Optional[DBOSClient] = None
     try:
         while time.monotonic() < deadline:
@@ -157,12 +166,18 @@ def _verify_hello_cron(deadline_seconds: float, process: PythonProcess) -> None:
                     # The sample subprocess creates the database; until
                     # then, construction/queries fail — keep retrying.
                     client = DBOSClient(system_database_url=system_database_url())
-                statuses = {
+                polled = {
                     s.workflow_id: s.status
                     for s in client.list_workflows(workflow_ids=run_ids)
                 }
-            except Exception:
+            except Exception as poll_error:
+                timeline.append(
+                    f"t={time.monotonic() - start:.0f}s poll error: {poll_error!r}"
+                )
                 continue
+            if polled != statuses:
+                statuses = dict(polled)
+                timeline.append(f"t={time.monotonic() - start:.0f}s {statuses!r}")
             if statuses.get(run_ids[0]) == "SUCCESS" and run_ids[1] in statuses:
                 return
         run0 = statuses.get(run_ids[0])
@@ -171,17 +186,31 @@ def _verify_hello_cron(deadline_seconds: float, process: PythonProcess) -> None:
             "DELAYED": "the first fire is still pending (waiting for its "
             "cron boundary — consider a larger budget)",
             "ENQUEUED": "the fire was released but no worker dequeued it",
-            "PENDING": "the run fired and was still executing at the "
-            "deadline (slow runner, or stuck in the workflow-task retry "
-            "loop — check the sample output below)",
+            "PENDING": "the run was claimed for execution and never "
+            "finished — see the thread dump below for where it is stuck",
         }.get(run0, "unexpected terminal state — the run should chain")
-        # The sample's merged stdout/stderr is the difference between "slow"
-        # and "stuck": a workflow-task retry loop logs loudly here.
-        transcript = "".join(process.transcript[-40:]) or "<no output>"
+        bookkeeping = "<unavailable>"
+        if client is not None:
+            try:
+                bookkeeping = " | ".join(
+                    f"{s.workflow_id}: status={s.status} created={s.created_at} "
+                    f"updated={s.updated_at} attempts={s.recovery_attempts} "
+                    f"executor={s.executor_id} appver={s.app_version}"
+                    for s in client.list_workflows(workflow_ids=run_ids)
+                )
+            except Exception as err:
+                bookkeeping = f"<query failed: {err!r}>"
+        # SIGABRT + PYTHONFAULTHANDLER dumps every thread's stack into the
+        # captured output — the difference between "slow" and "stuck", and
+        # where exactly the stuck frame is.
+        process.sigabrt_for_stacks(grace_seconds=3.0)
+        transcript = "".join(process.transcript[-120:]) or "<no output>"
         pytest.fail(
             f"hello_cron: cron did not fire and chain within "
-            f"{deadline_seconds}s: {hint} (saw {statuses!r})\n"
-            f"--- sample output (tail) ---\n{transcript}"
+            f"{deadline_seconds}s: {hint}\n"
+            f"--- status timeline ---\n" + "\n".join(timeline or ["<empty>"]) + "\n"
+            f"--- workflow rows ---\n{bookkeeping}\n"
+            f"--- sample output incl. thread dump (tail) ---\n{transcript}"
         )
     finally:
         if client is not None:
@@ -206,7 +235,12 @@ def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
         process = PythonProcess(
             RUNNER,
             str(rewritten_samples / f"{sample_name}.py"),
-            env={"TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url()},
+            env={
+                "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
+                # Lets the verifier collect an all-threads stack dump from
+                # the live sample (SIGABRT) when verification fails.
+                "PYTHONFAULTHANDLER": "1",
+            },
         )
         process.start()
         try:
