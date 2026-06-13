@@ -1,9 +1,10 @@
 """Continue-as-new (Phase 3): chain hops, result-following, status mapping,
-message carryover, and child chains.
+message carryover, run-timeout carry, and child chains.
 """
 
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Any, AsyncIterator, Awaitable, Callable, List, Optional
 
 import pytest
@@ -267,12 +268,34 @@ class CanParent:
         return result
 
 
+@workflow.defn
+class SlowChainWorkflow:
+    @workflow.run
+    async def run(self, rounds: int) -> str:
+        await workflow.sleep(1.0)
+        if rounds == 0:
+            return "slow-chain-done"
+        workflow.continue_as_new(rounds - 1)
+
+
+@workflow.defn
+class TimeoutOverrideChain:
+    @workflow.run
+    async def run(self, hopped: bool) -> Optional[float]:
+        if not hopped:
+            workflow.continue_as_new(True, run_timeout=timedelta(seconds=30))
+        run_timeout = workflow.info().run_timeout
+        return run_timeout.total_seconds() if run_timeout is not None else None
+
+
 @asynccontextmanager
 async def _env() -> AsyncIterator[Client]:
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,
         workflows=[
+            SlowChainWorkflow,
+            TimeoutOverrideChain,
             LoopingWorkflow,
             CarryoverWorkflow,
             CanParent,
@@ -298,6 +321,40 @@ async def _env() -> AsyncIterator[Client]:
             yield await Client.connect(dbos_client)
         finally:
             dbos_client.destroy()
+
+
+async def test_run_timeout_is_per_run_across_continue_as_new() -> None:
+    """Each CAN run gets a fresh run_timeout: three 1s runs complete under a
+    2s per-run budget even though the chain's total (3s+) exceeds it.
+
+    Regression: without explicit re-application on the hop, DBOS propagates
+    run 0's *absolute* deadline to its successors, so the chain would be
+    natively killed mid-way (TERMINATED). Temporal applies run_timeout per
+    run.
+    """
+    async with _env() as client:
+        result = await client.execute_workflow(
+            SlowChainWorkflow.run,
+            2,
+            id="slow-chain",
+            task_queue=TASK_QUEUE,
+            run_timeout=timedelta(seconds=2),
+        )
+        assert result == "slow-chain-done"
+
+
+async def test_continue_as_new_run_timeout_override() -> None:
+    """continue_as_new(run_timeout=...) overrides the carried per-run
+    timeout for the new run, visible in its workflow.info()."""
+    async with _env() as client:
+        result = await client.execute_workflow(
+            TimeoutOverrideChain.run,
+            False,
+            id="timeout-override",
+            task_queue=TASK_QUEUE,
+            run_timeout=timedelta(seconds=5),
+        )
+        assert result == 30.0
 
 
 async def test_continue_as_new_chain() -> None:

@@ -67,6 +67,66 @@ lets recovery *re-attach* to an already-started child instead of spawning a
 twin) and is strictly more useful operationally. Same caveat: code
 asserting UUID format breaks.
 
+### D19. Cron workflows are run chains with per-run results
+
+`start_workflow(cron_schedule=...)` creates run 0 immediately, delayed to
+the next cron occurrence (the equivalent of Temporal's first-workflow-task
+backoff — the execution exists at once, so describe/signal/result work
+before the first fire); each close enqueues run n+1 at the next occurrence
+after the close time, so a run that overruns an occurrence skips it
+(Temporal semantics). Differences:
+
+- `result()` on a *successful* cron run returns that run's result, where
+  temporalio's `result(follow_runs=True)` on a cron workflow never returns
+  (it follows every continuation). Failed runs *do* follow to their
+  cron/retry successor. Making successes followable would require wrapping
+  every workflow output in a continuation envelope; per-run results are
+  also arguably more useful.
+- Cancellation between runs takes effect at the next fire: the cancel
+  envelope waits in the delayed next run's inbox — there is no server to
+  cancel the waiting run in place. The same applies to a retry attempt
+  waiting out its backoff (up to the policy's ``maximum_interval``), where
+  Temporal cancels the backing-off execution immediately. And a cron run
+  that never parks (no awaits) cannot observe a cooperative cancel
+  mid-run: it completes, and the pending cancel ends the chain at the hop
+  instead — the final run reads COMPLETED (Temporal's equivalent run also
+  completes; its server suppresses the continuation).
+- Cron expressions: 5-field, UTC by default, `CRON_TZ=`/`TZ=` prefixes
+  honored — as in Temporal; 6-field (leading seconds) and 7-field
+  (trailing year) forms are accepted as an extension where Temporal
+  rejects them. The `@every` shorthand is not supported.
+- `start_delay` together with `cron_schedule` raises `ValueError`. Our cron
+  uses the enqueue delay internally to back off run 0 to the first
+  occurrence, so a user `start_delay` cannot ride alongside. temporalio
+  accepts the pair and silently ignores `start_delay` (its docstring notes
+  it "does not work with cron_schedule"); we fail fast rather than swallow a
+  behavior-changing parameter — a deliberate stricter-than-Temporal choice.
+- `run_timeout` exceeded ends the cron (or retry) chain rather than
+  continuing it: a run that blows its per-run timeout is natively cancelled
+  → status TERMINATED, and the retry/cron continuation is not triggered.
+  Temporal surfaces a `TIMED_OUT` failure and, with a retry policy, retries
+  it. This is the run-timeout half of the still-pending `TIMED_OUT`
+  status-marker work (README compatibility note), not a permanent design
+  choice.
+
+### D20. Workflow-retry matching and carryover differ at the edges
+
+The retry decision mirrors Temporal's (`non_retryable` flag, type matching,
+backoff, attempt caps, cancelled/terminated failures never retried, timeout
+failures retried only for start-to-close/heartbeat types), with two edges:
+
+- `non_retryable_error_types` matches the failure ``type`` of application
+  errors — as in Temporal — but *falls back to the envelope failure class*
+  (``ActivityError``, ``ChildWorkflowError``, ...) for wrapper failures,
+  which Temporal treats as always retryable and never matches against the
+  list. A superset: listing those class names works here and does nothing
+  on a real Temporal server. Temporal's ``TemporalTimeout:StartToClose``
+  string convention in the list is not supported.
+- Inbox messages still unconsumed when a run fails (e.g. a signal racing
+  the close) carry over to the retry attempt, mirroring the
+  continue-as-new carryover; Temporal lets signals die with the failed
+  run. More generous, occasionally observable.
+
 ## Process and operations model
 
 ### D6. Failover is restart-or-management-action, not poller reassignment

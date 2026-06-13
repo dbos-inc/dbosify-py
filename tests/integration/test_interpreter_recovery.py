@@ -39,12 +39,6 @@ class Driver:
     def client(self) -> DBOSClient:
         if self._client is None:
             self._client = DBOSClient(system_database_url=system_database_url())
-            # DBOSClient's get_event can miss a LISTEN/NOTIFY wakeup if the
-            # event is set while its listener is still connecting; the
-            # fallback poll then takes 60s by default. Tighten it for tests.
-            # TODO(phase 1): the temporal-dbos Client facade must configure
-            # this properly (or upstream a DBOSClient option).
-            self._client._sys_db._notification_fallback_polling_interval = 0.05
         return self._client
 
     def close(self) -> None:

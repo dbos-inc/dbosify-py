@@ -12,7 +12,6 @@ Parameters not yet honored are accepted and ignored with a debug log.
 import asyncio
 import json
 import logging
-import os
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -25,12 +24,16 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from . import exceptions
 from ._internal import ids, inbox
 from ._internal import registry as _registry
+from ._internal import schedules as _schedules
 from ._internal import status as _status
 from ._internal.payloads import (
+    RunMeta,
     SerializedContinueAsNew,
     SerializedWorkflowFailure,
     deserialize_failure,
     serialize_failure,
+    serialize_retry_policy,
+    wrap_input,
 )
 from ._internal.status import WorkflowExecutionStatus
 from .common import (
@@ -40,11 +43,6 @@ from .common import (
     WorkflowIDReusePolicy,
 )
 from .workflow import _UpdateMethod
-
-# Worst-case latency for client-side get_event when a LISTEN/NOTIFY wakeup is
-# missed (see docs/phase0.md); DBOSClient has no public knob yet.
-CLIENT_POLL_ENV = "TEMPORAL_DBOS_CLIENT_POLL_SECONDS"
-DEFAULT_CLIENT_POLL_SECONDS = 1.0
 
 # How often reply waits (update acceptance/result, query replies) re-check
 # newer runs of the chain: a message still unconsumed when its target run
@@ -508,11 +506,6 @@ class Client:
     ) -> None:
         self._dbos_client = dbos_client
         self._default_query_reject_condition = default_workflow_query_reject_condition
-        # Bound the LISTEN/NOTIFY-miss latency for get_event-based replies
-        # (updates/queries). Private until DBOS exposes an option.
-        self._dbos_client._sys_db._notification_fallback_polling_interval = float(
-            os.environ.get(CLIENT_POLL_ENV, str(DEFAULT_CLIENT_POLL_SECONDS))
-        )
 
     @classmethod
     async def connect(
@@ -563,18 +556,16 @@ class Client:
     ) -> "WorkflowHandle":
         """Start a workflow and return its handle.
 
-        Phase 1 honors arg/args, id, task_queue, run_timeout, the
-        USE_EXISTING/FAIL conflict policies, the ALLOW_DUPLICATE /
-        ALLOW_DUPLICATE_FAILED_ONLY / REJECT_DUPLICATE reuse policies,
-        start_delay, and start_signal. Workflow retry_policy and
-        cron_schedule are Phase 3.
+        Honored: arg/args, id, task_queue, run_timeout, all reuse/conflict
+        policies, start_delay, start_signal, retry_policy (workflows do not
+        retry by default, matching Temporal), and cron_schedule (each run
+        starts at the next cron occurrence after the previous run closes;
+        runs are chained like continue-as-new runs).
         """
         for key, value in {
             "result_type": result_type,
             "execution_timeout": execution_timeout,
             "task_timeout": task_timeout,
-            "retry_policy": retry_policy,
-            "cron_schedule": cron_schedule or None,
             "memo": memo,
             "search_attributes": search_attributes,
             "static_summary": static_summary,
@@ -596,6 +587,41 @@ class Client:
         type_name = _workflow_type_name(workflow)
         workflow_args = _resolve_args(arg, args)
         ids.validate_workflow_id(id)
+        if start_delay is not None and start_delay < timedelta(0):
+            # Matching temporalio's client-side check.
+            raise ValueError("start_delay must be non-negative")
+
+        meta = RunMeta()
+        if retry_policy is not None:
+            retry_policy._validate()
+            meta.retry_policy = serialize_retry_policy(retry_policy)
+        if run_timeout is not None:
+            # Carried so chain successors (retries, cron, continue-as-new)
+            # each get a fresh per-run timeout — without it, DBOS propagates
+            # the closing run's *absolute* deadline to the runs it enqueues.
+            meta.run_timeout = run_timeout.total_seconds()
+        if cron_schedule:
+            # Validated up front so a bad expression fails the start, not
+            # the first chain hop. The first run is created immediately but
+            # fires at the next cron occurrence (Temporal's first-task
+            # backoff), so describe()/signals/result() work right away.
+            _schedules.validate_cron(cron_schedule)
+            if start_delay is not None:
+                # DEVIATION (DEVIATIONS D19): our cron uses the enqueue delay
+                # internally to back off run 0 to the first occurrence, so a
+                # user start_delay can't ride alongside. temporalio accepts
+                # the combination and silently ignores start_delay ("does not
+                # work with cron_schedule"); we fail fast instead of swallowing
+                # a behavior-changing parameter.
+                raise ValueError(
+                    "start_delay cannot be used together with cron_schedule"
+                )
+            meta.cron = cron_schedule
+            start_delay = timedelta(
+                seconds=_schedules.next_fire_delay(
+                    cron_schedule, datetime.now(timezone.utc)
+                )
+            )
 
         current = await self._current_run(id)
         run_index = 0
@@ -642,7 +668,7 @@ class Client:
             options["workflow_timeout"] = run_timeout.total_seconds()
         if start_delay is not None:
             options["delay_seconds"] = start_delay.total_seconds()
-        await self._dbos_client.enqueue_async(options, workflow_args)
+        await self._dbos_client.enqueue_async(options, wrap_input(workflow_args, meta))
 
         if start_signal is not None:
             await self._dbos_client.send_async(
@@ -1021,6 +1047,14 @@ class WorkflowHandle:
                 dbos_id = new_run_id
                 continue
             except SerializedWorkflowFailure as failure:
+                # A failed run with a successor (workflow retry, cron
+                # continuation) is followed like temporalio follows
+                # new_execution_run_id on the failure event; without
+                # follow_runs (or a successor) the failure surfaces.
+                successor = failure.envelope.get("new_run_id")
+                if follow_runs and successor is not None:
+                    dbos_id = successor
+                    continue
                 # NOTE: `raise ... from X` overwrites __cause__, which the
                 # constructor just set — so the `from` target must be the
                 # cause itself.

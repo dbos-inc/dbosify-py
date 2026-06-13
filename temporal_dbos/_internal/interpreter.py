@@ -65,7 +65,13 @@ from ..workflow import (
 )
 from . import activities as activities_mod
 from . import ids, inbox
-from .payloads import FailureEnvelope, deserialize_failure
+from .payloads import (
+    FailureEnvelope,
+    RunMeta,
+    deserialize_failure,
+    deserialize_retry_policy,
+    wrap_input,
+)
 from .registry import WorkflowDefinition
 
 logger = logging.getLogger("temporal_dbos.interpreter")
@@ -428,9 +434,15 @@ class Interpreter(_Runtime):
     ``execute()`` replays deterministically from whatever checkpoints exist.
     """
 
-    def __init__(self, defn: WorkflowDefinition, args: Sequence[Any]) -> None:
+    def __init__(
+        self,
+        defn: WorkflowDefinition,
+        args: Sequence[Any],
+        meta: Optional[RunMeta] = None,
+    ) -> None:
         self._defn = defn
         self._args = list(args)
+        self._meta = meta if meta is not None else RunMeta()
         # AbstractEventLoop stubs mark the loop protocol abstract; we
         # implement the subset workflow coroutines exercise (the same
         # approach temporalio's _WorkflowInstance takes).
@@ -603,9 +615,13 @@ class Interpreter(_Runtime):
         anywhere between here and this run's completion replays into an
         idempotent re-attach, never a twin run.
         """
-        from dbos import SetWorkflowID
+        from contextlib import nullcontext
+        from typing import ContextManager
+
+        from dbos import SetWorkflowID, SetWorkflowTimeout
 
         from . import registry
+        from .payloads import serialize_retry_policy
 
         type_name = can._tdb_workflow or self._defn.name
         dispatch_fn = registry.dbos_workflow_for(type_name)
@@ -621,13 +637,31 @@ class Interpreter(_Runtime):
             if queue_name is not None
             else None
         )
-        with SetWorkflowID(new_run_id):
+        # Run configuration (cron membership, retry policy, run timeout,
+        # last-completion carry) follows the chain across a continue-as-new;
+        # the attempt counter resets (a CAN run is a fresh execution, as in
+        # Temporal). continue_as_new's own run_timeout/retry_policy
+        # arguments override the carried values for the new run.
+        carried = self._meta.carried_forward()
+        if can._tdb_run_timeout is not None:
+            carried.run_timeout = can._tdb_run_timeout.total_seconds()
+        if can._tdb_retry_policy is not None:
+            carried.retry_policy = serialize_retry_policy(can._tdb_retry_policy)
+        payload = wrap_input(list(can._tdb_args), carried)
+        # Explicit per-run timeout, else DBOS propagates THIS run's absolute
+        # deadline to the next run (see dispatcher._enqueue_next_run).
+        timeout_ctx: ContextManager[Any] = (
+            SetWorkflowTimeout(carried.run_timeout)
+            if carried.run_timeout is not None
+            else nullcontext()
+        )
+        with SetWorkflowID(new_run_id), timeout_ctx:
             if queue is not None:
-                await queue.enqueue_async(dispatch_fn, list(can._tdb_args))
+                await queue.enqueue_async(dispatch_fn, payload)
             else:
                 # This run wasn't queue-dispatched (Phase 0 helpers): start
                 # the next run directly in-process.
-                await DBOS.start_workflow_async(dispatch_fn, list(can._tdb_args))
+                await DBOS.start_workflow_async(dispatch_fn, payload)
         return new_run_id
 
     async def _forward_inbox_to(self, new_run_id: str) -> None:
@@ -1750,15 +1784,37 @@ class Interpreter(_Runtime):
 
     def runtime_info(self) -> Info:
         return Info(
-            attempt=1,
+            attempt=self._meta.attempt,
             continued_run_id=self._continued_from,
+            cron_schedule=self._meta.cron,
             namespace="default",
+            retry_policy=(
+                deserialize_retry_policy(self._meta.retry_policy)
+                if self._meta.retry_policy is not None
+                else None
+            ),
             run_id=self._workflow_id,
+            run_timeout=(
+                timedelta(seconds=self._meta.run_timeout)
+                if self._meta.run_timeout is not None
+                else None
+            ),
             start_time=datetime.fromtimestamp(self._start_time),
             task_queue="default",
             workflow_id=self._workflow_id,
             workflow_type=self._defn.name,
         )
+
+    def runtime_has_last_completion_result(self) -> bool:
+        return self._meta.last_completion is not None
+
+    def runtime_last_completion_result(self) -> Any:
+        last = self._meta.last_completion
+        return last["value"] if last is not None else None
+
+    def runtime_last_failure(self) -> Optional[BaseException]:
+        env = self._meta.last_failure
+        return deserialize_failure(env) if env is not None else None
 
     def runtime_now(self) -> float:
         return self._vloop.time()

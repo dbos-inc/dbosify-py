@@ -16,7 +16,7 @@ from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "phase2_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
-ENV = {"PYTHONPATH": str(REPO_ROOT), "TEMPORAL_DBOS_CLIENT_POLL_SECONDS": "0.05"}
+ENV = {"PYTHONPATH": str(REPO_ROOT)}
 
 
 def _result_from(line: str) -> Any:

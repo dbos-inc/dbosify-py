@@ -9,15 +9,133 @@ of exception objects loses ``__cause__`` chains, envelopes don't.
 Arbitrary (non-FailureError) exceptions convert to ``ApplicationError`` with
 ``type`` set to the original class name, mirroring temporalio's default
 failure converter.
+
+The input envelope wraps a run's start arguments with per-run metadata when
+there is any (cron chains, workflow retries); plain starts keep passing the
+bare args list, so all pre-envelope checkpoints stay readable. Meta keys:
+
+  ``cron``            cron expression — this run is part of a cron chain
+  ``attempt``         workflow-retry attempt, 1-based (absent = 1)
+  ``retry_policy``    serialized workflow RetryPolicy (see below)
+  ``run_timeout``     per-run timeout in seconds, re-applied to every chain
+                      successor (DBOS would otherwise propagate the closing
+                      run's *absolute* deadline to in-workflow-started
+                      children — see dispatcher._enqueue_next_run)
+  ``last_completion`` ``{"value": ...}`` from the chain's last successful
+                      run, or None — present-ness distinguishes "no previous
+                      completion" from "the result was None", as in Temporal
+  ``last_failure``    failure envelope of the previous run, or None
 """
 
 import traceback
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .. import exceptions
+from ..common import RetryPolicy
 
 FailureEnvelope = Dict[str, Any]
+
+INPUT_ENVELOPE_KEY = "__tdb_input__"
+
+
+@dataclass
+class RunMeta:
+    """Per-run metadata carried in the input envelope (and forward across
+    chain hops: continue-as-new, cron continuation, workflow retries)."""
+
+    cron: Optional[str] = None
+    attempt: int = 1
+    retry_policy: Optional[Dict[str, Any]] = None
+    run_timeout: Optional[float] = None
+    last_completion: Optional[Dict[str, Any]] = None
+    last_failure: Optional[FailureEnvelope] = None
+
+    def is_empty(self) -> bool:
+        return (
+            self.cron is None
+            and self.attempt == 1
+            and self.retry_policy is None
+            and self.run_timeout is None
+            and self.last_completion is None
+            and self.last_failure is None
+        )
+
+    def carried_forward(self) -> "RunMeta":
+        """The meta a chain successor inherits before outcome-specific
+        fields are filled in: configuration carries, attempt resets."""
+        return RunMeta(
+            cron=self.cron,
+            attempt=1,
+            retry_policy=self.retry_policy,
+            run_timeout=self.run_timeout,
+            last_completion=self.last_completion,
+            last_failure=self.last_failure,
+        )
+
+
+def wrap_input(args: Sequence[Any], meta: Optional[RunMeta] = None) -> Any:
+    """The dispatcher payload for a run: a bare args list when there is no
+    metadata (the original format), else the input envelope."""
+    if meta is None or meta.is_empty():
+        return list(args)
+    return {
+        INPUT_ENVELOPE_KEY: 1,
+        "args": list(args),
+        "meta": {
+            "cron": meta.cron,
+            "attempt": meta.attempt,
+            "retry_policy": meta.retry_policy,
+            "run_timeout": meta.run_timeout,
+            "last_completion": meta.last_completion,
+            "last_failure": meta.last_failure,
+        },
+    }
+
+
+def unwrap_input(payload: Any) -> Tuple[List[Any], RunMeta]:
+    if isinstance(payload, dict) and INPUT_ENVELOPE_KEY in payload:
+        raw = payload.get("meta") or {}
+        return list(payload["args"]), RunMeta(
+            cron=raw.get("cron"),
+            attempt=int(raw.get("attempt", 1)),
+            retry_policy=raw.get("retry_policy"),
+            run_timeout=raw.get("run_timeout"),
+            last_completion=raw.get("last_completion"),
+            last_failure=raw.get("last_failure"),
+        )
+    return list(payload), RunMeta()
+
+
+def serialize_retry_policy(policy: RetryPolicy) -> Dict[str, Any]:
+    return {
+        "initial_interval": policy.initial_interval.total_seconds(),
+        "backoff_coefficient": policy.backoff_coefficient,
+        "maximum_interval": (
+            policy.maximum_interval.total_seconds()
+            if policy.maximum_interval is not None
+            else None
+        ),
+        "maximum_attempts": policy.maximum_attempts,
+        "non_retryable_error_types": (
+            list(policy.non_retryable_error_types)
+            if policy.non_retryable_error_types is not None
+            else None
+        ),
+    }
+
+
+def deserialize_retry_policy(env: Dict[str, Any]) -> RetryPolicy:
+    maximum = env.get("maximum_interval")
+    types = env.get("non_retryable_error_types")
+    return RetryPolicy(
+        initial_interval=timedelta(seconds=env["initial_interval"]),
+        backoff_coefficient=env["backoff_coefficient"],
+        maximum_interval=timedelta(seconds=maximum) if maximum is not None else None,
+        maximum_attempts=env.get("maximum_attempts", 0),
+        non_retryable_error_types=list(types) if types is not None else None,
+    )
 
 
 class FailureView:

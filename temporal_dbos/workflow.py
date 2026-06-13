@@ -64,7 +64,10 @@ __all__ = [
     "execute_local_activity_method",
     "get_external_workflow_handle",
     "get_external_workflow_handle_for",
+    "get_last_completion_result",
+    "get_last_failure",
     "HandlerUnfinishedPolicy",
+    "has_last_completion_result",
     "in_workflow",
     "info",
     "init",
@@ -455,10 +458,14 @@ class Info:
 
     attempt: int
     # The previous run of this chain when this run was created by a
-    # continuation (continue-as-new; later also retries/cron), else None.
+    # continuation (continue-as-new, a workflow retry, or a cron
+    # continuation), else None.
     continued_run_id: Optional[str] = None
+    cron_schedule: Optional[str] = None
     namespace: str = "default"
+    retry_policy: Optional[RetryPolicy] = None
     run_id: str = ""
+    run_timeout: Optional[timedelta] = None
     start_time: datetime = datetime.fromtimestamp(0)
     task_queue: str = ""
     workflow_id: str = ""
@@ -511,6 +518,15 @@ class _Runtime:
         raise NotImplementedError
 
     def runtime_all_handlers_finished(self) -> bool:
+        raise NotImplementedError
+
+    def runtime_has_last_completion_result(self) -> bool:
+        raise NotImplementedError
+
+    def runtime_last_completion_result(self) -> Any:
+        raise NotImplementedError
+
+    def runtime_last_failure(self) -> Optional[BaseException]:
         raise NotImplementedError
 
     def runtime_start_activity(
@@ -675,6 +691,29 @@ def all_handlers_finished() -> bool:
 def cancellation_reason() -> Optional[str]:
     """The reason for the workflow's cancellation request, if any."""
     return _runtime().runtime_cancellation_reason()
+
+
+def has_last_completion_result() -> bool:
+    """Whether a previous run of this (cron) workflow chain completed
+    successfully — distinguishes "no previous completion" from "the previous
+    result was None"."""
+    return _runtime().runtime_has_last_completion_result()
+
+
+def get_last_completion_result(type_hint: Optional[type] = None) -> Any:
+    """The result of the chain's last successful run (carried forward across
+    failed runs, as in Temporal); None if there was no previous completion
+    or the result was None — use :py:func:`has_last_completion_result` to
+    tell them apart. ``type_hint`` is accepted for signature parity; pickle
+    payloads reconstruct exact objects without it (README deviation #12).
+    """
+    return _runtime().runtime_last_completion_result()
+
+
+def get_last_failure() -> Optional[BaseException]:
+    """The failure of this chain's previous run, if it failed — what a
+    workflow-retry attempt (or the cron run after a failure) sees."""
+    return _runtime().runtime_last_failure()
 
 
 def now() -> datetime:
@@ -970,6 +1009,8 @@ class ContinueAsNewError(BaseException):
         self._tdb_args: Sequence[Any] = ()
         self._tdb_workflow: Optional[str] = None
         self._tdb_task_queue: Optional[str] = None
+        self._tdb_run_timeout: Optional[timedelta] = None
+        self._tdb_retry_policy: Optional[RetryPolicy] = None
 
 
 def continue_as_new(
@@ -991,9 +1032,7 @@ def continue_as_new(
     raised :py:class:`ContinueAsNewError` must not be caught.
     """
     for key, value in {
-        "run_timeout": run_timeout,
         "task_timeout": task_timeout,
-        "retry_policy": retry_policy,
         "memo": memo,
         "search_attributes": search_attributes,
         "versioning_intent": versioning_intent,
@@ -1008,6 +1047,11 @@ def continue_as_new(
         _resolve_workflow_type(workflow) if workflow is not None else None
     )
     err._tdb_task_queue = task_queue
+    # Overrides for the new run; absent, the chain's carried values apply.
+    err._tdb_run_timeout = run_timeout
+    if retry_policy is not None:
+        retry_policy._validate()
+    err._tdb_retry_policy = retry_policy
     raise err
 
 
