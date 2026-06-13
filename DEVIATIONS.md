@@ -95,6 +95,19 @@ after the close time, so a run that overruns an occurrence skips it
   honored — as in Temporal; 6-field (leading seconds) and 7-field
   (trailing year) forms are accepted as an extension where Temporal
   rejects them. The `@every` shorthand is not supported.
+- `start_delay` together with `cron_schedule` raises `ValueError`. Our cron
+  uses the enqueue delay internally to back off run 0 to the first
+  occurrence, so a user `start_delay` cannot ride alongside. temporalio
+  accepts the pair and silently ignores `start_delay` (its docstring notes
+  it "does not work with cron_schedule"); we fail fast rather than swallow a
+  behavior-changing parameter — a deliberate stricter-than-Temporal choice.
+- `run_timeout` exceeded ends the cron (or retry) chain rather than
+  continuing it: a run that blows its per-run timeout is natively cancelled
+  → status TERMINATED, and the retry/cron continuation is not triggered.
+  Temporal surfaces a `TIMED_OUT` failure and, with a retry policy, retries
+  it. This is the run-timeout half of the still-pending `TIMED_OUT`
+  status-marker work (README compatibility note), not a permanent design
+  choice.
 
 ### D20. Workflow-retry matching and carryover differ at the edges
 

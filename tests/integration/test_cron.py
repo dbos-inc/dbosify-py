@@ -16,6 +16,7 @@ from dbos import DBOSClient
 
 from temporal_dbos import workflow
 from temporal_dbos.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporal_dbos.common import RetryPolicy
 from temporal_dbos.exceptions import ApplicationError
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
@@ -71,12 +72,37 @@ class ParkingCron:
         return "unreachable"
 
 
+@workflow.defn
+class CronRetryProbe:
+    """Cron + retry_policy together: state is threaded entirely through
+    last_completion_result / last_failure / attempt, so each run is
+    deterministic and self-describing. Attempt 1 of every cron fire fails;
+    attempt 2 succeeds. This exercises retry-within-a-cron-fire (attempt
+    increments, the failed attempt is visible), attempt reset on the next
+    fire, and simultaneous last_completion + last_failure."""
+
+    @workflow.run
+    async def run(self) -> Dict[str, Any]:
+        info = workflow.info()
+        last_completion = workflow.get_last_completion_result()
+        fire = (last_completion["fire"] + 1) if last_completion is not None else 1
+        if info.attempt == 1:
+            raise ApplicationError(f"fire {fire} attempt 1 fails")
+        return {
+            "fire": fire,
+            "attempt": info.attempt,
+            "had_completion": last_completion is not None,
+            "had_failure": workflow.get_last_failure() is not None,
+            "continued_run_id": info.continued_run_id,
+        }
+
+
 @asynccontextmanager
 async def _env() -> AsyncIterator[Client]:
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[CronCounter, FlakyCron, ParkingCron],
+        workflows=[CronCounter, FlakyCron, ParkingCron, CronRetryProbe],
         activities=[],
     )
     async with worker:
@@ -241,6 +267,75 @@ async def test_cron_validation() -> None:
                 cron_schedule=EVERY_SECOND,
                 start_delay=timedelta(seconds=1),
             )
+        # Negative start_delay is rejected (matching temporalio), cron or not.
+        with pytest.raises(ValueError, match="non-negative"):
+            await client.start_workflow(
+                CronCounter.run,
+                id="bad-delay",
+                task_queue=TASK_QUEUE,
+                start_delay=timedelta(seconds=-1),
+            )
         # Nothing was created by the rejected starts.
         assert await client._current_run("bad-cron") is None
         assert await client._current_run("bad-cron-delay") is None
+        assert await client._current_run("bad-delay") is None
+
+
+async def test_cron_with_retry_policy() -> None:
+    """Cron + retry_policy: attempt 1 of every fire fails and retries to
+    attempt 2, which succeeds. Verifies the chain layering — retry hops
+    within a fire (attempt increments, the failed attempt is visible via
+    get_last_failure), attempt reset to 1 at each new fire, and a run seeing
+    last_completion (prior fire's success) and last_failure (this fire's own
+    attempt 1) at the same time."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            CronRetryProbe.run,
+            id="cron-retry",
+            task_queue=TASK_QUEUE,
+            cron_schedule=EVERY_SECOND,
+            retry_policy=RetryPolicy(
+                initial_interval=timedelta(milliseconds=20), maximum_attempts=2
+            ),
+        )
+
+        # Chain layout: r0 fire1/attempt1 (FAILED) -> retry -> r1
+        # fire1/attempt2 (SUCCESS) -> cron -> r2 fire2/attempt1 (FAILED) ->
+        # retry -> r3 fire2/attempt2 (SUCCESS) -> cron -> ...
+        await _wait_for_chain_index(client, "cron-retry", 3, timeout=12.0)
+
+        fire1 = await client.get_workflow_handle(
+            "cron-retry", run_id="cron-retry--r1"
+        ).result(follow_runs=False)
+        # First fire: retried to attempt 2, saw its own attempt-1 failure, no
+        # prior completion yet. continued_run_id points at the failed attempt.
+        assert fire1["fire"] == 1
+        assert fire1["attempt"] == 2
+        assert fire1["had_completion"] is False
+        assert fire1["had_failure"] is True
+        assert fire1["continued_run_id"] == "cron-retry"
+
+        fire2 = await client.get_workflow_handle(
+            "cron-retry", run_id="cron-retry--r3"
+        ).result(follow_runs=False)
+        # Second fire: attempt reset to 1 then retried to 2; sees fire 1's
+        # completion (carried across the cron hop) AND its own attempt-1
+        # failure — the two coexist, as in Temporal.
+        assert fire2["fire"] == 2
+        assert fire2["attempt"] == 2
+        assert fire2["had_completion"] is True
+        assert fire2["had_failure"] is True
+
+        # The failed attempts describe as FAILED; the successful ones COMPLETED.
+        for run_id, status in [
+            ("cron-retry", WorkflowExecutionStatus.FAILED),
+            ("cron-retry--r1", WorkflowExecutionStatus.COMPLETED),
+            ("cron-retry--r2", WorkflowExecutionStatus.FAILED),
+            ("cron-retry--r3", WorkflowExecutionStatus.COMPLETED),
+        ]:
+            description = await client.get_workflow_handle(
+                "cron-retry", run_id=run_id
+            ).describe()
+            assert description.status == status
+
+        await client.get_workflow_handle("cron-retry").terminate()

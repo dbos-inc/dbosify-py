@@ -598,6 +598,9 @@ class Client:
         type_name = _workflow_type_name(workflow)
         workflow_args = _resolve_args(arg, args)
         ids.validate_workflow_id(id)
+        if start_delay is not None and start_delay < timedelta(0):
+            # Matching temporalio's client-side check.
+            raise ValueError("start_delay must be non-negative")
 
         meta = RunMeta()
         if retry_policy is not None:
@@ -615,6 +618,12 @@ class Client:
             # backoff), so describe()/signals/result() work right away.
             _schedules.validate_cron(cron_schedule)
             if start_delay is not None:
+                # DEVIATION (DEVIATIONS D19): our cron uses the enqueue delay
+                # internally to back off run 0 to the first occurrence, so a
+                # user start_delay can't ride alongside. temporalio accepts
+                # the combination and silently ignores start_delay ("does not
+                # work with cron_schedule"); we fail fast instead of swallowing
+                # a behavior-changing parameter.
                 raise ValueError(
                     "start_delay cannot be used together with cron_schedule"
                 )
