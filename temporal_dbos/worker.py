@@ -147,6 +147,11 @@ class Worker:
         finally:
             self._shutdown_event = None
             self._finished = True
+            # TODO(dbos-destroy-deadlock): remove the dedicated-thread dance
+            # below (run destroy() inline) once DBOS.destroy no longer
+            # self-deadlocks when called from its adopted main loop. Not yet
+            # filed upstream — needs a minimal repro first; track here until
+            # there is an issue/PR number to reference.
             # destroy() must not run ON the loop DBOS adopted: when any
             # workflow-timeout task is still pending (every run_timeout
             # workflow parks one until its deadline), destroy submits a
@@ -155,8 +160,7 @@ class Worker:
             # a dedicated thread so the loop stays free to execute the
             # cancellation. A fresh single-use thread, not asyncio.to_thread:
             # the loop's default executor is DBOS's own pool, which destroy
-            # shuts down. (Upstream-worthy: DBOS.destroy could detect it is
-            # being called from its adopted main loop.)
+            # shuts down.
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="tdb-worker-shutdown"
             ) as shutdown_pool:

@@ -26,6 +26,15 @@ INBOX_TOPIC = "__tdb_inbox"
 # interpreter just re-issues the recv.
 RECV_TIMEOUT_SECONDS = 3600.0
 
+# TODO(dbos-pr721): delete this whole stale-listener workaround (the two
+# constants, clear_stale_listener, recv_resilient) once the dbos pin is
+# bumped past the release containing dbos-inc/dbos-transact-py#721, which
+# fixes the recv_async cancellation leak — including the transient window —
+# at the source. Our interpreter teardown awaits the cancelled waiter to
+# completion before any follow-up recv, so the upstream synchronous cleanup
+# fully covers us and the drains revert to plain DBOS.recv_async. Current
+# pin: dbos>=2.23.0 (pre-721).
+#
 # Stale-listener recovery (see recv_resilient): attempts × delay bounds how
 # long we chase an orphaned recv registration before giving up loudly.
 _STALE_LISTENER_RETRIES = 100

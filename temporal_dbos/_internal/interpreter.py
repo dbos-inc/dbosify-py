@@ -524,6 +524,8 @@ class Interpreter(_Runtime):
         ):
             self._continued_from = parent
 
+        # TODO(dbos-pr721): remove this clear once the dbos pin is bumped
+        # past the release containing dbos-inc/dbos-transact-py#721.
         # A previous interpreter attempt in this process (workflow-task
         # retry) cancelled its inbox waiter, which can leak a stale recv
         # listener registration; clear it before this attempt arms its own
@@ -588,6 +590,11 @@ class Interpreter(_Runtime):
                     *(w.task for w in self._waiters), return_exceptions=True
                 )
             self._waiters.clear()
+            # TODO(dbos-pr721): remove this clear once the dbos pin is bumped
+            # past the release containing dbos-inc/dbos-transact-py#721. The
+            # gather above already awaits the cancelled waiter to completion;
+            # under the upstream fix that unwind clears the registration
+            # synchronously, so this becomes a no-op.
             # The cancelled inbox waiter can leak its listener registration
             # (cancellation lands mid-recv_setup; DBOS never unregisters —
             # see inbox.clear_stale_listener). Clear it here, before anything
@@ -695,6 +702,9 @@ class Interpreter(_Runtime):
                 inbox.INBOX_TOPIC,
             )
         while True:
+            # TODO(dbos-pr721): revert to `await DBOS.recv_async(
+            # inbox.INBOX_TOPIC, 0)` once the dbos pin is bumped past the
+            # release containing dbos-inc/dbos-transact-py#721.
             # Resilient: the just-cancelled inbox waiter may have leaked its
             # listener registration (see inbox.clear_stale_listener), which
             # would wedge a plain recv here forever.
