@@ -12,7 +12,6 @@ Parameters not yet honored are accepted and ignored with a debug log.
 import asyncio
 import json
 import logging
-import os
 import uuid as uuid_mod
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -44,11 +43,6 @@ from .common import (
     WorkflowIDReusePolicy,
 )
 from .workflow import _UpdateMethod
-
-# Worst-case latency for client-side get_event when a LISTEN/NOTIFY wakeup is
-# missed (see docs/phase0.md); DBOSClient has no public knob yet.
-CLIENT_POLL_ENV = "TEMPORAL_DBOS_CLIENT_POLL_SECONDS"
-DEFAULT_CLIENT_POLL_SECONDS = 1.0
 
 # How often reply waits (update acceptance/result, query replies) re-check
 # newer runs of the chain: a message still unconsumed when its target run
@@ -512,11 +506,6 @@ class Client:
     ) -> None:
         self._dbos_client = dbos_client
         self._default_query_reject_condition = default_workflow_query_reject_condition
-        # Bound the LISTEN/NOTIFY-miss latency for get_event-based replies
-        # (updates/queries). Private until DBOS exposes an option.
-        self._dbos_client._sys_db._notification_fallback_polling_interval = float(
-            os.environ.get(CLIENT_POLL_ENV, str(DEFAULT_CLIENT_POLL_SECONDS))
-        )
 
     @classmethod
     async def connect(

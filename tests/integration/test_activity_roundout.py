@@ -468,7 +468,6 @@ def test_async_activity_completion_survives_sigkill(tmp_path: Path) -> None:
     worker_script = Path(__file__).parent / "phase3_worker.py"
     env = {
         "PYTHONPATH": str(Path(__file__).parents[2]),
-        "TEMPORAL_DBOS_CLIENT_POLL_SECONDS": "0.05",
     }
     token_file = tmp_path / "token"
     wf_id = "asyncact-wf"
