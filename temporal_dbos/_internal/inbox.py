@@ -16,6 +16,7 @@ time to it on delivery (it rides inside recv's checkpoint, so it is
 replay-stable).
 """
 
+import asyncio
 import time
 from typing import Any, Dict, Sequence
 
@@ -25,7 +26,72 @@ INBOX_TOPIC = "__tdb_inbox"
 # interpreter just re-issues the recv.
 RECV_TIMEOUT_SECONDS = 3600.0
 
+# Stale-listener recovery (see recv_resilient): attempts × delay bounds how
+# long we chase an orphaned recv registration before giving up loudly.
+_STALE_LISTENER_RETRIES = 100
+_STALE_LISTENER_RETRY_DELAY_SECONDS = 0.05
+
 Envelope = Dict[str, Any]
+
+
+def clear_stale_listener(workflow_id: str, topic: str = INBOX_TOPIC) -> None:
+    """Remove an orphaned DBOS recv listener registration for this workflow.
+
+    DBOS's ``recv_async`` registers a listener in ``notifications_map``
+    inside ``recv_setup`` (offloaded to a thread) and unregisters it in a
+    try/finally that only begins *after* the setup await returns. Cancelling
+    the recv task while setup is in flight — which the interpreter does to
+    its parked inbox waiter at every run close — abandons the coroutine
+    while the thread completes the registration, which is then never
+    cleaned up. The next recv on the same workflow+topic finds the stale
+    entry and DBOS misreads it as a *concurrent duplicate execution*
+    (DBOSWorkflowConflictIDError), parking the run in await_workflow_result
+    forever. (Upstream-worthy: recv_async should unregister on
+    cancellation.)
+
+    The registration map is reference-counted, and the conflict path itself
+    increments the count before raising — so drain to zero. Safe by
+    construction at our call sites: the workflow is its inbox's only
+    consumer, and this only runs when no live recv of ours is outstanding.
+    """
+    from dbos._dbos import _get_dbos_instance
+
+    notifications_map = _get_dbos_instance()._sys_db.notifications_map
+    key = f"{workflow_id}::{topic}"
+    for _ in range(64):
+        if notifications_map.get(key) is None:
+            return
+        notifications_map.pop(key)
+
+
+async def recv_resilient(
+    workflow_id: str, timeout_seconds: float, topic: str = INBOX_TOPIC
+) -> Any:
+    """``DBOS.recv_async`` hardened against the stale-listener leak (see
+    :py:func:`clear_stale_listener`): clear any orphaned registration up
+    front, and if an orphaned setup thread lands its registration in the
+    window between our clear and recv's own setup, clear and retry.
+
+    A conflicted attempt claims function ids but records nothing, so replay
+    after a crash-during-conflict re-executes the drain position live — no
+    message is lost or double-delivered (consumption and forwards are each
+    checkpointed); only the cross-recovery drain order can shift, which the
+    mid-drain-crash contract already allows.
+    """
+    from dbos import DBOS
+    from dbos._error import DBOSWorkflowConflictIDError
+
+    clear_stale_listener(workflow_id, topic)
+    for _ in range(_STALE_LISTENER_RETRIES):
+        try:
+            return await DBOS.recv_async(topic, timeout_seconds)
+        except DBOSWorkflowConflictIDError:
+            clear_stale_listener(workflow_id, topic)
+            await asyncio.sleep(_STALE_LISTENER_RETRY_DELAY_SECONDS)
+    raise RuntimeError(
+        f"inbox recv for {workflow_id!r} kept conflicting with a stale "
+        f"listener registration after {_STALE_LISTENER_RETRIES} attempts"
+    )
 
 
 def signal_envelope(name: str, args: Sequence[Any]) -> Envelope:

@@ -237,10 +237,17 @@ async def _continue_chain_after_failure(
 
 async def _drain_unconsumed_inbox() -> List[Any]:
     """Collect inbox messages still unconsumed at run close. Every recv(0)
-    is checkpointed, so the drain replays identically on recovery."""
+    is checkpointed, so the drain replays identically on recovery. The
+    resilient recv guards against the stale-listener registration the
+    interpreter's just-cancelled inbox waiter can leave behind
+    (inbox.clear_stale_listener) — without it, this recv is misread as a
+    concurrent duplicate execution and the run hangs in PENDING forever.
+    """
+    ctx = get_local_dbos_context()
+    assert ctx is not None, "inbox drains must run inside a DBOS workflow"
     messages: List[Any] = []
     while True:
-        message = await DBOS.recv_async(inbox.INBOX_TOPIC, 0)
+        message = await inbox.recv_resilient(ctx.workflow_id, 0)
         if message is None:
             return messages
         messages.append(message)

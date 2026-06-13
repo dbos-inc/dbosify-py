@@ -524,6 +524,13 @@ class Interpreter(_Runtime):
         ):
             self._continued_from = parent
 
+        # A previous interpreter attempt in this process (workflow-task
+        # retry) cancelled its inbox waiter, which can leak a stale recv
+        # listener registration; clear it before this attempt arms its own
+        # waiter, or that recv is misread as a concurrent duplicate
+        # execution. In-memory map operation: not a checkpoint, replay-safe.
+        inbox.clear_stale_listener(self._workflow_id)
+
         init = await _workflow_init_step()
         self._start_time = float(init["start_time"])
         self._vloop.time_seconds = self._start_time
@@ -581,6 +588,13 @@ class Interpreter(_Runtime):
                     *(w.task for w in self._waiters), return_exceptions=True
                 )
             self._waiters.clear()
+            # The cancelled inbox waiter can leak its listener registration
+            # (cancellation lands mid-recv_setup; DBOS never unregisters —
+            # see inbox.clear_stale_listener). Clear it here, before anything
+            # downstream (carryover forwarding, the dispatcher's chain-hop
+            # drain, the next workflow-task attempt) issues a recv on this
+            # workflow and gets misread as a concurrent duplicate execution.
+            inbox.clear_stale_listener(self._workflow_id)
             if self._can_new_run_id is not None:
                 await self._forward_inbox_to(self._can_new_run_id)
             if self._outcome is not None and self._outcome[0] != "task_failure":
@@ -681,7 +695,10 @@ class Interpreter(_Runtime):
                 inbox.INBOX_TOPIC,
             )
         while True:
-            message = await DBOS.recv_async(inbox.INBOX_TOPIC, 0)
+            # Resilient: the just-cancelled inbox waiter may have leaked its
+            # listener registration (see inbox.clear_stale_listener), which
+            # would wedge a plain recv here forever.
+            message = await inbox.recv_resilient(self._workflow_id, 0)
             if message is None:
                 return
             if isinstance(message, dict) and message.get("kind") in (
