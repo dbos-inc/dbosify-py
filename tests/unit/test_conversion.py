@@ -8,9 +8,21 @@ base64, and any extra Payload metadata preserved across the round-trip.
 
 import base64
 import json
+from dataclasses import dataclass
 
-from temporal_dbos._internal.conversion import _payload_from_dict, _payload_to_dict
+from temporal_dbos._internal.conversion import (
+    _payload_from_dict,
+    _payload_to_dict,
+    decode_values,
+    encode_values,
+)
 from temporal_dbos.converter import Payload
+
+
+@dataclass
+class _Point:
+    x: int
+    y: int
 
 
 def test_json_plain_is_stored_inline() -> None:
@@ -65,3 +77,21 @@ def test_extra_metadata_is_preserved() -> None:
         "nonce": base64.b64encode(b"\xff\x00").decode(),
     }
     assert _payload_from_dict(d) == p
+
+
+async def test_more_hints_than_values_keeps_per_position_hint() -> None:
+    # A call site with fewer args than the signature has typed params (the
+    # rest are default-valued). The single value present must still be
+    # reconstructed from its hint, not dropped to a plain dict.
+    encoded = await encode_values([_Point(1, 2)])
+    decoded = await decode_values(encoded, [_Point, _Point])
+    assert decoded == [_Point(1, 2)] and isinstance(decoded[0], _Point)
+
+
+async def test_more_values_than_hints_decodes_extra_hint_free() -> None:
+    # The inverse: extra payloads beyond the supplied hints decode without a
+    # hint (a plain dict for a JSON object) rather than erroring.
+    encoded = await encode_values([_Point(1, 2), _Point(3, 4)])
+    decoded = await decode_values(encoded, [_Point])
+    assert isinstance(decoded[0], _Point)
+    assert decoded[1] == {"x": 3, "y": 4} and isinstance(decoded[1], dict)

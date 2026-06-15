@@ -540,6 +540,7 @@ class _Runtime:
         activity_id: Optional[str],
         cancellation_type: int = 0,
         heartbeat_timeout: Optional[timedelta] = None,
+        result_type: Optional[type] = None,
     ) -> "ActivityHandle":
         raise NotImplementedError
 
@@ -804,8 +805,10 @@ def start_activity(
     ``TimeoutType.HEARTBEAT`` and retries), ``retry_policy``,
     ``cancellation_type``, and ``activity_id``; the remaining parameters are
     accepted and ignored (debug-logged).
-    ``result_type`` is a no-op: payloads round-trip through the DBOS
-    serializer, so no type hint is needed to reconstruct them.
+    ``result_type``, when given, is the type hint used to reconstruct the
+    activity's result (overriding the registered activity's return
+    annotation); without it the registry's return type is used, and absent
+    both the result decodes hint-free (a plain dict for JSON objects).
     """
     if not start_to_close_timeout and not schedule_to_close_timeout:
         raise ValueError(
@@ -834,6 +837,7 @@ def start_activity(
             else ActivityCancellationType.TRY_CANCEL
         ),
         heartbeat_timeout=heartbeat_timeout,
+        result_type=result_type,
     )
 
 
@@ -1311,6 +1315,7 @@ def start_local_activity(
             if cancellation_type is not None
             else ActivityCancellationType.TRY_CANCEL
         ),
+        result_type=result_type,
     )
 
 

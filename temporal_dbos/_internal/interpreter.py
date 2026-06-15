@@ -460,6 +460,9 @@ class _ActivityExec:
     # (the parked heartbeat-timeout check counts envelopes between timer
     # fires — deterministic, no clock reads).
     async_hb_seen: bool = False
+    # execute_activity(result_type=...) override; falls back to the activity's
+    # registered return annotation.
+    result_type: Optional[type] = None
 
 
 @dataclass
@@ -921,6 +924,7 @@ class Interpreter(_Runtime):
         activity_id: Optional[str],
         cancellation_type: int = 0,
         heartbeat_timeout: Optional[timedelta] = None,
+        result_type: Optional[type] = None,
     ) -> ActivityHandle:
         self._assert_not_read_only("start an activity")
         activities_mod.attempt_step_for(activity_name)  # raise early if unknown
@@ -961,6 +965,7 @@ class Interpreter(_Runtime):
             heartbeat_timeout=(
                 heartbeat_timeout.total_seconds() if heartbeat_timeout else None
             ),
+            result_type=result_type,
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
@@ -1239,10 +1244,14 @@ class Interpreter(_Runtime):
         if envelope.get("ok"):
             from . import registry
 
-            try:
-                ret_type = registry.lookup_activity(exec_state.activity_name).ret_type
-            except KeyError:
-                ret_type = None
+            ret_type = exec_state.result_type
+            if ret_type is None:
+                try:
+                    ret_type = registry.lookup_activity(
+                        exec_state.activity_name
+                    ).ret_type
+                except KeyError:
+                    ret_type = None
             envelope = {
                 **envelope,
                 "result": await conversion.decode_value(envelope["result"], ret_type),

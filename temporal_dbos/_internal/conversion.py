@@ -93,9 +93,11 @@ async def decode_values(
     if not items:
         return items
     payloads = [_payload_from_dict(v) for v in items]
-    hints: Optional[List[type]] = None
-    if type_hints is not None and len(type_hints) == len(payloads):
-        hints = list(type_hints)
+    # Apply hints per position (like temporalio's zip_longest): slicing covers
+    # both extra hints (default-valued params, called with fewer args) and the
+    # short/absent case (extra payloads decode hint-free). A whole-list length
+    # check would instead drop ALL hints whenever the arity differs.
+    hints = list(type_hints)[: len(payloads)] if type_hints is not None else None
     return await _active_converter.decode(payloads, hints)
 
 

@@ -78,10 +78,49 @@ class UpdateQueryWorkflow:
         await workflow.wait_condition(lambda: self.done)
 
 
+@workflow.defn
+class DefaultArgWorkflow:
+    @workflow.run
+    async def run(
+        self,
+        req: GreetRequest,
+        extra: GreetRequest = GreetRequest(greeting="def", name="ault"),
+    ) -> str:
+        # The run signature has two typed params but is called with one arg.
+        # Regression: a whole-list arity check would drop *all* hints, so the
+        # provided arg would arrive as a plain dict; per-position slicing keeps
+        # the hint for the arg that *is* present (extra uses its default).
+        assert isinstance(req, GreetRequest)
+        assert isinstance(extra, GreetRequest)
+        return f"{req.greeting} {extra.name}"
+
+
 @activity.defn
 async def transform(req: GreetRequest) -> GreetRequest:
     # Attribute access works only if the dataclass arg was reconstructed.
     return GreetRequest(greeting=req.greeting.upper(), name=req.name)
+
+
+@activity.defn
+async def make_greeting() -> dict:  # type: ignore[type-arg]
+    # Annotated to return a bare dict: the registry's return type would *not*
+    # reconstruct a GreetRequest. Only an explicit execute_activity(result_type=)
+    # override does.
+    return {"greeting": "Hi", "name": "Ovr"}
+
+
+@workflow.defn
+class ResultTypeOverrideWorkflow:
+    @workflow.run
+    async def run(self) -> str:
+        res = await workflow.execute_activity(
+            make_greeting,
+            start_to_close_timeout=timedelta(seconds=10),
+            result_type=GreetRequest,
+        )
+        # result_type wins over the activity's registered `-> dict` return.
+        assert isinstance(res, GreetRequest), type(res).__name__
+        return f"{res.greeting}/{res.name}"
 
 
 @workflow.defn
@@ -117,8 +156,10 @@ async def _env(
             TypedResultWorkflow,
             ActivityRoundtripWorkflow,
             UpdateQueryWorkflow,
+            DefaultArgWorkflow,
+            ResultTypeOverrideWorkflow,
         ],
-        activities=[transform],
+        activities=[transform, make_greeting],
         data_converter=data_converter,
     )
     async with worker:
@@ -192,6 +233,33 @@ async def test_typed_update_and_query_results() -> None:
         assert q == GreetRequest("yo", "Em") and isinstance(q, GreetRequest)
         await handle.signal(UpdateQueryWorkflow.finish)
         await handle.result()
+
+
+async def test_default_valued_arg_keeps_per_position_hint() -> None:
+    # Called with one arg against a two-typed-param signature: the provided
+    # arg must still be reconstructed (the second param falls back to its
+    # default). Guards the per-position hint slice in decode_values.
+    async with _env() as client:
+        result = await client.execute_workflow(
+            DefaultArgWorkflow.run,
+            GreetRequest(greeting="Hello", name="Ada"),
+            id="default-arg",
+            task_queue=TASK_QUEUE,
+        )
+    assert result == "Hello ault"
+
+
+async def test_execute_activity_result_type_override() -> None:
+    # execute_activity(result_type=GreetRequest) reconstructs the activity's
+    # bare-dict result into the requested type, overriding the registry's
+    # `-> dict` return annotation.
+    async with _env() as client:
+        result = await client.execute_workflow(
+            ResultTypeOverrideWorkflow.run,
+            id="result-type-override",
+            task_queue=TASK_QUEUE,
+        )
+    assert result == "Hi/Ovr"
 
 
 async def test_custom_codec_roundtrips_args() -> None:
