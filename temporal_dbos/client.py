@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Type, Un
 from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 
-from . import exceptions
+from . import _schedule, exceptions
 from ._internal import conversion, ids, inbox
 from ._internal import registry as _registry
 from ._internal import schedules as _schedules
@@ -38,6 +38,37 @@ from ._internal.payloads import (
 )
 from ._internal.serializer import TEMPORAL_SERIALIZER
 from ._internal.status import WorkflowExecutionStatus
+
+# Schedule types (DESIGN §6.7) live in _schedule.py and are re-exported here to
+# mirror temporalio.client's namespace.
+from ._schedule import (  # noqa: E402
+    Schedule,
+    ScheduleAction,
+    ScheduleActionExecution,
+    ScheduleActionExecutionStartWorkflow,
+    ScheduleActionResult,
+    ScheduleActionStartWorkflow,
+    ScheduleAsyncIterator,
+    ScheduleBackfill,
+    ScheduleCalendarSpec,
+    ScheduleDescription,
+    ScheduleHandle,
+    ScheduleInfo,
+    ScheduleIntervalSpec,
+    ScheduleListAction,
+    ScheduleListActionStartWorkflow,
+    ScheduleListDescription,
+    ScheduleListInfo,
+    ScheduleListSchedule,
+    ScheduleListState,
+    ScheduleOverlapPolicy,
+    SchedulePolicy,
+    ScheduleRange,
+    ScheduleSpec,
+    ScheduleState,
+    ScheduleUpdate,
+    ScheduleUpdateInput,
+)
 from .common import (
     QueryRejectCondition,
     RetryPolicy,
@@ -56,6 +87,32 @@ __all__ = [
     "AsyncActivityCancelledError",
     "AsyncActivityHandle",
     "Client",
+    "Schedule",
+    "ScheduleAction",
+    "ScheduleActionExecution",
+    "ScheduleActionExecutionStartWorkflow",
+    "ScheduleActionResult",
+    "ScheduleActionStartWorkflow",
+    "ScheduleAsyncIterator",
+    "ScheduleBackfill",
+    "ScheduleCalendarSpec",
+    "ScheduleDescription",
+    "ScheduleHandle",
+    "ScheduleInfo",
+    "ScheduleIntervalSpec",
+    "ScheduleListAction",
+    "ScheduleListActionStartWorkflow",
+    "ScheduleListDescription",
+    "ScheduleListInfo",
+    "ScheduleListSchedule",
+    "ScheduleListState",
+    "ScheduleOverlapPolicy",
+    "SchedulePolicy",
+    "ScheduleRange",
+    "ScheduleSpec",
+    "ScheduleState",
+    "ScheduleUpdate",
+    "ScheduleUpdateInput",
     "WithStartWorkflowOperation",
     "WorkflowContinuedAsNewError",
     "WorkflowQueryRejectedError",
@@ -937,6 +994,65 @@ class Client:
         if task_token is not None:
             return AsyncActivityHandle(self, task_token)
         return AsyncActivityHandle(self, (workflow_id, run_id, activity_id))
+
+    # ------------------------------------------------------------------
+    # Schedules (DESIGN §6.7)
+    # ------------------------------------------------------------------
+
+    async def create_schedule(
+        self,
+        id: str,
+        schedule: Schedule,
+        *,
+        trigger_immediately: bool = False,
+        backfill: Sequence[ScheduleBackfill] = [],
+        memo: Optional[Mapping[str, Any]] = None,
+        search_attributes: Optional[Any] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> ScheduleHandle:
+        """Create a schedule and return its handle (DESIGN §6.7).
+
+        The schedule's ``ScheduleSpec`` is compiled to a cron expression and
+        backed by a DBOS schedule that fires a generic dispatcher; ``memo`` and
+        ``search_attributes`` are not stored yet (debug-logged)."""
+        if memo is not None or search_attributes is not None:
+            logger.debug("create_schedule: ignoring unsupported memo/search_attributes")
+        _ignore_rpc_options("create_schedule", rpc_metadata, rpc_timeout)
+        await _schedule.create_schedule_row(
+            self,
+            id,
+            schedule,
+            trigger_immediately=trigger_immediately,
+            backfill=backfill,
+        )
+        return ScheduleHandle(self, id)
+
+    def get_schedule_handle(self, id: str) -> ScheduleHandle:
+        """Get a handle for a schedule by id (does not verify existence)."""
+        return ScheduleHandle(self, id)
+
+    async def list_schedules(
+        self,
+        query: Optional[str] = None,
+        *,
+        page_size: int = 1000,
+        next_page_token: Optional[bytes] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> ScheduleAsyncIterator:
+        """List schedules. The visibility ``query`` filter is not supported yet
+        (debug-logged); all temporal-dbos schedules are returned."""
+        if query is not None:
+            logger.debug("list_schedules: ignoring unsupported query filter")
+        _ignore_rpc_options("list_schedules", rpc_metadata, rpc_timeout)
+        rows = await self._dbos_client.list_schedules_async()
+        page = [
+            _schedule._list_description_from_row(row)
+            for row in rows
+            if row.get("workflow_name") == _schedule.SCHEDULE_FIRE_WORKFLOW
+        ]
+        return ScheduleAsyncIterator(page)
 
     # ------------------------------------------------------------------
     # Internals

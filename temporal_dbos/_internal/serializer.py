@@ -19,9 +19,19 @@ All processes touching one database must use a serializer with the same
 ``name()`` — DBOS selects the deserializer by the per-row label and refuses a
 mismatch — so ``Worker`` (via ``DBOSConfig``) and ``Client`` (via the wrapped
 ``DBOSClient``) both install this.
+
+One non-pre-converted value reaches this serializer: a scheduled workflow's
+``fired_at`` ``datetime``, which DBOS injects as the first argument of every
+schedule fire (``__temporal_schedule_fire``) and serializes through the
+configured serializer with no type-hint coercion (that path is portable-JSON
+only). So ``datetime`` is round-tripped here via a tagged marker. User
+datetimes never reach this point raw — the conversion layer already turned
+them into ISO strings inside their payload dicts — so the marker is ours
+alone.
 """
 
 import json
+from datetime import datetime
 from typing import Any
 
 from dbos import Serializer
@@ -33,6 +43,22 @@ from .payloads import (
 )
 
 SERIALIZER_NAME = "temporal_dbos_json"
+
+# Marker key for a tagged datetime (see module docstring). Distinctive enough
+# that no user payload dict collides with it.
+_DT_MARKER = "__tdb_datetime__"
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return {_DT_MARKER: value.isoformat()}
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _object_hook(obj: dict[str, Any]) -> Any:
+    if len(obj) == 1 and _DT_MARKER in obj:
+        return datetime.fromisoformat(obj[_DT_MARKER])
+    return obj
 
 
 def _exc_to_dict(exc: BaseException) -> dict[str, Any]:
@@ -67,13 +93,15 @@ class TemporalDBOSSerializer(Serializer):
 
     def serialize(self, data: Any) -> str:
         if isinstance(data, BaseException):
-            return json.dumps({"e": _exc_to_dict(data)}, ensure_ascii=False)
-        return json.dumps({"v": data}, ensure_ascii=False)
+            return json.dumps(
+                {"e": _exc_to_dict(data)}, ensure_ascii=False, default=_json_default
+            )
+        return json.dumps({"v": data}, ensure_ascii=False, default=_json_default)
 
     def deserialize(self, serialized_data: str) -> Any:
         if serialized_data is None:
             return None
-        obj = json.loads(serialized_data)
+        obj = json.loads(serialized_data, object_hook=_object_hook)
         if "e" in obj:
             return _dict_to_exc(obj["e"])
         return obj["v"]

@@ -308,3 +308,32 @@ that checkpoints only the JSON-safe fields we use (`status`, `queue_name`,
 `parent_workflow_id`) — a whole `WorkflowStatus` is not JSON-serializable. This
 is invisible to users and preserves the checkpoint (and thus determinism)
 exactly, just serializably.
+
+### D22. Schedules compile to a single cron; overlap and history are partial
+
+`client.create_schedule` / `ScheduleHandle` (DESIGN §6.7) are backed by DBOS
+schedules: a Temporal `Schedule` compiles to one DBOS schedule row that fires a
+generic dispatcher, which starts the action workflow with a per-occurrence
+deterministic id. The `Schedule`/`ScheduleSpec`/... type surface mirrors
+temporalio; these edges differ:
+
+- **`ScheduleSpec` compiles to one cron expression.** Interval periods that
+  divide a cron boundary evenly (seconds into 60, minutes into 60, hours into
+  24, whole days) are exact; others are approximated to the nearest cron with a
+  debug-logged deviation. Calendar `year` constraints and interval `offset`s
+  have no cron equivalent and are dropped (debug-logged). Multiple
+  `intervals`/`calendars`/`cron_expressions` use the first.
+- **Overlap policy is idempotent-per-occurrence.** A re-fire at the same nominal
+  time is a no-op (SKIP-style idempotency, also what makes recovery safe), and
+  distinct occurrences each run (ALLOW_ALL-style). The cross-occurrence
+  SKIP/BUFFER/CANCEL/TERMINATE distinction (act only when a *prior* occurrence
+  is still running) is not enforced in v1; `overlap` is accepted and stored.
+- **`update` is delete-then-recreate.** DBOS has no in-place schedule update, so
+  `ScheduleHandle.update` (and a `pause`/`unpause` carrying a `note`) deletes and
+  re-creates the row — which resets `last_fired_at`.
+- **Schedule history/metadata is partial.** `ScheduleInfo.next_action_times` is
+  computed from the compiled cron; `recent_actions`/`running_actions`/action
+  counts are empty and `created_at` is synthesized (DBOS does not track schedule
+  history). `memo`/`search_attributes` on a schedule are accepted and ignored;
+  `list_schedules` returns all temporal-dbos schedules (the visibility `query`
+  filter is ignored).

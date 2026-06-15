@@ -24,6 +24,7 @@ import copy
 import dataclasses
 import logging
 import os
+import random
 import time as time_mod
 import uuid
 from contextlib import nullcontext
@@ -79,6 +80,8 @@ def _reset_for_tests() -> None:
     """
     from . import interpreter
 
+    global _schedule_dispatcher_registered
+    _schedule_dispatcher_registered = False
     registry._dbos_workflows.clear()
     registry._workflows.clear()
     registry._activities.clear()
@@ -106,6 +109,9 @@ def register_worker(
     """
     if failure_exception_types:
         registry.add_worker_failure_exception_types(failure_exception_types)
+    # The generic schedule-fire dispatcher is process-global (§6.7); register
+    # it so this worker can run schedules whose action targets it.
+    register_schedule_dispatcher()
     for cls in workflows:
         defn = registry.workflow_definition_of(cls)
         registry.register_workflow(defn)
@@ -370,6 +376,80 @@ async def _enqueue_next_run(
             # this path; queue-dispatched runs (every Client start) do.
             await DBOS.start_workflow_async(dispatch_fn, payload)
     return new_run_id
+
+
+# ---------------------------------------------------------------------------
+# Schedules (§6.7): the generic schedule-fire dispatcher. DBOS fires it once
+# per schedule occurrence with ``(fired_at, context)``; it enforces the spec's
+# start/end bounds and jitter, then starts the action workflow under a
+# per-occurrence deterministic id (so a re-fire at the same nominal time is an
+# idempotent no-op — SKIP semantics — while distinct occurrences each run).
+# ---------------------------------------------------------------------------
+
+SCHEDULE_FIRE_NAME = "__temporal_schedule_fire"
+_schedule_dispatcher_registered = False
+
+
+def register_schedule_dispatcher() -> None:
+    """Register the schedule-fire dispatcher (idempotent per process)."""
+    global _schedule_dispatcher_registered
+    if _schedule_dispatcher_registered:
+        return
+
+    async def fire(fired_at: datetime, context: Dict[str, Any]) -> None:
+        await _schedule_fire(fired_at, context)
+
+    fire.__name__ = fire.__qualname__ = SCHEDULE_FIRE_NAME
+    DBOS.workflow(name=SCHEDULE_FIRE_NAME)(fire)
+    _schedule_dispatcher_registered = True
+
+
+def _to_aware_utc(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+async def _schedule_fire(fired_at: datetime, context: Dict[str, Any]) -> None:
+    fired_at = _to_aware_utc(fired_at)
+    spec = context.get("spec", {})
+    start_at = spec.get("start_at")
+    end_at = spec.get("end_at")
+    if start_at is not None and fired_at < _to_aware_utc(
+        datetime.fromisoformat(start_at)
+    ):
+        return
+    if end_at is not None and fired_at > _to_aware_utc(datetime.fromisoformat(end_at)):
+        return
+    jitter = spec.get("jitter")
+    if jitter:
+        # Seeded by the (fixed) fire time, so the durable sleep replays
+        # identically on recovery.
+        delay = random.Random(int(fired_at.timestamp())).random() * float(jitter)
+        await DBOS.sleep_async(delay)
+    await _start_scheduled_action(context["action"], fired_at)
+
+
+async def _start_scheduled_action(action: Dict[str, Any], fired_at: datetime) -> None:
+    """Start one scheduled action (an in-workflow enqueue — checkpointed and
+    idempotent on the per-occurrence id)."""
+    dispatch_fn = registry.dbos_workflow_for(action["workflow"])
+    meta = RunMeta()
+    if action.get("retry_policy") is not None:
+        meta.retry_policy = action["retry_policy"]
+    if action.get("run_timeout") is not None:
+        meta.run_timeout = action["run_timeout"]
+    occurrence_id = f"{action['id']}-{int(fired_at.timestamp())}"
+    payload = wrap_input(action.get("args", []), meta)
+    queue = await DBOS.retrieve_queue_async(action["task_queue"])
+    assert queue is not None, f"task queue {action['task_queue']!r} is not registered"
+    timeout_ctx = (
+        SetWorkflowTimeout(meta.run_timeout)
+        if meta.run_timeout is not None
+        else nullcontext()
+    )
+    with SetWorkflowID(occurrence_id), timeout_ctx:
+        await queue.enqueue_async(dispatch_fn, payload)
 
 
 async def _run_workflow_task_loop(

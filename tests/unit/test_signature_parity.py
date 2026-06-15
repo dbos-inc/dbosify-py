@@ -69,6 +69,10 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
         "temporalio.api.common.v1.Payload — protobuf payloads are unsupported "
         "(corollary of D1, no non-Python clients)"
     ),
+    "client.ScheduleAsyncIterator.__init__": (
+        "wraps a pre-fetched page of DBOS schedule rows, not a gRPC paginator "
+        "(DESIGN §6.7); the async-iteration contract is identical"
+    ),
 }
 
 # temporalio parameters not accepted yet, recorded exactly. qualname ->
@@ -160,6 +164,27 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     # External storage and payload-size limits are not implemented (DESIGN §6.9
     # scope); proto/search-attribute helpers are intentionally absent.
     "converter.DataConverter.__init__": {"external_storage", "payload_limits"},
+    # Schedules (DESIGN §6.7). Search attributes, raw protobuf, and the data
+    # converter handle on describe/list results are not stored/exposed yet;
+    # headers/raw_info/search-attribute action fields are likewise absent.
+    "client.ScheduleActionStartWorkflow.__init__": {
+        "headers",
+        "raw_info",
+        "typed_search_attributes",
+        "untyped_search_attributes",
+    },
+    "client.ScheduleDescription.__init__": {
+        "data_converter",
+        "raw_description",
+        "search_attributes",
+        "typed_search_attributes",
+    },
+    "client.ScheduleListDescription.__init__": {
+        "data_converter",
+        "raw_entry",
+        "search_attributes",
+        "typed_search_attributes",
+    },
 }
 
 

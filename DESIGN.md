@@ -598,7 +598,7 @@ which surfaces results through `next_event`. `.signal()` → `DBOS.send` to chil
 chain to current run first); these sends are checkpointed steps from the parent's
 perspective.
 
-### 6.7 Schedules
+### 6.7 Schedules (done)
 
 Back `client.create_schedule(id, Schedule(...))` with DBOS schedules
 (`DBOS.create_schedule(schedule_name=..., workflow_fn=<schedule-fire dispatcher>,
@@ -612,7 +612,15 @@ deterministically from the nominal fire time → SKIP = idempotent duplicate-sta
 BUFFER_ONE/ALLOW_ALL via id suffixing + a small state event; CANCEL_OTHER/TERMINATE_OTHER
 via cancel-then-start. `ScheduleHandle.pause/unpause/trigger/backfill/delete/describe/update`
 → DBOS `pause_schedule/resume_schedule/trigger_schedule/backfill_schedule/delete_schedule/
-get_schedule` (+ re-create for update). Phase 3.
+get_schedule` (+ re-create for update). **Done** as sketched, with v1 scope cuts
+(DEVIATIONS D22): the `ScheduleSpec` compiles to one cron (intervals dividing a boundary
+are exact, others approximate; calendar `year`/interval `offset` dropped); overlap is
+idempotent-per-occurrence (deterministic per-fire id), not cross-occurrence
+SKIP/BUFFER/CANCEL/TERMINATE; `update` is delete-then-recreate; schedule history and
+`memo`/`search_attributes` aren't tracked. The action + full spec ride in the schedule's
+DBOS `context` (so describe/list/update reconstruct them); the fire dispatcher
+(`__temporal_schedule_fire`) is one process-global DBOS workflow. The
+samples-python `schedules/` corpus runs unmodified (conformance suite).
 
 ### 6.8 Determinism helpers, info, versioning, interceptors
 
@@ -774,8 +782,9 @@ xfail-tagged); chaos suite covers SIGKILL mid-cancellation-unwind, mid-child,
 mid-update-handler (accepted-but-parked), and the is_replaying probe.
 
 **Phase 3 — Operational surface.** Schedules + cron + `start_delay` (cron done via
-delayed-enqueue chain hops — flipped `hello_cron`, hello 16/19; `create_schedule` and
-the ScheduleHandle surface remain), continue-as-new
+delayed-enqueue chain hops — flipped `hello_cron`, hello 16/19; `create_schedule` +
+the full ScheduleHandle surface **done** — the samples-python `schedules/` corpus runs
+8/8, DEVIATIONS D22), continue-as-new
 (done: chain hops, carryover, follow_runs, child chains; flipped
 `hello_continue_as_new` and `safe_message_handlers` — `message_passing/` is 5/5),
 dynamic workflows/handlers + handler descriptions,
