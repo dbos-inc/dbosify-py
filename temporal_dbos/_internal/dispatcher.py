@@ -449,7 +449,11 @@ def workflow_result(
 def signal_workflow(
     workflow_id: str, signal_name: str, args: Sequence[Any] = ()
 ) -> None:
-    DBOS.send(workflow_id, inbox.signal_envelope(signal_name, args), inbox.INBOX_TOPIC)
+    DBOS.send(
+        workflow_id,
+        inbox.signal_envelope(signal_name, conversion.encode_values_sync(args)),
+        inbox.INBOX_TOPIC,
+    )
 
 
 def execute_update(
@@ -463,7 +467,9 @@ def execute_update(
     update_id = update_id or str(uuid.uuid4())
     DBOS.send(
         workflow_id,
-        inbox.update_envelope(update_name, args, update_id),
+        inbox.update_envelope(
+            update_name, conversion.encode_values_sync(args), update_id
+        ),
         inbox.INBOX_TOPIC,
         idempotency_key=update_id,
     )
@@ -483,7 +489,9 @@ def query_workflow(
     request_id = str(uuid.uuid4())
     DBOS.send(
         workflow_id,
-        inbox.query_envelope(query_name, args, request_id),
+        inbox.query_envelope(
+            query_name, conversion.encode_values_sync(args), request_id
+        ),
         inbox.INBOX_TOPIC,
     )
     reply = DBOS.get_event(

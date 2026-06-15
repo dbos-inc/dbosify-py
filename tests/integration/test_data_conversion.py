@@ -9,12 +9,13 @@ payload bytes and is reversed on the way back — the encryption use-case.
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, AsyncIterator, List, Sequence
 
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
+from temporal_dbos import activity, workflow
 from temporal_dbos.client import Client
 from temporal_dbos.converter import DataConverter, Payload, PayloadCodec
 from temporal_dbos.worker import Worker
@@ -55,6 +56,22 @@ class TypedResultWorkflow:
         return GreetRequest(greeting="Yo", name="Cy")
 
 
+@activity.defn
+async def transform(req: GreetRequest) -> GreetRequest:
+    # Attribute access works only if the dataclass arg was reconstructed.
+    return GreetRequest(greeting=req.greeting.upper(), name=req.name)
+
+
+@workflow.defn
+class ActivityRoundtripWorkflow:
+    @workflow.run
+    async def run(self, req: GreetRequest) -> GreetRequest:
+        result: GreetRequest = await workflow.execute_activity(
+            transform, req, start_to_close_timeout=timedelta(seconds=10)
+        )
+        return result
+
+
 class ReverseCodec(PayloadCodec):
     """Toy stand-in for an encryption codec: reverses the payload bytes."""
 
@@ -72,7 +89,13 @@ async def _env(
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[TypedArgWorkflow, UntypedArgWorkflow, TypedResultWorkflow],
+        workflows=[
+            TypedArgWorkflow,
+            UntypedArgWorkflow,
+            TypedResultWorkflow,
+            ActivityRoundtripWorkflow,
+        ],
+        activities=[transform],
         data_converter=data_converter,
     )
     async with worker:
@@ -114,6 +137,20 @@ async def test_typed_result_is_reconstructed() -> None:
             TypedResultWorkflow.run, id="typed-result", task_queue=TASK_QUEUE
         )
     assert result == GreetRequest("Yo", "Cy")
+    assert isinstance(result, GreetRequest)
+
+
+async def test_activity_dataclass_roundtrip() -> None:
+    # Dataclass arg -> activity (reconstructed) -> dataclass result ->
+    # workflow (reconstructed) -> client (reconstructed), end to end.
+    async with _env() as client:
+        result = await client.execute_workflow(
+            ActivityRoundtripWorkflow.run,
+            GreetRequest(greeting="hi", name="Di"),
+            id="activity-roundtrip",
+            task_queue=TASK_QUEUE,
+        )
+    assert result == GreetRequest(greeting="HI", name="Di")
     assert isinstance(result, GreetRequest)
 
 

@@ -31,12 +31,15 @@ class SignalDefinition:
     # HandlerUnfinishedPolicy value (int to avoid importing workflow here);
     # 1 = WARN_AND_ABANDON (the temporalio default).
     unfinished_policy: int = 1
+    arg_types: Optional[List[type]] = None
 
 
 @dataclass(frozen=True)
 class QueryDefinition:
     name: str
     fn: Callable[..., Any]
+    arg_types: Optional[List[type]] = None
+    ret_type: Optional[type] = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,8 @@ class UpdateDefinition:
     fn: Callable[..., Any]
     validator: Optional[Callable[..., Any]] = None
     unfinished_policy: int = 1
+    arg_types: Optional[List[type]] = None
+    ret_type: Optional[type] = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +74,10 @@ class ActivityDefinition:
     name: str
     fn: Callable[..., Any]
     is_async: bool
+    # Signature hints (conversion.type_hints_from_func): arg_types rebuilds the
+    # activity's typed arguments; ret_type rebuilds its result for the caller.
+    arg_types: Optional[List[type]] = None
+    ret_type: Optional[type] = None
 
 
 _workflows: Dict[str, WorkflowDefinition] = {}
@@ -166,6 +175,8 @@ def build_workflow_definition(
     """Scan a @workflow.defn-decorated class for handler markers and validate,
     mirroring temporalio's decoration-time checks.
     """
+    from .conversion import type_hints_from_func
+
     workflow_name = name if name is not None else cls.__name__
 
     run_fn: Optional[Callable[..., Any]] = None
@@ -182,27 +193,35 @@ def build_workflow_definition(
         if signal_name is not None:
             if signal_name in signals:
                 raise ValueError(f"Multiple signal methods found for {signal_name!r}")
+            sig_args, _ = type_hints_from_func(member)
             signals[signal_name] = SignalDefinition(
                 name=signal_name,
                 fn=member,
                 unfinished_policy=int(getattr(member, SIGNAL_POLICY_ATTR, 1)),
+                arg_types=sig_args,
             )
         query_name = getattr(member, QUERY_ATTR, None)
         if query_name is not None:
             if query_name in queries:
                 raise ValueError(f"Multiple query methods found for {query_name!r}")
-            queries[query_name] = QueryDefinition(name=query_name, fn=member)
+            q_args, q_ret = type_hints_from_func(member)
+            queries[query_name] = QueryDefinition(
+                name=query_name, fn=member, arg_types=q_args, ret_type=q_ret
+            )
         # Updates are wrapper objects (to carry .validator), not functions.
         from ..workflow import _UpdateMethod  # circular-import-safe at call time
 
         if isinstance(member, _UpdateMethod):
             if member.name in updates:
                 raise ValueError(f"Multiple update methods found for {member.name!r}")
+            u_args, u_ret = type_hints_from_func(member.fn)
             updates[member.name] = UpdateDefinition(
                 name=member.name,
                 fn=member.fn,
                 validator=member.validator_fn,
                 unfinished_policy=int(member.unfinished_policy),
+                arg_types=u_args,
+                ret_type=u_ret,
             )
 
     if run_fn is None:
@@ -222,8 +241,6 @@ def build_workflow_definition(
 
     # @workflow.init means __init__ takes the run args, so when present its
     # signature is authoritative for the argument types.
-    from .conversion import type_hints_from_func
-
     arg_source = cls.__init__ if init_takes_args else run_fn
     arg_types, _ = type_hints_from_func(arg_source)
     _, ret_type = type_hints_from_func(run_fn)

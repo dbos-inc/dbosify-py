@@ -711,7 +711,9 @@ class Client:
         if start_signal is not None:
             await self._dbos_client.send_async(
                 dbos_id,
-                inbox.signal_envelope(start_signal, list(start_signal_args)),
+                inbox.signal_envelope(
+                    start_signal, await conversion.encode_values(start_signal_args)
+                ),
                 inbox.INBOX_TOPIC,
             )
         # Like temporalio, the returned handle is NOT run-bound: signals,
@@ -1130,9 +1132,10 @@ class WorkflowHandle:
     ) -> None:
         """Send a signal to the workflow."""
         _ignore_rpc_options("signal", rpc_metadata, None)
+        encoded = await conversion.encode_values(_resolve_args(arg, args))
         await self._client._dbos_client.send_async(
             await self._target(),
-            inbox.signal_envelope(_signal_name(signal), _resolve_args(arg, args)),
+            inbox.signal_envelope(_signal_name(signal), encoded),
             inbox.INBOX_TOPIC,
         )
 
@@ -1171,7 +1174,9 @@ class WorkflowHandle:
         await client.send_async(
             target,
             inbox.query_envelope(
-                _query_name(query), _resolve_args(arg, args), request_id
+                _query_name(query),
+                await conversion.encode_values(_resolve_args(arg, args)),
+                request_id,
             ),
             inbox.INBOX_TOPIC,
         )
@@ -1216,7 +1221,9 @@ class WorkflowHandle:
         await client.send_async(
             target,
             inbox.update_envelope(
-                _update_name(update), _resolve_args(arg, args), update_id
+                _update_name(update),
+                await conversion.encode_values(_resolve_args(arg, args)),
+                update_id,
             ),
             inbox.INBOX_TOPIC,
             idempotency_key=update_id,

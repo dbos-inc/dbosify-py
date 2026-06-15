@@ -45,7 +45,18 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from random import Random
-from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Coroutine,
+    Deque,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from dbos import DBOS
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
@@ -970,12 +981,25 @@ class Interpreter(_Runtime):
                 else:
                     self._launch_waiter("timer", seq, DBOS.sleep_async(real_delay))
             elif kind == "activity":
-                self._launch_attempt(self._pending_activities[seq])
+                exec_state = self._pending_activities[seq]
+                # Encode the args once (reused across retries); the step
+                # decodes them against the activity's signature.
+                exec_state.args = await conversion.encode_values(exec_state.args)
+                self._launch_attempt(exec_state)
             elif kind == "child":
                 await self._start_child(self._pending_children[seq])
                 progressed = True  # the start future resolved either way
             elif kind == "send":
                 target, envelope, future, resolve_chain = self._pending_sends.pop(seq)
+                if isinstance(envelope, dict) and envelope.get("kind") == "signal":
+                    # Encode the signal args here (real loop), not in workflow
+                    # code, so a codec's async work stays off the virtual loop.
+                    envelope = {
+                        **envelope,
+                        "args": await conversion.encode_values(
+                            envelope.get("args", [])
+                        ),
+                    }
                 # send_async is checkpointed; awaited inline so its
                 # function_id claim stays at a deterministic position. The
                 # chain resolution is a live read, but that's safe: on
@@ -1163,9 +1187,32 @@ class Interpreter(_Runtime):
             "workflow_run_id": self._workflow_id,
             "workflow_type": self._defn.name,
         }
-        # The step wrapper assigns its function_id synchronously here.
-        coro = step_fn(exec_state.args, exec_state.start_to_close, meta)
-        self._launch_waiter("activity", exec_state.seq, coro)
+        # Call step_fn synchronously so its function_id is claimed here (a
+        # deterministic position); the result decode rides outside the
+        # recorded step, replaying from the recorded envelope.
+        step_coro = step_fn(exec_state.args, exec_state.start_to_close, meta)
+        self._launch_waiter(
+            "activity",
+            exec_state.seq,
+            self._decode_activity_result(step_coro, exec_state),
+        )
+
+    async def _decode_activity_result(
+        self, step_coro: Coroutine[Any, Any, Dict[str, Any]], exec_state: _ActivityExec
+    ) -> Dict[str, Any]:
+        envelope: Dict[str, Any] = await step_coro
+        if envelope.get("ok"):
+            from . import registry
+
+            try:
+                ret_type = registry.lookup_activity(exec_state.activity_name).ret_type
+            except KeyError:
+                ret_type = None
+            envelope = {
+                **envelope,
+                "result": await conversion.decode_value(envelope["result"], ret_type),
+            }
+        return envelope
 
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):
@@ -1418,6 +1465,10 @@ class Interpreter(_Runtime):
         envelope: inbox.Envelope = message
         self._advance_time(envelope.get("sent_at"))
         kind = envelope["kind"]
+        if kind in ("signal", "update", "query"):
+            # Decode the message args against the matching handler's signature
+            # (one place, so the handlers see ready-to-call values).
+            envelope = await self._decode_message_args(envelope)
         if kind == "signal":
             self._apply_signal(envelope)
         elif kind == "update":
@@ -1434,6 +1485,19 @@ class Interpreter(_Runtime):
             logger.warning(
                 "Workflow %s: unknown inbox envelope kind %r", self._workflow_id, kind
             )
+
+    async def _decode_message_args(self, envelope: inbox.Envelope) -> inbox.Envelope:
+        kind = envelope["kind"]
+        defn: Any = None
+        if kind == "signal":
+            defn = self._defn.signals.get(envelope["name"])
+        elif kind == "update":
+            defn = self._defn.updates.get(envelope["name"])
+        elif kind == "query":
+            defn = self._defn.queries.get(envelope["name"])
+        arg_types = defn.arg_types if defn is not None else None
+        decoded = await conversion.decode_values(envelope.get("args", []), arg_types)
+        return {**envelope, "args": decoded}
 
     def _async_pending_by_id(self, activity_id: str) -> Optional[_ActivityExec]:
         for exec_state in self._pending_activities.values():
