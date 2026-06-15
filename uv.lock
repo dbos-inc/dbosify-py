@@ -1383,6 +1383,7 @@ name = "temporal-dbos"
 source = { editable = "." }
 dependencies = [
     { name = "dbos" },
+    { name = "python-dateutil", marker = "python_full_version < '3.11'" },
 ]
 
 [package.dev-dependencies]
@@ -1400,7 +1401,10 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "dbos", specifier = "==2.24.0a12" }]
+requires-dist = [
+    { name = "dbos", specifier = "==2.24.0a12" },
+    { name = "python-dateutil", marker = "python_full_version < '3.11'", specifier = ">=2.8.2,<3" },
+]
 
 [package.metadata.requires-dev]
 dev = [

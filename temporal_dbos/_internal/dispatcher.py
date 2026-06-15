@@ -45,12 +45,13 @@ from .. import exceptions
 # temporalio.client.WorkflowUpdateFailedError.
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from . import activities as activities_mod
-from . import ids, inbox, registry, schedules
+from . import conversion, ids, inbox, registry, schedules
 from .interpreter import (
     Interpreter,
     WorkflowCancelled,
     WorkflowContinuedAsNew,
     WorkflowTaskFailure,
+    _safe_status,
 )
 from .payloads import (
     FailureEnvelope,
@@ -87,6 +88,8 @@ def _reset_for_tests() -> None:
     interpreter._child_result_step = None
     interpreter._child_exists_step = None
     interpreter._update_validate_step = None
+    interpreter._safe_status_step = None
+    interpreter._safe_status_list_step = None
 
 
 def register_worker(
@@ -170,7 +173,11 @@ def _make_dbos_workflow(
             # requested). The run itself still closes COMPLETED.
             if not run_flags["cancel_observed"] and not _contains_cancel(carryover):
                 next_meta = meta.carried_forward()
-                next_meta.last_completion = {"value": result}
+                # Encoded (no codec — read back synchronously by
+                # get_last_completion_result, like query results).
+                next_meta.last_completion = {
+                    "value": conversion.encode_value_sync(result)
+                }
                 next_meta.last_failure = None
                 new_run_id = await _enqueue_next_run(
                     type_name,
@@ -181,7 +188,10 @@ def _make_dbos_workflow(
                     ),
                 )
                 await _forward_carryover(new_run_id, carryover)
-        return result
+        # Encode the result for the DBOS output: the client (and any awaiting
+        # parent) decodes it against the run's result type. (The cron
+        # last_completion above stays raw for now — Stage 3.)
+        return await conversion.encode_value(result)
 
     dispatch.__name__ = dispatch.__qualname__ = f"wf:{type_name}"
     decorated: Callable[[Any], Coroutine[Any, Any, Any]] = DBOS.workflow(
@@ -326,8 +336,10 @@ async def _enqueue_next_run(
     base, index = ids.parse_run(ctx.workflow_id)
     new_run_id = ids.run_dbos_id(base, index + 1)
     dispatch_fn = registry.dbos_workflow_for(type_name)
-    status = await DBOS.get_workflow_status_async(ctx.workflow_id)
-    queue_name = status.queue_name if status else None
+    # Safe (JSON-serializable) status read — a whole WorkflowStatus can't be
+    # checkpointed by the JSON serializer (see interpreter._safe_status).
+    fields = await _safe_status(ctx.workflow_id)
+    queue_name = fields["queue_name"] if fields else None
     queue = (
         await DBOS.retrieve_queue_async(queue_name) if queue_name is not None else None
     )
@@ -431,13 +443,26 @@ def start_workflow(
     """Start a Temporal workflow; returns the underlying DBOS handle."""
     fn = registry.dbos_workflow_for(_type_name(workflow))
     with SetWorkflowID(workflow_id):
-        return DBOS.start_workflow(fn, list(args))
+        return DBOS.start_workflow(fn, conversion.encode_values_sync(args))
+
+
+def workflow_result(
+    handle: "WorkflowHandle[Any]", type_hint: Optional[type] = None
+) -> Any:
+    """Decoded result for a Phase-0-started workflow (the raw DBOS handle's
+    ``get_result`` returns the encoded payload dict). Failures propagate as the
+    serialized markers, as before."""
+    return conversion.decode_value_sync(handle.get_result(), type_hint)
 
 
 def signal_workflow(
     workflow_id: str, signal_name: str, args: Sequence[Any] = ()
 ) -> None:
-    DBOS.send(workflow_id, inbox.signal_envelope(signal_name, args), inbox.INBOX_TOPIC)
+    DBOS.send(
+        workflow_id,
+        inbox.signal_envelope(signal_name, conversion.encode_values_sync(args)),
+        inbox.INBOX_TOPIC,
+    )
 
 
 def execute_update(
@@ -451,7 +476,9 @@ def execute_update(
     update_id = update_id or str(uuid.uuid4())
     DBOS.send(
         workflow_id,
-        inbox.update_envelope(update_name, args, update_id),
+        inbox.update_envelope(
+            update_name, conversion.encode_values_sync(args), update_id
+        ),
         inbox.INBOX_TOPIC,
         idempotency_key=update_id,
     )
@@ -471,7 +498,9 @@ def query_workflow(
     request_id = str(uuid.uuid4())
     DBOS.send(
         workflow_id,
-        inbox.query_envelope(query_name, args, request_id),
+        inbox.query_envelope(
+            query_name, conversion.encode_values_sync(args), request_id
+        ),
         inbox.INBOX_TOPIC,
     )
     reply = DBOS.get_event(
@@ -484,7 +513,7 @@ def _unwrap_reply(reply: Any, *, kind: str, timeout_seconds: float) -> Any:
     if reply is None:
         raise TimeoutError(f"{kind} did not complete within {timeout_seconds}s")
     if reply["status"] == "completed":
-        return reply["result"]
+        return conversion.decode_value_sync(reply["result"])
     raise WorkflowUpdateFailedError(deserialize_failure(reply["failure"]))
 
 

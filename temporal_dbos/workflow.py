@@ -523,7 +523,7 @@ class _Runtime:
     def runtime_has_last_completion_result(self) -> bool:
         raise NotImplementedError
 
-    def runtime_last_completion_result(self) -> Any:
+    def runtime_last_completion_result(self, type_hint: Optional[type] = None) -> Any:
         raise NotImplementedError
 
     def runtime_last_failure(self) -> Optional[BaseException]:
@@ -540,6 +540,7 @@ class _Runtime:
         activity_id: Optional[str],
         cancellation_type: int = 0,
         heartbeat_timeout: Optional[timedelta] = None,
+        result_type: Optional[type] = None,
     ) -> "ActivityHandle":
         raise NotImplementedError
 
@@ -704,10 +705,10 @@ def get_last_completion_result(type_hint: Optional[type] = None) -> Any:
     """The result of the chain's last successful run (carried forward across
     failed runs, as in Temporal); None if there was no previous completion
     or the result was None — use :py:func:`has_last_completion_result` to
-    tell them apart. ``type_hint`` is accepted for signature parity; pickle
-    payloads reconstruct exact objects without it (README deviation #12).
+    tell them apart. ``type_hint`` rebuilds the original type (else a plain
+    JSON value, as in temporalio).
     """
-    return _runtime().runtime_last_completion_result()
+    return _runtime().runtime_last_completion_result(type_hint)
 
 
 def get_last_failure() -> Optional[BaseException]:
@@ -804,8 +805,10 @@ def start_activity(
     ``TimeoutType.HEARTBEAT`` and retries), ``retry_policy``,
     ``cancellation_type``, and ``activity_id``; the remaining parameters are
     accepted and ignored (debug-logged).
-    ``result_type`` is a no-op: payloads round-trip through the DBOS
-    serializer, so no type hint is needed to reconstruct them.
+    ``result_type``, when given, is the type hint used to reconstruct the
+    activity's result (overriding the registered activity's return
+    annotation); without it the registry's return type is used, and absent
+    both the result decodes hint-free (a plain dict for JSON objects).
     """
     if not start_to_close_timeout and not schedule_to_close_timeout:
         raise ValueError(
@@ -834,6 +837,7 @@ def start_activity(
             else ActivityCancellationType.TRY_CANCEL
         ),
         heartbeat_timeout=heartbeat_timeout,
+        result_type=result_type,
     )
 
 
@@ -1311,6 +1315,7 @@ def start_local_activity(
             if cancellation_type is not None
             else ActivityCancellationType.TRY_CANCEL
         ),
+        result_type=result_type,
     )
 
 

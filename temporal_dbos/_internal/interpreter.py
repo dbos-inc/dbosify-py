@@ -45,7 +45,18 @@ from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from random import Random
-from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Coroutine,
+    Deque,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from dbos import DBOS
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
@@ -64,7 +75,7 @@ from ..workflow import (
     _Runtime,
 )
 from . import activities as activities_mod
-from . import ids, inbox
+from . import conversion, ids, inbox
 from .payloads import (
     FailureEnvelope,
     RunMeta,
@@ -133,6 +144,8 @@ _init_step: Optional[Callable[[], Any]] = None
 _child_result_step: Optional[Callable[[str], Any]] = None
 _child_exists_step: Optional[Callable[[str], Any]] = None
 _update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
+_safe_status_step: Optional[Callable[[str], Any]] = None
+_safe_status_list_step: Optional[Callable[[List[str]], Any]] = None
 
 
 def _workflow_init_step() -> Any:
@@ -263,6 +276,45 @@ def _child_id_taken(child_id: str) -> Any:
 
         _child_exists_step = child_exists_step
     return _child_exists_step(child_id)
+
+
+# The status fields the interpreter actually reads — all JSON-serializable.
+# A whole WorkflowStatus is not JSON-safe (it embeds input/output/error), so
+# these steps checkpoint only what we use; the checkpoint keeps the read
+# replay-stable (same as a direct status read, just serializable).
+def _safe_status(workflow_id: str) -> Any:
+    """Checkpointed read of a workflow's JSON-safe status fields, or None."""
+    global _safe_status_step
+    if _safe_status_step is None:
+
+        @DBOS.step(name="__tdb_status")
+        async def safe_status_step(workflow_id: str) -> Optional[Dict[str, Any]]:
+            status = await DBOS.get_workflow_status_async(workflow_id)
+            if status is None:
+                return None
+            return {
+                "status": status.status,
+                "queue_name": status.queue_name,
+                "parent_workflow_id": status.parent_workflow_id,
+            }
+
+        _safe_status_step = safe_status_step
+    return _safe_status_step(workflow_id)
+
+
+def _safe_status_list(dbos_ids: List[str]) -> Any:
+    """Checkpointed batched probe returning ``{dbos_id: status_string}`` for
+    existing ids (chain resolution; the caller uses only id/status)."""
+    global _safe_status_list_step
+    if _safe_status_list_step is None:
+
+        @DBOS.step(name="__tdb_status_list")
+        async def safe_status_list_step(dbos_ids: List[str]) -> Dict[str, str]:
+            statuses = await DBOS.list_workflows_async(workflow_ids=dbos_ids)
+            return {s.workflow_id: s.status for s in statuses}
+
+        _safe_status_list_step = safe_status_list_step
+    return _safe_status_list_step(dbos_ids)
 
 
 class _TimerHandle(asyncio.TimerHandle):
@@ -408,6 +460,9 @@ class _ActivityExec:
     # (the parked heartbeat-timeout check counts envelopes between timer
     # fires — deterministic, no clock reads).
     async_hb_seen: bool = False
+    # execute_activity(result_type=...) override; falls back to the activity's
+    # registered return annotation.
+    result_type: Optional[type] = None
 
 
 @dataclass
@@ -529,6 +584,9 @@ class Interpreter(_Runtime):
         self._vloop.time_seconds = self._start_time
         self._random.seed(init["seed"])
 
+        # Rebuild the typed run arguments from their payloads (deterministic,
+        # so re-decoding each run/replay is replay-safe).
+        self._args = await conversion.decode_values(self._args, self._defn.arg_types)
         self._instantiate()
         try:
             while True:
@@ -627,10 +685,7 @@ class Interpreter(_Runtime):
         dispatch_fn = registry.dbos_workflow_for(type_name)
         base, index = ids.parse_run(self._workflow_id)
         new_run_id = ids.run_dbos_id(base, index + 1)
-        if not self._own_queue_resolved:
-            status = await DBOS.get_workflow_status_async(self._workflow_id)
-            self._own_queue_name = status.queue_name if status else None
-            self._own_queue_resolved = True
+        await self._resolve_own_queue()
         queue_name = can._tdb_task_queue or self._own_queue_name
         queue = (
             await DBOS.retrieve_queue_async(queue_name)
@@ -647,7 +702,9 @@ class Interpreter(_Runtime):
             carried.run_timeout = can._tdb_run_timeout.total_seconds()
         if can._tdb_retry_policy is not None:
             carried.retry_policy = serialize_retry_policy(can._tdb_retry_policy)
-        payload = wrap_input(list(can._tdb_args), carried)
+        # The new run's args come from user code, so encode them (the next
+        # run's interpreter decodes against its run signature).
+        payload = wrap_input(await conversion.encode_values(can._tdb_args), carried)
         # Explicit per-run timeout, else DBOS propagates THIS run's absolute
         # deadline to the next run (see dispatcher._enqueue_next_run).
         timeout_ctx: ContextManager[Any] = (
@@ -867,6 +924,7 @@ class Interpreter(_Runtime):
         activity_id: Optional[str],
         cancellation_type: int = 0,
         heartbeat_timeout: Optional[timedelta] = None,
+        result_type: Optional[type] = None,
     ) -> ActivityHandle:
         self._assert_not_read_only("start an activity")
         activities_mod.attempt_step_for(activity_name)  # raise early if unknown
@@ -907,6 +965,7 @@ class Interpreter(_Runtime):
             heartbeat_timeout=(
                 heartbeat_timeout.total_seconds() if heartbeat_timeout else None
             ),
+            result_type=result_type,
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
@@ -965,12 +1024,25 @@ class Interpreter(_Runtime):
                 else:
                     self._launch_waiter("timer", seq, DBOS.sleep_async(real_delay))
             elif kind == "activity":
-                self._launch_attempt(self._pending_activities[seq])
+                exec_state = self._pending_activities[seq]
+                # Encode the args once (reused across retries); the step
+                # decodes them against the activity's signature.
+                exec_state.args = await conversion.encode_values(exec_state.args)
+                self._launch_attempt(exec_state)
             elif kind == "child":
                 await self._start_child(self._pending_children[seq])
                 progressed = True  # the start future resolved either way
             elif kind == "send":
                 target, envelope, future, resolve_chain = self._pending_sends.pop(seq)
+                if isinstance(envelope, dict) and envelope.get("kind") == "signal":
+                    # Encode the signal args here (real loop), not in workflow
+                    # code, so a codec's async work stays off the virtual loop.
+                    envelope = {
+                        **envelope,
+                        "args": await conversion.encode_values(
+                            envelope.get("args", [])
+                        ),
+                    }
                 # send_async is checkpointed; awaited inline so its
                 # function_id claim stays at a deterministic position. The
                 # chain resolution is a live read, but that's safe: on
@@ -1018,10 +1090,7 @@ class Interpreter(_Runtime):
                         )
                     )
                 return
-            if not self._own_queue_resolved:
-                status = await DBOS.get_workflow_status_async(self._workflow_id)
-                self._own_queue_name = status.queue_name if status else None
-                self._own_queue_resolved = True
+            await self._resolve_own_queue()
             queue_name = child.task_queue or self._own_queue_name
             child_queue = None
             if queue_name is not None:
@@ -1038,13 +1107,16 @@ class Interpreter(_Runtime):
             await DBOS.set_event_async(
                 inbox.CHILDREN_EVENT_KEY, list(self._children_registry)
             )
+            # Encode the child's run args (its interpreter decodes against the
+            # child run signature), like a client start.
+            child_payload = await conversion.encode_values(child.args)
             with SetWorkflowID(child.child_id):
                 if child_queue is not None:
-                    await child_queue.enqueue_async(dispatch_fn, list(child.args))
+                    await child_queue.enqueue_async(dispatch_fn, child_payload)
                 else:
                     # Parent wasn't queue-dispatched (Phase 0 helpers):
                     # start the child directly in-process.
-                    await DBOS.start_workflow_async(dispatch_fn, list(child.args))
+                    await DBOS.start_workflow_async(dispatch_fn, child_payload)
         except Exception as err:  # noqa: BLE001
             del self._pending_children[child.seq]
             if not child.start_future.cancelled():
@@ -1055,7 +1127,25 @@ class Interpreter(_Runtime):
         child.started = True
         if not child.start_future.cancelled():
             child.start_future.set_result(None)
-        self._launch_waiter("child", child.seq, _await_child_result(child.child_id))
+        self._launch_waiter("child", child.seq, self._await_child_result_decoded(child))
+
+    async def _await_child_result_decoded(self, child: _ChildExec) -> Dict[str, Any]:
+        """Await the child's outcome, then decode a successful result against
+        the child type's run signature (the decode rides outside the recorded
+        step, so it replays deterministically from the recorded envelope)."""
+        envelope: Dict[str, Any] = await _await_child_result(child.child_id)
+        if envelope.get("ok"):
+            from . import registry
+
+            try:
+                ret_type = registry.lookup_workflow(child.type_name).ret_type
+            except KeyError:
+                ret_type = None  # child registered on another worker
+            envelope = {
+                **envelope,
+                "result": await conversion.decode_value(envelope["result"], ret_type),
+            }
+        return envelope
 
     async def _sweep_cancellations(self) -> None:
         """Retire activities and children whose virtual-loop futures were
@@ -1137,9 +1227,36 @@ class Interpreter(_Runtime):
             "workflow_run_id": self._workflow_id,
             "workflow_type": self._defn.name,
         }
-        # The step wrapper assigns its function_id synchronously here.
-        coro = step_fn(exec_state.args, exec_state.start_to_close, meta)
-        self._launch_waiter("activity", exec_state.seq, coro)
+        # Call step_fn synchronously so its function_id is claimed here (a
+        # deterministic position); the result decode rides outside the
+        # recorded step, replaying from the recorded envelope.
+        step_coro = step_fn(exec_state.args, exec_state.start_to_close, meta)
+        self._launch_waiter(
+            "activity",
+            exec_state.seq,
+            self._decode_activity_result(step_coro, exec_state),
+        )
+
+    async def _decode_activity_result(
+        self, step_coro: Coroutine[Any, Any, Dict[str, Any]], exec_state: _ActivityExec
+    ) -> Dict[str, Any]:
+        envelope: Dict[str, Any] = await step_coro
+        if envelope.get("ok"):
+            from . import registry
+
+            ret_type = exec_state.result_type
+            if ret_type is None:
+                try:
+                    ret_type = registry.lookup_activity(
+                        exec_state.activity_name
+                    ).ret_type
+                except KeyError:
+                    ret_type = None
+            envelope = {
+                **envelope,
+                "result": await conversion.decode_value(envelope["result"], ret_type),
+            }
+        return envelope
 
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):
@@ -1151,8 +1268,15 @@ class Interpreter(_Runtime):
 
     async def _flush_outbox(self) -> None:
         # set_event is checkpointed per call: replay re-flushes identically.
+        # The outbox holds only update/query reply payloads; encode a present
+        # "result" (the client decodes it against the handler's signature).
         outbox, self._outbox = self._outbox, []
         for key, value in outbox:
+            if isinstance(value, dict) and "result" in value:
+                value = {
+                    **value,
+                    "result": await conversion.encode_value(value["result"]),
+                }
             await DBOS.set_event_async(key, value)
 
     # ------------------------------------------------------------------
@@ -1324,8 +1448,8 @@ class Interpreter(_Runtime):
         # lives at a later run, and each closed run already swept the
         # children *it* started, so only the current run's registry matters.
         current = await self._resolve_current_run(child_id)
-        status = await DBOS.get_workflow_status_async(current)
-        if status is None or status.status not in ("PENDING", "ENQUEUED", "DELAYED"):
+        fields = await _safe_status(current)
+        if fields is None or fields["status"] not in ("PENDING", "ENQUEUED", "DELAYED"):
             return  # already terminal (or stuck); don't clobber its status
         await DBOS.cancel_workflow_async(current)
         grandchildren = await DBOS.get_event_async(current, inbox.CHILDREN_EVENT_KEY, 0)
@@ -1393,15 +1517,23 @@ class Interpreter(_Runtime):
         self._advance_time(envelope.get("sent_at"))
         kind = envelope["kind"]
         if kind == "signal":
-            self._apply_signal(envelope)
+            # Decode happens inside _apply_signal's handler branch, NOT here: a
+            # signal with no handler is buffered and may be forwarded across a
+            # continue-as-new, so it must keep its *encoded* args for the
+            # consuming run to decode against that run's handler signature.
+            await self._apply_signal(envelope)
         elif kind == "update":
+            # Updates/queries always have a handler (an unknown one is rejected,
+            # never buffered/forwarded), so decode against its signature here.
+            envelope = await self._decode_message_args(envelope)
             await self._apply_update(envelope)
         elif kind == "query":
+            envelope = await self._decode_message_args(envelope)
             self._apply_query(envelope)
         elif kind == "activity_result":
-            self._apply_activity_result(envelope)
+            await self._apply_activity_result(envelope)
         elif kind == "activity_heartbeat":
-            self._apply_activity_heartbeat(envelope)
+            await self._apply_activity_heartbeat(envelope)
         elif kind == "cancel":
             self._apply_cancel(envelope)
         else:
@@ -1409,13 +1541,26 @@ class Interpreter(_Runtime):
                 "Workflow %s: unknown inbox envelope kind %r", self._workflow_id, kind
             )
 
+    async def _decode_message_args(self, envelope: inbox.Envelope) -> inbox.Envelope:
+        kind = envelope["kind"]
+        defn: Any = None
+        if kind == "signal":
+            defn = self._defn.signals.get(envelope["name"])
+        elif kind == "update":
+            defn = self._defn.updates.get(envelope["name"])
+        elif kind == "query":
+            defn = self._defn.queries.get(envelope["name"])
+        arg_types = defn.arg_types if defn is not None else None
+        decoded = await conversion.decode_values(envelope.get("args", []), arg_types)
+        return {**envelope, "args": decoded}
+
     def _async_pending_by_id(self, activity_id: str) -> Optional[_ActivityExec]:
         for exec_state in self._pending_activities.values():
             if exec_state.activity_id == activity_id and exec_state.async_pending:
                 return exec_state
         return None
 
-    def _apply_activity_result(self, envelope: inbox.Envelope) -> None:
+    async def _apply_activity_result(self, envelope: inbox.Envelope) -> None:
         """External completion of an async activity
         (client.get_async_activity_handle). Checkpointed inbox delivery, so
         the resolution replays identically; failures consult the retry
@@ -1439,7 +1584,14 @@ class Interpreter(_Runtime):
         elif envelope["ok"]:
             del self._pending_activities[seq]
             activity_api._forget_attempt_state((self._workflow_id, seq))
-            exec_state.future.set_result(envelope.get("result"))
+            from . import registry
+
+            try:
+                ret_type = registry.lookup_activity(exec_state.activity_name).ret_type
+            except KeyError:
+                ret_type = None
+            result = await conversion.decode_value(envelope.get("result"), ret_type)
+            exec_state.future.set_result(result)
         else:
             # An external fail goes through the retry policy, like Temporal:
             # the next attempt re-runs the activity function (which may park
@@ -1516,7 +1668,7 @@ class Interpreter(_Runtime):
             "act_hb", seq, DBOS.sleep_async(exec_state.heartbeat_timeout)
         )
 
-    def _apply_activity_heartbeat(self, envelope: inbox.Envelope) -> None:
+    async def _apply_activity_heartbeat(self, envelope: inbox.Envelope) -> None:
         """Heartbeat for an async-pending activity from the external
         completer; refreshes the parked heartbeat-timeout window, and the
         details surface on the next retry attempt (in-process, like
@@ -1525,8 +1677,8 @@ class Interpreter(_Runtime):
         exec_state = self._async_pending_by_id(activity_id)
         if exec_state is not None:
             exec_state.async_hb_seen = True
-            activity_api._heartbeat_store[(self._workflow_id, exec_state.seq)] = list(
-                envelope.get("details", [])
+            activity_api._heartbeat_store[(self._workflow_id, exec_state.seq)] = (
+                await conversion.decode_values(envelope.get("details", []))
             )
 
     def _apply_cancel(self, envelope: inbox.Envelope) -> None:
@@ -1545,11 +1697,15 @@ class Interpreter(_Runtime):
         if self._primary_task is not None and not self._primary_task.done():
             self._vloop.call_soon(self._primary_task.cancel)
 
-    def _apply_signal(self, envelope: inbox.Envelope) -> None:
+    async def _apply_signal(self, envelope: inbox.Envelope) -> None:
         defn = self._defn.signals.get(envelope["name"])
         if defn is None:
-            # Buffered for delivery if a handler is registered later
-            # (dynamic registration arrives in Phase 2).
+            # Buffered with its *encoded* args for delivery if a handler is
+            # registered later (dynamic registration arrives in Phase 2) or, more
+            # commonly, for forwarding across a continue-as-new. Decoding here
+            # would corrupt that forward path (the next run re-decodes against
+            # its own handler signature, and the JSON serializer would choke on
+            # raw user values at the send checkpoint).
             self._buffered_signals.setdefault(envelope["name"], []).append(envelope)
             logger.debug(
                 "Workflow %s: buffering signal %r with no handler",
@@ -1557,8 +1713,9 @@ class Interpreter(_Runtime):
                 envelope["name"],
             )
             return
+        decoded = await self._decode_message_args(envelope)
         self._spawn_handler(
-            self._run_signal_handler(defn.fn, envelope["args"]),
+            self._run_signal_handler(defn.fn, decoded["args"]),
             kind="signal",
             name=defn.name,
             policy=defn.unfinished_policy,
@@ -1808,9 +1965,11 @@ class Interpreter(_Runtime):
     def runtime_has_last_completion_result(self) -> bool:
         return self._meta.last_completion is not None
 
-    def runtime_last_completion_result(self) -> Any:
+    def runtime_last_completion_result(self, type_hint: Optional[type] = None) -> Any:
         last = self._meta.last_completion
-        return last["value"] if last is not None else None
+        if last is None:
+            return None
+        return conversion.decode_value_sync(last["value"], type_hint)
 
     def runtime_last_failure(self) -> Optional[BaseException]:
         env = self._meta.last_failure
@@ -1875,6 +2034,12 @@ class Interpreter(_Runtime):
         self._commands.append(("send", seq))
         await future
 
+    async def _resolve_own_queue(self) -> None:
+        if not self._own_queue_resolved:
+            fields = await _safe_status(self._workflow_id)
+            self._own_queue_name = fields["queue_name"] if fields else None
+            self._own_queue_resolved = True
+
     async def _resolve_current_run(self, workflow_id: str) -> str:
         """Resolve a Temporal workflow id to its current run's DBOS id
         (§6.4 run chains) via exact-id probes (ids.resolve_latest_run; no
@@ -1884,8 +2049,8 @@ class Interpreter(_Runtime):
         """
 
         async def lookup(dbos_ids: Sequence[str]) -> Dict[str, Any]:
-            statuses = await DBOS.list_workflows_async(workflow_ids=list(dbos_ids))
-            return {status.workflow_id: status for status in statuses}
+            result: Dict[str, Any] = await _safe_status_list(list(dbos_ids))
+            return result
 
         resolved = await ids.resolve_latest_run(workflow_id, lookup)
         return ids.run_dbos_id(workflow_id, resolved[0]) if resolved else workflow_id

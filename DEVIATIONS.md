@@ -279,3 +279,32 @@ round-trips, and several paths are polled (queue dequeue ~1s default,
 child-result polling, client event fallback). Baselines are published in
 `docs/perf.md` (~8ms/event first execution, ~1.7ms replay on localhost
 Postgres) rather than hidden. Tunable; not removable.
+
+### D21. Data conversion: JSON transport, no protobuf payloads, a few codec-exempt values
+
+Payloads are converted through a temporalio-shaped `DataConverter` (default
+JSON + type-hint reconstruction; custom
+`DataConverter`/`PayloadConverter`/`PayloadCodec` via the `data_converter=`
+argument to `Worker`/`Client`). The on-disk format is readable JSON, not
+pickle: a user value is stored as a small payload dict (`{"encoding":
+"json/plain", "json": <value>}` inline, or base64 for binary / codec-encrypted
+bytes), so DBOS tooling (Conductor, `list_workflows`) shows the actual fields
+rather than an opaque blob. Two deviations:
+
+- **No protobuf payloads.** The `json/protobuf` / `binary/protobuf` encoders
+  are not provided — a corollary of D1 (without other-language clients a
+  cross-language protobuf schema buys nothing). A raw `protobuf.Message`
+  payload falls through to the JSON encoder and fails *loudly* at encode time,
+  not silently.
+- **A `PayloadCodec` is skipped on a few synchronously-serialized values:**
+  failure `details` / `last_heartbeat_details` and cron `last_completion` ride
+  the (sync) payload converter without the async codec, so a codec that
+  encrypts at rest will not cover those specific fields. Workflow/activity/
+  message arguments and results — the bulk of payloads — do get the codec.
+  (Upstreamable: an async failure-serialization path would close this.)
+
+Internally, in-workflow reads of DBOS's own `WorkflowStatus` go through a step
+that checkpoints only the JSON-safe fields we use (`status`, `queue_name`,
+`parent_workflow_id`) — a whole `WorkflowStatus` is not JSON-serializable. This
+is invisible to users and preserves the checkpoint (and thus determinism)
+exactly, just serializably.

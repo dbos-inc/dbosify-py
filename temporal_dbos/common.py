@@ -8,14 +8,31 @@ facade in Phase 1.
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import IntEnum
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
+
+if TYPE_CHECKING:
+    from .converter import Payload
 
 __all__ = [
     "QueryRejectCondition",
+    "RawValue",
     "RetryPolicy",
     "WorkflowIDReusePolicy",
     "WorkflowIDConflictPolicy",
 ]
+
+
+@dataclass(frozen=True)
+class RawValue:
+    """Representation of an unconverted, raw payload, mirroring
+    ``temporalio.common.RawValue``.
+
+    Use as a parameter or return type in workflows, activities, signals, and
+    queries to pass a payload through without conversion; the system still
+    encodes/decodes the payload bytes.
+    """
+
+    payload: "Payload"
 
 
 @dataclass(frozen=True)

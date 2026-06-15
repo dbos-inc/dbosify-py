@@ -175,7 +175,7 @@ class DeterminismProbe:
 def test_activities_and_sleep() -> None:
     dispatcher.register_worker(workflows=[GreetingWorkflow], activities=[compose])
     handle = dispatcher.start_workflow(GreetingWorkflow, ["world"], workflow_id="greet")
-    assert handle.get_result() == "hello-world-1|hello-world-2"
+    assert dispatcher.workflow_result(handle) == "hello-world-1|hello-world-2"
 
 
 @pytest.mark.usefixtures("tdb")
@@ -183,7 +183,7 @@ def test_signal_and_wait_condition() -> None:
     dispatcher.register_worker(workflows=[ApprovalWorkflow])
     handle = dispatcher.start_workflow(ApprovalWorkflow, [], workflow_id="approval")
     dispatcher.signal_workflow("approval", "approve", ["alice"])
-    assert handle.get_result() == "approved by alice"
+    assert dispatcher.workflow_result(handle) == "approved by alice"
 
 
 @pytest.mark.usefixtures("tdb")
@@ -204,7 +204,7 @@ def test_updates_queries_and_validator() -> None:
     assert dispatcher.query_workflow("counter", "current") == 8
 
     dispatcher.signal_workflow("counter", "finish")
-    assert handle.get_result() == 8
+    assert dispatcher.workflow_result(handle) == 8
 
 
 @pytest.mark.usefixtures("tdb")
@@ -216,7 +216,7 @@ def test_gather_with_retry_exhaustion() -> None:
         workflows=[GatherWorkflow], activities=[compose, always_fails]
     )
     handle = dispatcher.start_workflow(GatherWorkflow, ["k1"], workflow_id="gather")
-    result = handle.get_result()
+    result = dispatcher.workflow_result(handle)
     assert result["ok_results"] == ["hello-g-1", "hello-g-2"]
     assert result["error_type"] == "ActivityError"
     assert result["activity_type"] == "always_fails"
@@ -257,7 +257,7 @@ def test_buggy_workflow_stays_running_until_fixed(
             return "fixed"
 
     dispatcher.register_worker(workflows=[BuggyV2])
-    assert handle.get_result() == "fixed"
+    assert dispatcher.workflow_result(handle) == "fixed"
 
 
 @pytest.mark.usefixtures("tdb")
@@ -276,7 +276,7 @@ def test_failure_exception_types_fail_workflow(
     dispatcher.register_worker(workflows=[FailsProperly])
     handle = dispatcher.start_workflow("FailsProperly", [], workflow_id="fails")
     with pytest.raises(Exception) as exc_info:
-        handle.get_result()
+        dispatcher.workflow_result(handle)
     assert "fail the workflow" in str(exc_info.value)
     assert dispatcher.workflow_status("fails") == "ERROR"
 
@@ -285,7 +285,7 @@ def test_failure_exception_types_fail_workflow(
 def test_deterministic_helpers_run() -> None:
     dispatcher.register_worker(workflows=[DeterminismProbe])
     handle = dispatcher.start_workflow("DeterminismProbe", [], workflow_id="probe")
-    values = handle.get_result()
+    values = dispatcher.workflow_result(handle)
     assert len(values) == 3 and all(isinstance(v, str) for v in values)
 
 
@@ -295,7 +295,7 @@ def test_workflow_wait_and_as_completed() -> None:
     and as_completed yields awaitables in completion order."""
     dispatcher.register_worker(workflows=[WaitRaceWorkflow], activities=[slow_compose])
     handle = dispatcher.start_workflow(WaitRaceWorkflow, [], workflow_id="wait-race")
-    result = handle.get_result()
+    result = dispatcher.workflow_result(handle)
     assert result == {
         "first_done": "timer",
         "done_type": "list",

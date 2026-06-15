@@ -206,14 +206,20 @@ class SerializedContinueAsNew(Exception):
 
 
 def serialize_failure(exc: BaseException) -> FailureEnvelope:
+    # Encode embedded user values (details, heartbeat details) through the
+    # converter so failure envelopes are JSON-safe. Sync (no codec — like
+    # query results); serialize_failure runs in deep sync call sites.
+    from . import conversion
+
     env: FailureEnvelope
     if isinstance(exc, exceptions.ApplicationError):
         env = {
             "cls": "ApplicationError",
             "message": exc.message,
             "type": exc.type,
-            "details": list(exc.details),
+            "details": conversion.encode_values_sync(list(exc.details)),
             "non_retryable": exc.non_retryable,
+            "category": int(exc.category),
             "next_retry_delay": (
                 exc.next_retry_delay.total_seconds()
                 if exc.next_retry_delay is not None
@@ -224,20 +230,22 @@ def serialize_failure(exc: BaseException) -> FailureEnvelope:
         env = {
             "cls": "CancelledError",
             "message": exc.message,
-            "details": list(exc.details),
+            "details": conversion.encode_values_sync(list(exc.details)),
         }
     elif isinstance(exc, exceptions.TerminatedError):
         env = {
             "cls": "TerminatedError",
             "message": exc.message,
-            "details": list(exc.details),
+            "details": conversion.encode_values_sync(list(exc.details)),
         }
     elif isinstance(exc, exceptions.TimeoutError):
         env = {
             "cls": "TimeoutError",
             "message": exc.message,
             "timeout_type": int(exc.type) if exc.type is not None else None,
-            "last_heartbeat_details": list(exc.last_heartbeat_details),
+            "last_heartbeat_details": conversion.encode_values_sync(
+                list(exc.last_heartbeat_details)
+            ),
         }
     elif isinstance(exc, exceptions.ActivityError):
         env = {
@@ -285,17 +293,27 @@ def deserialize_failure(env: FailureEnvelope) -> exceptions.FailureError:
     exc: exceptions.FailureError
     if cls == "ApplicationError":
         delay = env.get("next_retry_delay")
+        category = env.get("category")
         exc = exceptions.ApplicationError(
             env["message"],
-            *env.get("details", []),
+            *_decode_details(env.get("details", [])),
             type=env.get("type"),
             non_retryable=bool(env.get("non_retryable", False)),
             next_retry_delay=timedelta(seconds=delay) if delay is not None else None,
+            category=(
+                exceptions.ApplicationErrorCategory(category)
+                if category is not None
+                else exceptions.ApplicationErrorCategory.UNSPECIFIED
+            ),
         )
     elif cls == "CancelledError":
-        exc = exceptions.CancelledError(env["message"], *env.get("details", []))
+        exc = exceptions.CancelledError(
+            env["message"], *_decode_details(env.get("details", []))
+        )
     elif cls == "TerminatedError":
-        exc = exceptions.TerminatedError(env["message"], *env.get("details", []))
+        exc = exceptions.TerminatedError(
+            env["message"], *_decode_details(env.get("details", []))
+        )
     elif cls == "TimeoutError":
         timeout_type = env.get("timeout_type")
         exc = exceptions.TimeoutError(
@@ -305,7 +323,9 @@ def deserialize_failure(env: FailureEnvelope) -> exceptions.FailureError:
                 if timeout_type is not None
                 else None
             ),
-            last_heartbeat_details=env.get("last_heartbeat_details", []),
+            last_heartbeat_details=_decode_details(
+                env.get("last_heartbeat_details", [])
+            ),
         )
     elif cls == "ActivityError":
         exc = exceptions.ActivityError(
@@ -339,3 +359,11 @@ def deserialize_failure(env: FailureEnvelope) -> exceptions.FailureError:
 
 def _retry_state(value: Optional[int]) -> Optional[exceptions.RetryState]:
     return exceptions.RetryState(value) if value is not None else None
+
+
+def _decode_details(items: Sequence[Any]) -> List[Any]:
+    """Decode failure detail payloads back to user values (no codec, no hint —
+    details are an untyped bag, as in temporalio)."""
+    from . import conversion
+
+    return [conversion.decode_value_sync(d) for d in items]

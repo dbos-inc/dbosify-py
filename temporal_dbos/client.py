@@ -10,6 +10,7 @@ Parameters not yet honored are accepted and ignored with a debug log.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid as uuid_mod
@@ -22,7 +23,7 @@ from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 
 from . import exceptions
-from ._internal import ids, inbox
+from ._internal import conversion, ids, inbox
 from ._internal import registry as _registry
 from ._internal import schedules as _schedules
 from ._internal import status as _status
@@ -35,6 +36,7 @@ from ._internal.payloads import (
     serialize_retry_policy,
     wrap_input,
 )
+from ._internal.serializer import TEMPORAL_SERIALIZER
 from ._internal.status import WorkflowExecutionStatus
 from .common import (
     QueryRejectCondition,
@@ -42,6 +44,7 @@ from .common import (
     WorkflowIDConflictPolicy,
     WorkflowIDReusePolicy,
 )
+from .converter import DataConverter
 from .workflow import _UpdateMethod
 
 # How often reply waits (update acceptance/result, query replies) re-check
@@ -156,7 +159,8 @@ class WorkflowUpdateHandle:
         self._id = id
         self._workflow_id = workflow_id
         self._workflow_run_id = workflow_run_id
-        self._known_outcome = known_outcome  # result_type unused (pickle)
+        self._known_outcome = known_outcome
+        self._result_type = result_type
 
     @property
     def id(self) -> str:
@@ -196,7 +200,7 @@ class WorkflowUpdateHandle:
                 raise TimeoutError(f"update did not complete within {timeout}s")
             self._known_outcome = outcome
         if outcome["status"] == "completed":
-            return outcome["result"]
+            return await conversion.decode_value(outcome["result"], self._result_type)
         raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
 
 
@@ -269,9 +273,10 @@ class AsyncActivityHandle:
     ) -> None:
         """Complete the activity with a result."""
         _ignore_rpc_options("async activity complete", rpc_metadata, rpc_timeout)
+        value = None if result is _arg_unset else result
         await self._send(
             inbox.activity_result_envelope(
-                self._activity_id, result=None if result is _arg_unset else result
+                self._activity_id, result=await conversion.encode_value(value)
             )
         )
 
@@ -302,7 +307,9 @@ class AsyncActivityHandle:
         """Send a heartbeat for the activity."""
         _ignore_rpc_options("async activity heartbeat", rpc_metadata, rpc_timeout)
         await self._send(
-            inbox.activity_heartbeat_envelope(self._activity_id, list(details))
+            inbox.activity_heartbeat_envelope(
+                self._activity_id, await conversion.encode_values(list(details))
+            )
         )
 
     async def report_cancellation(
@@ -439,6 +446,22 @@ def _workflow_type_name(workflow: Any) -> str:
     )
 
 
+def _result_type_for(workflow: Any, result_type: Optional[type]) -> Optional[type]:
+    """The type to rebuild a workflow's result into: an explicit ``result_type``
+    wins; otherwise infer the run method's return annotation — from the local
+    registry, or (thin client, no worker) from a passed run-method reference."""
+    if result_type is not None:
+        return result_type
+    try:
+        return _registry.lookup_workflow(_workflow_type_name(workflow)).ret_type
+    except (KeyError, TypeError):
+        pass
+    if inspect.isfunction(workflow):
+        _, ret = conversion.type_hints_from_func(workflow)
+        return ret
+    return None
+
+
 def _signal_name(signal: Any) -> str:
     if isinstance(signal, str):
         return signal
@@ -463,6 +486,29 @@ def _update_name(update: Any) -> str:
     if isinstance(update, _UpdateMethod):
         return update.name
     raise TypeError(f"{update!r} is not a @workflow.update method or name")
+
+
+def _install_serializer(dbos_client: DBOSClient) -> None:
+    """Install the JSON transport serializer on a (user-created) DBOSClient so
+    it matches the Worker's (DBOS selects the deserializer by row label and
+    rejects a mismatch). Relies on DBOS internals (no public setter)."""
+    dbos_client._serializer = TEMPORAL_SERIALIZER
+    sys_db = getattr(dbos_client, "_sys_db", None)
+    if sys_db is not None:
+        sys_db.serializer = TEMPORAL_SERIALIZER
+
+
+def _ref_ret_type(ref: Any, result_type: Optional[type]) -> Optional[type]:
+    """Result type for an update/query reply: an explicit ``result_type``
+    wins, else the handler reference's return annotation (a ``_UpdateMethod``
+    carries its function in ``.fn``; a query method is the function itself)."""
+    if result_type is not None:
+        return result_type
+    fn = ref.fn if isinstance(ref, _UpdateMethod) else ref
+    if inspect.isfunction(fn):
+        _, ret = conversion.type_hints_from_func(fn)
+        return ret
+    return None
 
 
 def _resolve_args(arg: Any, args: Sequence[Any]) -> List[Any]:
@@ -502,21 +548,35 @@ class Client:
         self,
         dbos_client: DBOSClient,
         *,
+        data_converter: DataConverter = DataConverter.default,
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
         self._dbos_client = dbos_client
+        self._data_converter = data_converter
         self._default_query_reject_condition = default_workflow_query_reject_condition
+        # This process encodes start args / decodes results with this
+        # converter (a separate worker process decodes args / encodes results
+        # with its own — configure both the same, as in Temporal).
+        conversion.set_converter(data_converter)
+        _install_serializer(dbos_client)
+
+    @property
+    def data_converter(self) -> DataConverter:
+        """Data converter used by this client."""
+        return self._data_converter
 
     @classmethod
     async def connect(
         cls,
         dbos_client: DBOSClient,
         *,
+        data_converter: DataConverter = DataConverter.default,
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
         """Create a client from a ``dbos.DBOSClient``."""
         return cls(
             dbos_client,
+            data_converter=data_converter,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
         )
 
@@ -563,7 +623,6 @@ class Client:
         runs are chained like continue-as-new runs).
         """
         for key, value in {
-            "result_type": result_type,
             "execution_timeout": execution_timeout,
             "task_timeout": task_timeout,
             "memo": memo,
@@ -585,6 +644,7 @@ class Client:
             # no worker can ever dequeue — a silent black hole.
             raise ValueError("task_queue must be a non-empty string")
         type_name = _workflow_type_name(workflow)
+        result_type = _result_type_for(workflow, result_type)
         workflow_args = _resolve_args(arg, args)
         ids.validate_workflow_id(id)
         if start_delay is not None and start_delay < timedelta(0):
@@ -631,7 +691,12 @@ class Client:
                 # Conflict policies (vs a RUNNING run). There is an inherent
                 # TOCTOU window here, accepted for v1 (DESIGN §6.4).
                 if id_conflict_policy == WorkflowIDConflictPolicy.USE_EXISTING:
-                    return WorkflowHandle(self, id, run_id=current_status.workflow_id)
+                    return WorkflowHandle(
+                        self,
+                        id,
+                        run_id=current_status.workflow_id,
+                        result_type=result_type,
+                    )
                 if (
                     id_conflict_policy == WorkflowIDConflictPolicy.TERMINATE_EXISTING
                     or id_reuse_policy == WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
@@ -668,12 +733,16 @@ class Client:
             options["workflow_timeout"] = run_timeout.total_seconds()
         if start_delay is not None:
             options["delay_seconds"] = start_delay.total_seconds()
-        await self._dbos_client.enqueue_async(options, wrap_input(workflow_args, meta))
+        await self._dbos_client.enqueue_async(
+            options, wrap_input(await conversion.encode_values(workflow_args), meta)
+        )
 
         if start_signal is not None:
             await self._dbos_client.send_async(
                 dbos_id,
-                inbox.signal_envelope(start_signal, list(start_signal_args)),
+                inbox.signal_envelope(
+                    start_signal, await conversion.encode_values(start_signal_args)
+                ),
                 inbox.INBOX_TOPIC,
             )
         # Like temporalio, the returned handle is NOT run-bound: signals,
@@ -688,6 +757,7 @@ class Client:
             # The run THIS start created (a reuse start "begins" at its own
             # run), matching temporalio's response semantics.
             first_execution_run_id=dbos_id,
+            result_type=result_type,
         )
 
     async def execute_workflow(
@@ -765,6 +835,7 @@ class Client:
             workflow_id,
             run_id=run_id,
             first_execution_run_id=first_execution_run_id,
+            result_type=result_type,
         )
 
     def get_workflow_handle_for(
@@ -777,7 +848,10 @@ class Client:
     ) -> "WorkflowHandle":
         """Typed variant of :py:meth:`get_workflow_handle`."""
         return self.get_workflow_handle(
-            workflow_id, run_id=run_id, first_execution_run_id=first_execution_run_id
+            workflow_id,
+            run_id=run_id,
+            first_execution_run_id=first_execution_run_id,
+            result_type=_result_type_for(workflow, None),
         )
 
     async def start_update_with_start_workflow(
@@ -987,12 +1061,14 @@ class WorkflowHandle:
         run_id: Optional[str] = None,
         result_run_id: Optional[str] = None,
         first_execution_run_id: Optional[str] = None,
+        result_type: Optional[type] = None,
     ) -> None:
         self._client = client
         self._id = id
         self._run_id = run_id
         self._result_run_id = result_run_id
         self._first_execution_run_id = first_execution_run_id
+        self._result_type = result_type
 
     @property
     def id(self) -> str:
@@ -1039,7 +1115,8 @@ class WorkflowHandle:
         while True:
             handle: Any = await runtime_client.retrieve_workflow_async(dbos_id)
             try:
-                return await handle.get_result()
+                raw = await handle.get_result()
+                return await conversion.decode_value(raw, self._result_type)
             except SerializedContinueAsNew as marker:
                 new_run_id: str = marker.envelope["new_run_id"]
                 if not follow_runs:
@@ -1084,9 +1161,10 @@ class WorkflowHandle:
     ) -> None:
         """Send a signal to the workflow."""
         _ignore_rpc_options("signal", rpc_metadata, None)
+        encoded = await conversion.encode_values(_resolve_args(arg, args))
         await self._client._dbos_client.send_async(
             await self._target(),
-            inbox.signal_envelope(_signal_name(signal), _resolve_args(arg, args)),
+            inbox.signal_envelope(_signal_name(signal), encoded),
             inbox.INBOX_TOPIC,
         )
 
@@ -1125,7 +1203,9 @@ class WorkflowHandle:
         await client.send_async(
             target,
             inbox.query_envelope(
-                _query_name(query), _resolve_args(arg, args), request_id
+                _query_name(query),
+                await conversion.encode_values(_resolve_args(arg, args)),
+                request_id,
             ),
             inbox.INBOX_TOPIC,
         )
@@ -1138,7 +1218,9 @@ class WorkflowHandle:
                 "require a RUNNING workflow; see README deviations)"
             )
         if reply["status"] == "completed":
-            return reply["result"]
+            return await conversion.decode_value(
+                reply["result"], _ref_ret_type(query, result_type)
+            )
         raise WorkflowQueryFailedError(str(deserialize_failure(reply["failure"])))
 
     async def start_update(
@@ -1170,13 +1252,19 @@ class WorkflowHandle:
         await client.send_async(
             target,
             inbox.update_envelope(
-                _update_name(update), _resolve_args(arg, args), update_id
+                _update_name(update),
+                await conversion.encode_values(_resolve_args(arg, args)),
+                update_id,
             ),
             inbox.INBOX_TOPIC,
             idempotency_key=update_id,
         )
         handle = WorkflowUpdateHandle(
-            self._client, update_id, self._id, workflow_run_id=target
+            self._client,
+            update_id,
+            self._id,
+            workflow_run_id=target,
+            result_type=_ref_ret_type(update, result_type),
         )
         if wait_for_stage == WorkflowUpdateStage.ACCEPTED:
             acceptance = await self._client._await_reply_event(

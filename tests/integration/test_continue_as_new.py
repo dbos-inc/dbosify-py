@@ -4,6 +4,7 @@ message carryover, run-timeout carry, and child chains.
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, AsyncIterator, Awaitable, Callable, List, Optional
 
@@ -183,9 +184,58 @@ class HandlerHopWorkflow:
 
 @workflow.defn
 class TypeSwitchWorkflow:
+    # Annotated with the chain's eventual result type (LoopingWorkflow returns
+    # List[str]); the client infers result_type from this run signature, and a
+    # mismatched annotation would now fail to decode — matching temporalio's
+    # type-faithful result conversion rather than pickle's exact-object pass.
+    @workflow.run
+    async def run(self) -> List[str]:
+        workflow.continue_as_new(args=[["switched"], 0], workflow=LoopingWorkflow.run)
+
+
+@dataclass
+class Note:
+    text: str
+
+
+@workflow.defn
+class SignalForwarderWorkflow:
+    """Run 1: has NO ``deliver`` handler, so a ``deliver`` signal is buffered
+    and must be forwarded (still encoded) across the continue-as-new to run 2.
+    A handled ``go`` signal triggers the hop deterministically."""
+
+    def __init__(self) -> None:
+        self.ready = False
+
+    @workflow.signal
+    def go(self) -> None:
+        self.ready = True
+
     @workflow.run
     async def run(self) -> str:
-        workflow.continue_as_new(args=[["switched"], 0], workflow=LoopingWorkflow.run)
+        await workflow.wait_condition(lambda: self.ready)
+        workflow.continue_as_new(workflow=SignalReceiverWorkflow.run)
+
+
+@workflow.defn
+class SignalReceiverWorkflow:
+    """Run 2: a different type that DOES handle ``deliver`` with a typed
+    (dataclass) arg. The forwarded buffered signal must decode against this
+    handler's signature."""
+
+    def __init__(self) -> None:
+        self.notes: List[Note] = []
+
+    @workflow.signal
+    def deliver(self, note: Note) -> None:
+        self.notes.append(note)
+
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.wait_condition(lambda: len(self.notes) > 0)
+        note = self.notes[0]
+        assert isinstance(note, Note), type(note).__name__
+        return note.text
 
 
 @workflow.defn
@@ -307,6 +357,8 @@ async def _env() -> AsyncIterator[Client]:
             CancelHopWorkflow,
             HandlerHopWorkflow,
             TypeSwitchWorkflow,
+            SignalForwarderWorkflow,
+            SignalReceiverWorkflow,
             CanThenChildWorkflow,
             BadChildIdWorkflow,
             AutoHopChild,
@@ -398,6 +450,25 @@ async def test_continue_as_new_carries_over_messages() -> None:
             await handle.signal(CarryoverWorkflow.data, x)
         await handle.signal(CarryoverWorkflow.finish)
         assert await handle.result() == ["d1", "d2", "d3", "d4", "d5"]
+
+
+async def test_buffered_typed_signal_forwarded_across_can() -> None:
+    """A signal with no handler in run 1 is buffered, then forwarded across a
+    continue-as-new to a different type that DOES handle it, where its typed
+    arg is reconstructed. Regression: the buffered envelope must keep its
+    *encoded* args — forwarding the (handler-lessly) decoded raw value crashes
+    the next run's strict decoder (KeyError 'encoding'), or the JSON serializer
+    at the send checkpoint for a non-JSON-safe value."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            SignalForwarderWorkflow.run,
+            id="buffered-signal-can",
+            task_queue=TASK_QUEUE,
+        )
+        # run 1 has no `deliver` handler -> buffered; `go` then triggers the CAN.
+        await handle.signal(SignalReceiverWorkflow.deliver, Note("hi"))
+        await handle.signal(SignalForwarderWorkflow.go)
+        assert await handle.result() == "hi"
 
 
 async def test_child_workflow_continues_as_new() -> None:

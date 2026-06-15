@@ -70,10 +70,15 @@ def defn(
     """Decorator for activity functions (sync or async)."""
 
     def decorator(fn: _F) -> _F:
+        from ._internal.conversion import type_hints_from_func
+
+        arg_types, ret_type = type_hints_from_func(fn)
         defn = _registry.ActivityDefinition(
             name=name if name is not None else fn.__name__,
             fn=fn,
             is_async=inspect.iscoroutinefunction(fn),
+            arg_types=arg_types,
+            ret_type=ret_type,
         )
         setattr(fn, _registry.ACTIVITY_DEFN_ATTR, defn)
         return fn

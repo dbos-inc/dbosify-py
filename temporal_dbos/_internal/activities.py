@@ -77,13 +77,16 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
         )
 
         async def call_user_activity() -> Dict[str, Any]:
+            from . import conversion
+
+            decoded_args = await conversion.decode_values(args, defn.arg_types)
             activity_api._register_attempt(attempt_key, ctx)
             token = activity_api._current_context.set(ctx)
             try:
                 if defn.is_async:
-                    result = await defn.fn(*args)
+                    result = await defn.fn(*decoded_args)
                 else:
-                    result = await asyncio.to_thread(defn.fn, *args)
+                    result = await asyncio.to_thread(defn.fn, *decoded_args)
             except Exception as err:  # noqa: BLE001 — serialized, not swallowed
                 return {
                     "ok": False,
@@ -93,7 +96,11 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             finally:
                 activity_api._current_context.reset(token)
                 activity_api._unregister_attempt(attempt_key, ctx)
-            return {"ok": True, "result": result, "ended_at": time_mod.time()}
+            return {
+                "ok": True,
+                "result": await conversion.encode_value(result),
+                "ended_at": time_mod.time(),
+            }
 
         async def run_attempt() -> Dict[str, Any]:
             if heartbeat_timeout is None:

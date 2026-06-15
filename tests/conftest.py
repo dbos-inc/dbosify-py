@@ -67,7 +67,8 @@ def dbos(
 
 @pytest.fixture()
 def dbos_client(dbos: DBOS) -> Generator[DBOSClient, Any, None]:
-    """A DBOSClient against the same system database as the `dbos` fixture."""
+    """A DBOSClient against the same system database as the `dbos` fixture
+    (the JSON serializer default lives in tests/dbconfig.py)."""
     client = DBOSClient(system_database_url=system_database_url())
     yield client
     client.destroy()
