@@ -68,6 +68,10 @@ class Driver:
             workflow_id, inbox.update_result_key(update_id), timeout
         )
         assert reply is not None, f"update {name} timed out"
+        if isinstance(reply, dict) and "result" in reply:
+            # A completed update's result is encoded (the Client decodes it
+            # against the handler signature; here we have no hint).
+            reply["result"] = conversion.decode_value_sync(reply["result"])
         return reply
 
 

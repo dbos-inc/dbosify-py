@@ -118,6 +118,12 @@ def encode_values_sync(values: Sequence[Any]) -> List[Dict[str, Any]]:
     return [_payload_to_dict(p, inline_json=True) for p in payloads]
 
 
+def encode_value_sync(value: Any) -> Dict[str, Any]:
+    """Payload-only (no codec) single-value encode (e.g. cron last-completion,
+    read back synchronously by ``workflow.get_last_completion_result``)."""
+    return encode_values_sync([value])[0]
+
+
 def decode_value_sync(value: Any, type_hint: Optional[type] = None) -> Any:
     """Payload-only (no codec) decode for the Phase-0 dispatcher helpers."""
     payload = _payload_from_dict(value)

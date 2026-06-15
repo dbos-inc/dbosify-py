@@ -170,7 +170,11 @@ def _make_dbos_workflow(
             # requested). The run itself still closes COMPLETED.
             if not run_flags["cancel_observed"] and not _contains_cancel(carryover):
                 next_meta = meta.carried_forward()
-                next_meta.last_completion = {"value": result}
+                # Encoded (no codec — read back synchronously by
+                # get_last_completion_result, like query results).
+                next_meta.last_completion = {
+                    "value": conversion.encode_value_sync(result)
+                }
                 next_meta.last_failure = None
                 new_run_id = await _enqueue_next_run(
                     type_name,
@@ -504,7 +508,7 @@ def _unwrap_reply(reply: Any, *, kind: str, timeout_seconds: float) -> Any:
     if reply is None:
         raise TimeoutError(f"{kind} did not complete within {timeout_seconds}s")
     if reply["status"] == "completed":
-        return reply["result"]
+        return conversion.decode_value_sync(reply["result"])
     raise WorkflowUpdateFailedError(deserialize_failure(reply["failure"]))
 
 

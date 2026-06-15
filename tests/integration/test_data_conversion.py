@@ -56,6 +56,28 @@ class TypedResultWorkflow:
         return GreetRequest(greeting="Yo", name="Cy")
 
 
+@workflow.defn
+class UpdateQueryWorkflow:
+    def __init__(self) -> None:
+        self.done = False
+
+    @workflow.signal
+    def finish(self) -> None:
+        self.done = True
+
+    @workflow.update
+    def transform_update(self, req: GreetRequest) -> GreetRequest:
+        return GreetRequest(greeting=req.greeting.upper(), name=req.name)
+
+    @workflow.query
+    def echo_query(self, req: GreetRequest) -> GreetRequest:
+        return req
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self.done)
+
+
 @activity.defn
 async def transform(req: GreetRequest) -> GreetRequest:
     # Attribute access works only if the dataclass arg was reconstructed.
@@ -94,6 +116,7 @@ async def _env(
             UntypedArgWorkflow,
             TypedResultWorkflow,
             ActivityRoundtripWorkflow,
+            UpdateQueryWorkflow,
         ],
         activities=[transform],
         data_converter=data_converter,
@@ -152,6 +175,23 @@ async def test_activity_dataclass_roundtrip() -> None:
         )
     assert result == GreetRequest(greeting="HI", name="Di")
     assert isinstance(result, GreetRequest)
+
+
+async def test_typed_update_and_query_results() -> None:
+    # Dataclass args reconstructed in the handlers; dataclass results
+    # reconstructed at the client (result type inferred from the handler).
+    async with _env() as client:
+        handle = await client.start_workflow(
+            UpdateQueryWorkflow.run, id="update-query", task_queue=TASK_QUEUE
+        )
+        upd = await handle.execute_update(
+            UpdateQueryWorkflow.transform_update, GreetRequest("hey", "Al")
+        )
+        assert upd == GreetRequest("HEY", "Al") and isinstance(upd, GreetRequest)
+        q = await handle.query(UpdateQueryWorkflow.echo_query, GreetRequest("yo", "Em"))
+        assert q == GreetRequest("yo", "Em") and isinstance(q, GreetRequest)
+        await handle.signal(UpdateQueryWorkflow.finish)
+        await handle.result()
 
 
 async def test_custom_codec_roundtrips_args() -> None:

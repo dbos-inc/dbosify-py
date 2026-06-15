@@ -523,7 +523,7 @@ class _Runtime:
     def runtime_has_last_completion_result(self) -> bool:
         raise NotImplementedError
 
-    def runtime_last_completion_result(self) -> Any:
+    def runtime_last_completion_result(self, type_hint: Optional[type] = None) -> Any:
         raise NotImplementedError
 
     def runtime_last_failure(self) -> Optional[BaseException]:
@@ -704,10 +704,10 @@ def get_last_completion_result(type_hint: Optional[type] = None) -> Any:
     """The result of the chain's last successful run (carried forward across
     failed runs, as in Temporal); None if there was no previous completion
     or the result was None — use :py:func:`has_last_completion_result` to
-    tell them apart. ``type_hint`` is accepted for signature parity; pickle
-    payloads reconstruct exact objects without it (README deviation #12).
+    tell them apart. ``type_hint`` rebuilds the original type (else a plain
+    JSON value, as in temporalio).
     """
-    return _runtime().runtime_last_completion_result()
+    return _runtime().runtime_last_completion_result(type_hint)
 
 
 def get_last_failure() -> Optional[BaseException]:

@@ -158,7 +158,8 @@ class WorkflowUpdateHandle:
         self._id = id
         self._workflow_id = workflow_id
         self._workflow_run_id = workflow_run_id
-        self._known_outcome = known_outcome  # result_type unused (pickle)
+        self._known_outcome = known_outcome
+        self._result_type = result_type
 
     @property
     def id(self) -> str:
@@ -198,7 +199,7 @@ class WorkflowUpdateHandle:
                 raise TimeoutError(f"update did not complete within {timeout}s")
             self._known_outcome = outcome
         if outcome["status"] == "completed":
-            return outcome["result"]
+            return await conversion.decode_value(outcome["result"], self._result_type)
         raise WorkflowUpdateFailedError(deserialize_failure(outcome["failure"]))
 
 
@@ -481,6 +482,19 @@ def _update_name(update: Any) -> str:
     if isinstance(update, _UpdateMethod):
         return update.name
     raise TypeError(f"{update!r} is not a @workflow.update method or name")
+
+
+def _ref_ret_type(ref: Any, result_type: Optional[type]) -> Optional[type]:
+    """Result type for an update/query reply: an explicit ``result_type``
+    wins, else the handler reference's return annotation (a ``_UpdateMethod``
+    carries its function in ``.fn``; a query method is the function itself)."""
+    if result_type is not None:
+        return result_type
+    fn = ref.fn if isinstance(ref, _UpdateMethod) else ref
+    if inspect.isfunction(fn):
+        _, ret = conversion.type_hints_from_func(fn)
+        return ret
+    return None
 
 
 def _resolve_args(arg: Any, args: Sequence[Any]) -> List[Any]:
@@ -1189,7 +1203,9 @@ class WorkflowHandle:
                 "require a RUNNING workflow; see README deviations)"
             )
         if reply["status"] == "completed":
-            return reply["result"]
+            return await conversion.decode_value(
+                reply["result"], _ref_ret_type(query, result_type)
+            )
         raise WorkflowQueryFailedError(str(deserialize_failure(reply["failure"])))
 
     async def start_update(
@@ -1229,7 +1245,11 @@ class WorkflowHandle:
             idempotency_key=update_id,
         )
         handle = WorkflowUpdateHandle(
-            self._client, update_id, self._id, workflow_run_id=target
+            self._client,
+            update_id,
+            self._id,
+            workflow_run_id=target,
+            result_type=_ref_ret_type(update, result_type),
         )
         if wait_for_stage == WorkflowUpdateStage.ACCEPTED:
             acceptance = await self._client._await_reply_event(

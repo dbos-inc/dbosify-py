@@ -1224,8 +1224,15 @@ class Interpreter(_Runtime):
 
     async def _flush_outbox(self) -> None:
         # set_event is checkpointed per call: replay re-flushes identically.
+        # The outbox holds only update/query reply payloads; encode a present
+        # "result" (the client decodes it against the handler's signature).
         outbox, self._outbox = self._outbox, []
         for key, value in outbox:
+            if isinstance(value, dict) and "result" in value:
+                value = {
+                    **value,
+                    "result": await conversion.encode_value(value["result"]),
+                }
             await DBOS.set_event_async(key, value)
 
     # ------------------------------------------------------------------
@@ -1898,9 +1905,11 @@ class Interpreter(_Runtime):
     def runtime_has_last_completion_result(self) -> bool:
         return self._meta.last_completion is not None
 
-    def runtime_last_completion_result(self) -> Any:
+    def runtime_last_completion_result(self, type_hint: Optional[type] = None) -> Any:
         last = self._meta.last_completion
-        return last["value"] if last is not None else None
+        if last is None:
+            return None
+        return conversion.decode_value_sync(last["value"], type_hint)
 
     def runtime_last_failure(self) -> Optional[BaseException]:
         env = self._meta.last_failure
