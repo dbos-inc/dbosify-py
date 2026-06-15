@@ -645,9 +645,11 @@ envelope structure (`_internal/payloads.py`) wraps user payloads:
 `{type_name, payloads: [...], metadata}` so type hints survive and codecs see exactly the
 user-payload bytes. All of this is Phase 3 (default JSON was moved out of Phase 1: nothing
 in the hello conformance corpus needs it, and the pipeline should be built once, together
-with codecs). Until then payloads use DBOS's default pickle serializer — note the interim
-deviation: pickle reconstructs exact objects even without type hints, where temporalio's
-JSON converter would return plain dicts.
+with codecs). **Done:** the converter, the per-boundary conversion, and the JSON DBOS
+serializer (`_internal/serializer.py`) all shipped; pickle is gone (see DEVIATIONS D21).
+The realized envelope is a small payload dict (`{encoding, json|b64, meta?}`,
+`_internal/conversion.py`) — readable on disk — rather than the `{type_name, payloads}`
+sketch above; type hints come from signatures, codecs run at the async boundaries.
 
 ### 6.10 Testing module (`temporal_dbos.testing`)
 
@@ -793,10 +795,10 @@ fires, no clock reads), and completers notified of workflow-side cancellation
 via a checkpointed gone-event their heartbeat/complete polls
 (AsyncActivityCancelledError) — flipped `hello_cancellation` and
 `hello_async_activity_completion`, hello 15/19), `list_workflows` query parser +
-`count_workflows`, client + activity interceptors, the data-conversion pipeline (default
-JSON conversion — moved from Phase 1 — plus custom DataConverters + PayloadCodec; until
-it lands, payloads ride DBOS's default pickle serializer, a documented temporary
-deviation), memo/search-attribute storage. **Exit:** `samples-python` `schedules/`,
+`count_workflows`, client + activity interceptors, the data-conversion pipeline
+(**done**: default JSON conversion — moved from Phase 1 — plus custom DataConverters +
+PayloadCodec, per-boundary conversion, and the JSON DBOS serializer that replaces pickle;
+`contrib.pydantic` remains), memo/search-attribute storage. **Exit:** `samples-python` `schedules/`,
 `activity_worker/`, expanded conformance matrix published in README.
 
 **Phase 4 — Ecosystem & polish.** Time-skipping `WorkflowEnvironment`, `Replayer` over
