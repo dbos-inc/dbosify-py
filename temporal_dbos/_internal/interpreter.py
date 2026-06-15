@@ -144,6 +144,8 @@ _init_step: Optional[Callable[[], Any]] = None
 _child_result_step: Optional[Callable[[str], Any]] = None
 _child_exists_step: Optional[Callable[[str], Any]] = None
 _update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
+_safe_status_step: Optional[Callable[[str], Any]] = None
+_safe_status_list_step: Optional[Callable[[List[str]], Any]] = None
 
 
 def _workflow_init_step() -> Any:
@@ -274,6 +276,45 @@ def _child_id_taken(child_id: str) -> Any:
 
         _child_exists_step = child_exists_step
     return _child_exists_step(child_id)
+
+
+# The status fields the interpreter actually reads — all JSON-serializable.
+# A whole WorkflowStatus is not JSON-safe (it embeds input/output/error), so
+# these steps checkpoint only what we use; the checkpoint keeps the read
+# replay-stable (same as a direct status read, just serializable).
+def _safe_status(workflow_id: str) -> Any:
+    """Checkpointed read of a workflow's JSON-safe status fields, or None."""
+    global _safe_status_step
+    if _safe_status_step is None:
+
+        @DBOS.step(name="__tdb_status")
+        async def safe_status_step(workflow_id: str) -> Optional[Dict[str, Any]]:
+            status = await DBOS.get_workflow_status_async(workflow_id)
+            if status is None:
+                return None
+            return {
+                "status": status.status,
+                "queue_name": status.queue_name,
+                "parent_workflow_id": status.parent_workflow_id,
+            }
+
+        _safe_status_step = safe_status_step
+    return _safe_status_step(workflow_id)
+
+
+def _safe_status_list(dbos_ids: List[str]) -> Any:
+    """Checkpointed batched probe returning ``{dbos_id: status_string}`` for
+    existing ids (chain resolution; the caller uses only id/status)."""
+    global _safe_status_list_step
+    if _safe_status_list_step is None:
+
+        @DBOS.step(name="__tdb_status_list")
+        async def safe_status_list_step(dbos_ids: List[str]) -> Dict[str, str]:
+            statuses = await DBOS.list_workflows_async(workflow_ids=dbos_ids)
+            return {s.workflow_id: s.status for s in statuses}
+
+        _safe_status_list_step = safe_status_list_step
+    return _safe_status_list_step(dbos_ids)
 
 
 class _TimerHandle(asyncio.TimerHandle):
@@ -641,10 +682,7 @@ class Interpreter(_Runtime):
         dispatch_fn = registry.dbos_workflow_for(type_name)
         base, index = ids.parse_run(self._workflow_id)
         new_run_id = ids.run_dbos_id(base, index + 1)
-        if not self._own_queue_resolved:
-            status = await DBOS.get_workflow_status_async(self._workflow_id)
-            self._own_queue_name = status.queue_name if status else None
-            self._own_queue_resolved = True
+        await self._resolve_own_queue()
         queue_name = can._tdb_task_queue or self._own_queue_name
         queue = (
             await DBOS.retrieve_queue_async(queue_name)
@@ -1047,10 +1085,7 @@ class Interpreter(_Runtime):
                         )
                     )
                 return
-            if not self._own_queue_resolved:
-                status = await DBOS.get_workflow_status_async(self._workflow_id)
-                self._own_queue_name = status.queue_name if status else None
-                self._own_queue_resolved = True
+            await self._resolve_own_queue()
             queue_name = child.task_queue or self._own_queue_name
             child_queue = None
             if queue_name is not None:
@@ -1404,8 +1439,8 @@ class Interpreter(_Runtime):
         # lives at a later run, and each closed run already swept the
         # children *it* started, so only the current run's registry matters.
         current = await self._resolve_current_run(child_id)
-        status = await DBOS.get_workflow_status_async(current)
-        if status is None or status.status not in ("PENDING", "ENQUEUED", "DELAYED"):
+        fields = await _safe_status(current)
+        if fields is None or fields["status"] not in ("PENDING", "ENQUEUED", "DELAYED"):
             return  # already terminal (or stuck); don't clobber its status
         await DBOS.cancel_workflow_async(current)
         grandchildren = await DBOS.get_event_async(current, inbox.CHILDREN_EVENT_KEY, 0)
@@ -1981,6 +2016,12 @@ class Interpreter(_Runtime):
         self._commands.append(("send", seq))
         await future
 
+    async def _resolve_own_queue(self) -> None:
+        if not self._own_queue_resolved:
+            fields = await _safe_status(self._workflow_id)
+            self._own_queue_name = fields["queue_name"] if fields else None
+            self._own_queue_resolved = True
+
     async def _resolve_current_run(self, workflow_id: str) -> str:
         """Resolve a Temporal workflow id to its current run's DBOS id
         (§6.4 run chains) via exact-id probes (ids.resolve_latest_run; no
@@ -1990,8 +2031,8 @@ class Interpreter(_Runtime):
         """
 
         async def lookup(dbos_ids: Sequence[str]) -> Dict[str, Any]:
-            statuses = await DBOS.list_workflows_async(workflow_ids=list(dbos_ids))
-            return {status.workflow_id: status for status in statuses}
+            result: Dict[str, Any] = await _safe_status_list(list(dbos_ids))
+            return result
 
         resolved = await ids.resolve_latest_run(workflow_id, lookup)
         return ids.run_dbos_id(workflow_id, resolved[0]) if resolved else workflow_id

@@ -29,6 +29,7 @@ from dbos import DBOS, DBOSConfig
 
 from ._internal import conversion
 from ._internal import dispatcher as _dispatcher
+from ._internal.serializer import TEMPORAL_SERIALIZER
 from .converter import DataConverter
 
 __all__ = ["Worker"]
@@ -98,6 +99,9 @@ class Worker:
         # The interpreter (in this process) decodes run args / encodes results
         # with this converter; configure the Client the same.
         conversion.set_converter(data_converter)
+        # JSON transport (replaces DBOS's default pickle). All processes on the
+        # database must share this serializer's name (see serializer.py).
+        config = {**config, "serializer": TEMPORAL_SERIALIZER}
         DBOS(config=config)
         _dispatcher.register_worker(
             workflows=workflows,

@@ -51,6 +51,7 @@ from .interpreter import (
     WorkflowCancelled,
     WorkflowContinuedAsNew,
     WorkflowTaskFailure,
+    _safe_status,
 )
 from .payloads import (
     FailureEnvelope,
@@ -87,6 +88,8 @@ def _reset_for_tests() -> None:
     interpreter._child_result_step = None
     interpreter._child_exists_step = None
     interpreter._update_validate_step = None
+    interpreter._safe_status_step = None
+    interpreter._safe_status_list_step = None
 
 
 def register_worker(
@@ -333,8 +336,10 @@ async def _enqueue_next_run(
     base, index = ids.parse_run(ctx.workflow_id)
     new_run_id = ids.run_dbos_id(base, index + 1)
     dispatch_fn = registry.dbos_workflow_for(type_name)
-    status = await DBOS.get_workflow_status_async(ctx.workflow_id)
-    queue_name = status.queue_name if status else None
+    # Safe (JSON-serializable) status read — a whole WorkflowStatus can't be
+    # checkpointed by the JSON serializer (see interpreter._safe_status).
+    fields = await _safe_status(ctx.workflow_id)
+    queue_name = fields["queue_name"] if fields else None
     queue = (
         await DBOS.retrieve_queue_async(queue_name) if queue_name is not None else None
     )

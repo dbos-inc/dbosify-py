@@ -13,11 +13,30 @@ Connection configuration, in priority order:
 """
 
 import os
+from typing import Any
 from urllib.parse import quote
 
+import dbos
 from dbos import DBOSConfig
 
+from temporal_dbos._internal.serializer import TEMPORAL_SERIALIZER
+
 TEST_SYSTEM_DB_NAME = "temporal_dbos_test_dbos_sys"
+
+# Every process touching the test database must use the JSON serializer (DBOS
+# selects the deserializer by row label and rejects a mismatch). The Worker and
+# Client install it on the product paths; this default covers the test-side raw
+# DBOSClients (recovery drivers, chaos clients) — in both the pytest process and
+# the subprocess workers, since both import this module.
+_orig_dbos_client_init = dbos.DBOSClient.__init__
+
+
+def _dbos_client_init(self: "dbos.DBOSClient", *args: Any, **kwargs: Any) -> None:
+    kwargs.setdefault("serializer", TEMPORAL_SERIALIZER)
+    _orig_dbos_client_init(self, *args, **kwargs)
+
+
+dbos.DBOSClient.__init__ = _dbos_client_init  # type: ignore[method-assign]
 
 
 def system_database_url() -> str:
@@ -38,4 +57,7 @@ def default_config() -> DBOSConfig:
         "run_admin_server": False,
         # Speeds up recv/event delivery in tests.
         "notification_listener_polling_interval_sec": 0.01,
+        # JSON transport (matches the Worker/Client and the raw-DBOS test
+        # workers that build on default_config()).
+        "serializer": TEMPORAL_SERIALIZER,
     }

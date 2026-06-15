@@ -36,6 +36,7 @@ from ._internal.payloads import (
     serialize_retry_policy,
     wrap_input,
 )
+from ._internal.serializer import TEMPORAL_SERIALIZER
 from ._internal.status import WorkflowExecutionStatus
 from .common import (
     QueryRejectCondition,
@@ -487,6 +488,16 @@ def _update_name(update: Any) -> str:
     raise TypeError(f"{update!r} is not a @workflow.update method or name")
 
 
+def _install_serializer(dbos_client: DBOSClient) -> None:
+    """Install the JSON transport serializer on a (user-created) DBOSClient so
+    it matches the Worker's (DBOS selects the deserializer by row label and
+    rejects a mismatch). Relies on DBOS internals (no public setter)."""
+    dbos_client._serializer = TEMPORAL_SERIALIZER
+    sys_db = getattr(dbos_client, "_sys_db", None)
+    if sys_db is not None:
+        sys_db.serializer = TEMPORAL_SERIALIZER
+
+
 def _ref_ret_type(ref: Any, result_type: Optional[type]) -> Optional[type]:
     """Result type for an update/query reply: an explicit ``result_type``
     wins, else the handler reference's return annotation (a ``_UpdateMethod``
@@ -547,6 +558,7 @@ class Client:
         # converter (a separate worker process decodes args / encodes results
         # with its own — configure both the same, as in Temporal).
         conversion.set_converter(data_converter)
+        _install_serializer(dbos_client)
 
     @property
     def data_converter(self) -> DataConverter:
