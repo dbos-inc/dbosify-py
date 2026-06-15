@@ -61,9 +61,7 @@ class Driver:
         update_id = str(uuid.uuid4())
         self.client.send(
             workflow_id,
-            inbox.update_envelope(
-                name, conversion.encode_values_sync(args), update_id
-            ),
+            inbox.update_envelope(name, conversion.encode_values_sync(args), update_id),
             inbox.INBOX_TOPIC,
         )
         reply = self.client.get_event(
