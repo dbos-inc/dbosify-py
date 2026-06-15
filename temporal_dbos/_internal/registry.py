@@ -57,6 +57,11 @@ class WorkflowDefinition:
     updates: Dict[str, UpdateDefinition] = field(default_factory=dict)
     init_takes_args: bool = False
     failure_exception_types: Tuple[Type[BaseException], ...] = ()
+    # run() signature hints (from conversion.type_hints_from_func): arg_types
+    # rebuilds typed run arguments from payloads; ret_type lets a local client
+    # infer the result type when none is passed.
+    arg_types: Optional[List[type]] = None
+    ret_type: Optional[type] = None
 
 
 @dataclass(frozen=True)
@@ -215,6 +220,14 @@ def build_workflow_definition(
     # workflows the temporalio way: client.execute_workflow(MyWorkflow.run, ...)
     setattr(run_fn, WORKFLOW_NAME_ATTR, workflow_name)
 
+    # @workflow.init means __init__ takes the run args, so when present its
+    # signature is authoritative for the argument types.
+    from .conversion import type_hints_from_func
+
+    arg_source = cls.__init__ if init_takes_args else run_fn
+    arg_types, _ = type_hints_from_func(arg_source)
+    _, ret_type = type_hints_from_func(run_fn)
+
     return WorkflowDefinition(
         name=workflow_name,
         cls=cls,
@@ -224,4 +237,6 @@ def build_workflow_definition(
         updates=updates,
         init_takes_args=init_takes_args,
         failure_exception_types=tuple(failure_exception_types),
+        arg_types=arg_types,
+        ret_type=ret_type,
     )

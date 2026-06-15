@@ -22,7 +22,7 @@ from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 
 from . import exceptions
-from ._internal import ids, inbox
+from ._internal import conversion, ids, inbox
 from ._internal import registry as _registry
 from ._internal import schedules as _schedules
 from ._internal import status as _status
@@ -42,6 +42,7 @@ from .common import (
     WorkflowIDConflictPolicy,
     WorkflowIDReusePolicy,
 )
+from .converter import DataConverter
 from .workflow import _UpdateMethod
 
 # How often reply waits (update acceptance/result, query replies) re-check
@@ -502,21 +503,34 @@ class Client:
         self,
         dbos_client: DBOSClient,
         *,
+        data_converter: DataConverter = DataConverter.default,
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
         self._dbos_client = dbos_client
+        self._data_converter = data_converter
         self._default_query_reject_condition = default_workflow_query_reject_condition
+        # This process encodes start args / decodes results with this
+        # converter (a separate worker process decodes args / encodes results
+        # with its own — configure both the same, as in Temporal).
+        conversion.set_converter(data_converter)
+
+    @property
+    def data_converter(self) -> DataConverter:
+        """Data converter used by this client."""
+        return self._data_converter
 
     @classmethod
     async def connect(
         cls,
         dbos_client: DBOSClient,
         *,
+        data_converter: DataConverter = DataConverter.default,
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
         """Create a client from a ``dbos.DBOSClient``."""
         return cls(
             dbos_client,
+            data_converter=data_converter,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
         )
 
@@ -668,7 +682,9 @@ class Client:
             options["workflow_timeout"] = run_timeout.total_seconds()
         if start_delay is not None:
             options["delay_seconds"] = start_delay.total_seconds()
-        await self._dbos_client.enqueue_async(options, wrap_input(workflow_args, meta))
+        await self._dbos_client.enqueue_async(
+            options, wrap_input(await conversion.encode_values(workflow_args), meta)
+        )
 
         if start_signal is not None:
             await self._dbos_client.send_async(

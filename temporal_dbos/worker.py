@@ -27,7 +27,9 @@ from typing import Any, Callable, Optional, Sequence, Type
 
 from dbos import DBOS, DBOSConfig
 
+from ._internal import conversion
 from ._internal import dispatcher as _dispatcher
+from .converter import DataConverter
 
 __all__ = ["Worker"]
 
@@ -43,6 +45,7 @@ def _reset_for_tests() -> None:
     _live_worker = None
     DBOS.destroy(destroy_registry=True)
     _dispatcher._reset_for_tests()
+    conversion.reset_converter()
 
 
 class Worker:
@@ -63,6 +66,7 @@ class Worker:
         max_concurrent_activities: Optional[int] = None,
         graceful_shutdown_timeout: timedelta = timedelta(),
         workflow_failure_exception_types: Sequence[Type[BaseException]] = [],
+        data_converter: DataConverter = DataConverter.default,
         **unsupported: Any,
     ) -> None:
         """Create the process's worker. Registration (workflow types,
@@ -91,6 +95,9 @@ class Worker:
         self._task_queue = task_queue
         self._max_concurrent_workflow_tasks = max_concurrent_workflow_tasks
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
+        # The interpreter (in this process) decodes run args / encodes results
+        # with this converter; configure the Client the same.
+        conversion.set_converter(data_converter)
         DBOS(config=config)
         _dispatcher.register_worker(
             workflows=workflows,

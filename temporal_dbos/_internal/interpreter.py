@@ -64,7 +64,7 @@ from ..workflow import (
     _Runtime,
 )
 from . import activities as activities_mod
-from . import ids, inbox
+from . import conversion, ids, inbox
 from .payloads import (
     FailureEnvelope,
     RunMeta,
@@ -529,6 +529,10 @@ class Interpreter(_Runtime):
         self._vloop.time_seconds = self._start_time
         self._random.seed(init["seed"])
 
+        # Rebuild the typed run arguments from their payloads (deterministic,
+        # so re-decoding each run/replay is replay-safe). Tolerant of raw args
+        # from the Phase-0 dispatcher helpers (see conversion.decode_values).
+        self._args = await conversion.decode_values(self._args, self._defn.arg_types)
         self._instantiate()
         try:
             while True:
@@ -647,7 +651,9 @@ class Interpreter(_Runtime):
             carried.run_timeout = can._tdb_run_timeout.total_seconds()
         if can._tdb_retry_policy is not None:
             carried.retry_policy = serialize_retry_policy(can._tdb_retry_policy)
-        payload = wrap_input(list(can._tdb_args), carried)
+        # The new run's args come from user code, so encode them (the next
+        # run's interpreter decodes against its run signature).
+        payload = wrap_input(await conversion.encode_values(can._tdb_args), carried)
         # Explicit per-run timeout, else DBOS propagates THIS run's absolute
         # deadline to the next run (see dispatcher._enqueue_next_run).
         timeout_ctx: ContextManager[Any] = (
@@ -1038,13 +1044,16 @@ class Interpreter(_Runtime):
             await DBOS.set_event_async(
                 inbox.CHILDREN_EVENT_KEY, list(self._children_registry)
             )
+            # Encode the child's run args (its interpreter decodes against the
+            # child run signature), like a client start.
+            child_payload = await conversion.encode_values(child.args)
             with SetWorkflowID(child.child_id):
                 if child_queue is not None:
-                    await child_queue.enqueue_async(dispatch_fn, list(child.args))
+                    await child_queue.enqueue_async(dispatch_fn, child_payload)
                 else:
                     # Parent wasn't queue-dispatched (Phase 0 helpers):
                     # start the child directly in-process.
-                    await DBOS.start_workflow_async(dispatch_fn, list(child.args))
+                    await DBOS.start_workflow_async(dispatch_fn, child_payload)
         except Exception as err:  # noqa: BLE001
             del self._pending_children[child.seq]
             if not child.start_future.cancelled():
