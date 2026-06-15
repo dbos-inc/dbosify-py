@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Set, Tuple
 import temporalio.activity
 import temporalio.client
 import temporalio.common
+import temporalio.converter
 import temporalio.exceptions
 import temporalio.testing
 import temporalio.worker
@@ -30,6 +31,7 @@ import temporalio.workflow
 import temporal_dbos.activity
 import temporal_dbos.client
 import temporal_dbos.common
+import temporal_dbos.converter
 import temporal_dbos.exceptions
 import temporal_dbos.testing
 import temporal_dbos.worker
@@ -41,6 +43,7 @@ MODULE_PAIRS = {
     "client": (temporal_dbos.client, temporalio.client),
     "worker": (temporal_dbos.worker, temporalio.worker),
     "common": (temporal_dbos.common, temporalio.common),
+    "converter": (temporal_dbos.converter, temporalio.converter),
     "exceptions": (temporal_dbos.exceptions, temporalio.exceptions),
     "testing": (temporal_dbos.testing, temporalio.testing),
 }
@@ -60,6 +63,11 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
     "testing.WorkflowEnvironment.dbos_config": (
         "DBOS-native extension: the config to build the env's Worker from "
         "(Workers take a DBOSConfig, not a client)"
+    ),
+    "converter.Payload": (
+        "our own lightweight Payload; temporalio's is the protobuf "
+        "temporalio.api.common.v1.Payload — protobuf payloads are unsupported "
+        "(corollary of D1, no non-Python clients)"
     ),
 }
 
@@ -145,6 +153,14 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     "client.AsyncActivityHandle.__init__": {"data_converter_override"},
     # Activity cancellation details: Phase 3.
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
+    # We have no protobuf Failure to mutate in place, so the failure converter
+    # *returns* the failure envelope instead of filling a passed-in `failure`.
+    "converter.FailureConverter.to_failure": {"failure"},
+    "converter.DefaultFailureConverter.to_failure": {"failure"},
+    "converter.DataConverter.encode_failure": {"failure"},
+    # External storage and payload-size limits are not implemented (DESIGN §6.9
+    # scope); proto/search-attribute helpers are intentionally absent.
+    "converter.DataConverter.__init__": {"external_storage", "payload_limits"},
 }
 
 
