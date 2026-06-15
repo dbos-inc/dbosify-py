@@ -181,7 +181,10 @@ def _make_dbos_workflow(
                     ),
                 )
                 await _forward_carryover(new_run_id, carryover)
-        return result
+        # Encode the result for the DBOS output: the client (and any awaiting
+        # parent) decodes it against the run's result type. (The cron
+        # last_completion above stays raw for now — Stage 3.)
+        return await conversion.encode_value(result)
 
     dispatch.__name__ = dispatch.__qualname__ = f"wf:{type_name}"
     decorated: Callable[[Any], Coroutine[Any, Any, Any]] = DBOS.workflow(
@@ -432,6 +435,15 @@ def start_workflow(
     fn = registry.dbos_workflow_for(_type_name(workflow))
     with SetWorkflowID(workflow_id):
         return DBOS.start_workflow(fn, conversion.encode_values_sync(args))
+
+
+def workflow_result(
+    handle: "WorkflowHandle[Any]", type_hint: Optional[type] = None
+) -> Any:
+    """Decoded result for a Phase-0-started workflow (the raw DBOS handle's
+    ``get_result`` returns the encoded payload dict). Failures propagate as the
+    serialized markers, as before."""
+    return conversion.decode_value_sync(handle.get_result(), type_hint)
 
 
 def signal_workflow(

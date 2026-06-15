@@ -99,12 +99,30 @@ async def decode_values(
     return await _active_converter.decode(payloads, hints)
 
 
+async def encode_value(value: Any) -> Dict[str, Any]:
+    """Encode a single user value to an embeddable payload dict."""
+    return (await encode_values([value]))[0]
+
+
+async def decode_value(value: Any, type_hint: Optional[type] = None) -> Any:
+    """Decode a single payload dict back to a user value."""
+    hints = [type_hint] if type_hint is not None else None
+    return (await decode_values([value], hints))[0]
+
+
 def encode_values_sync(values: Sequence[Any]) -> List[Dict[str, Any]]:
     """Payload-only (no codec) encode for the rare sync caller — the Phase-0
     dispatcher helpers. Codecs are async, so they do not apply here; these
     helpers are internal/test-only (superseded by the ``Client`` facade)."""
     payloads = _active_converter.payload_converter.to_payloads(list(values))
     return [_payload_to_dict(p, inline_json=True) for p in payloads]
+
+
+def decode_value_sync(value: Any, type_hint: Optional[type] = None) -> Any:
+    """Payload-only (no codec) decode for the Phase-0 dispatcher helpers."""
+    payload = _payload_from_dict(value)
+    hints = [type_hint] if type_hint is not None else None
+    return _active_converter.payload_converter.from_payloads([payload], hints)[0]
 
 
 def type_hints_from_func(

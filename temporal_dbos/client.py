@@ -10,6 +10,7 @@ Parameters not yet honored are accepted and ignored with a debug log.
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid as uuid_mod
@@ -440,6 +441,22 @@ def _workflow_type_name(workflow: Any) -> str:
     )
 
 
+def _result_type_for(workflow: Any, result_type: Optional[type]) -> Optional[type]:
+    """The type to rebuild a workflow's result into: an explicit ``result_type``
+    wins; otherwise infer the run method's return annotation — from the local
+    registry, or (thin client, no worker) from a passed run-method reference."""
+    if result_type is not None:
+        return result_type
+    try:
+        return _registry.lookup_workflow(_workflow_type_name(workflow)).ret_type
+    except (KeyError, TypeError):
+        pass
+    if inspect.isfunction(workflow):
+        _, ret = conversion.type_hints_from_func(workflow)
+        return ret
+    return None
+
+
 def _signal_name(signal: Any) -> str:
     if isinstance(signal, str):
         return signal
@@ -577,7 +594,6 @@ class Client:
         runs are chained like continue-as-new runs).
         """
         for key, value in {
-            "result_type": result_type,
             "execution_timeout": execution_timeout,
             "task_timeout": task_timeout,
             "memo": memo,
@@ -599,6 +615,7 @@ class Client:
             # no worker can ever dequeue — a silent black hole.
             raise ValueError("task_queue must be a non-empty string")
         type_name = _workflow_type_name(workflow)
+        result_type = _result_type_for(workflow, result_type)
         workflow_args = _resolve_args(arg, args)
         ids.validate_workflow_id(id)
         if start_delay is not None and start_delay < timedelta(0):
@@ -645,7 +662,12 @@ class Client:
                 # Conflict policies (vs a RUNNING run). There is an inherent
                 # TOCTOU window here, accepted for v1 (DESIGN §6.4).
                 if id_conflict_policy == WorkflowIDConflictPolicy.USE_EXISTING:
-                    return WorkflowHandle(self, id, run_id=current_status.workflow_id)
+                    return WorkflowHandle(
+                        self,
+                        id,
+                        run_id=current_status.workflow_id,
+                        result_type=result_type,
+                    )
                 if (
                     id_conflict_policy == WorkflowIDConflictPolicy.TERMINATE_EXISTING
                     or id_reuse_policy == WorkflowIDReusePolicy.TERMINATE_IF_RUNNING
@@ -704,6 +726,7 @@ class Client:
             # The run THIS start created (a reuse start "begins" at its own
             # run), matching temporalio's response semantics.
             first_execution_run_id=dbos_id,
+            result_type=result_type,
         )
 
     async def execute_workflow(
@@ -781,6 +804,7 @@ class Client:
             workflow_id,
             run_id=run_id,
             first_execution_run_id=first_execution_run_id,
+            result_type=result_type,
         )
 
     def get_workflow_handle_for(
@@ -793,7 +817,10 @@ class Client:
     ) -> "WorkflowHandle":
         """Typed variant of :py:meth:`get_workflow_handle`."""
         return self.get_workflow_handle(
-            workflow_id, run_id=run_id, first_execution_run_id=first_execution_run_id
+            workflow_id,
+            run_id=run_id,
+            first_execution_run_id=first_execution_run_id,
+            result_type=_result_type_for(workflow, None),
         )
 
     async def start_update_with_start_workflow(
@@ -1003,12 +1030,14 @@ class WorkflowHandle:
         run_id: Optional[str] = None,
         result_run_id: Optional[str] = None,
         first_execution_run_id: Optional[str] = None,
+        result_type: Optional[type] = None,
     ) -> None:
         self._client = client
         self._id = id
         self._run_id = run_id
         self._result_run_id = result_run_id
         self._first_execution_run_id = first_execution_run_id
+        self._result_type = result_type
 
     @property
     def id(self) -> str:
@@ -1055,7 +1084,8 @@ class WorkflowHandle:
         while True:
             handle: Any = await runtime_client.retrieve_workflow_async(dbos_id)
             try:
-                return await handle.get_result()
+                raw = await handle.get_result()
+                return await conversion.decode_value(raw, self._result_type)
             except SerializedContinueAsNew as marker:
                 new_run_id: str = marker.envelope["new_run_id"]
                 if not follow_runs:

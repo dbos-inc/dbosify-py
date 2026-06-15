@@ -133,7 +133,6 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "typed_search_attributes",
     },
     "client.WorkflowHandle.__init__": {
-        "result_type",
         "start_workflow_response",
     },
     # Callbacks/links/stack_level are gRPC-era plumbing; versioning

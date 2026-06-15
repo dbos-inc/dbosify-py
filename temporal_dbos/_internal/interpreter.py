@@ -1063,7 +1063,25 @@ class Interpreter(_Runtime):
         child.started = True
         if not child.start_future.cancelled():
             child.start_future.set_result(None)
-        self._launch_waiter("child", child.seq, _await_child_result(child.child_id))
+        self._launch_waiter("child", child.seq, self._await_child_result_decoded(child))
+
+    async def _await_child_result_decoded(self, child: _ChildExec) -> Dict[str, Any]:
+        """Await the child's outcome, then decode a successful result against
+        the child type's run signature (the decode rides outside the recorded
+        step, so it replays deterministically from the recorded envelope)."""
+        envelope: Dict[str, Any] = await _await_child_result(child.child_id)
+        if envelope.get("ok"):
+            from . import registry
+
+            try:
+                ret_type = registry.lookup_workflow(child.type_name).ret_type
+            except KeyError:
+                ret_type = None  # child registered on another worker
+            envelope = {
+                **envelope,
+                "result": await conversion.decode_value(envelope["result"], ret_type),
+            }
+        return envelope
 
     async def _sweep_cancellations(self) -> None:
         """Retire activities and children whose virtual-loop futures were

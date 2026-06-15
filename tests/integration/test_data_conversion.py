@@ -48,6 +48,13 @@ class UntypedArgWorkflow:
         return type(req).__name__
 
 
+@workflow.defn
+class TypedResultWorkflow:
+    @workflow.run
+    async def run(self) -> GreetRequest:
+        return GreetRequest(greeting="Yo", name="Cy")
+
+
 class ReverseCodec(PayloadCodec):
     """Toy stand-in for an encryption codec: reverses the payload bytes."""
 
@@ -65,7 +72,7 @@ async def _env(
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[TypedArgWorkflow, UntypedArgWorkflow],
+        workflows=[TypedArgWorkflow, UntypedArgWorkflow, TypedResultWorkflow],
         data_converter=data_converter,
     )
     async with worker:
@@ -97,6 +104,17 @@ async def test_untyped_arg_is_plain_dict() -> None:
         )
     # Without a type hint the dataclass round-trips as a dict (deviation #12).
     assert result == "dict"
+
+
+async def test_typed_result_is_reconstructed() -> None:
+    # The result type is inferred from the run method's return annotation, so
+    # the dataclass comes back reconstructed (not a dict).
+    async with _env() as client:
+        result = await client.execute_workflow(
+            TypedResultWorkflow.run, id="typed-result", task_queue=TASK_QUEUE
+        )
+    assert result == GreetRequest("Yo", "Cy")
+    assert isinstance(result, GreetRequest)
 
 
 async def test_custom_codec_roundtrips_args() -> None:

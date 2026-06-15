@@ -183,8 +183,12 @@ class HandlerHopWorkflow:
 
 @workflow.defn
 class TypeSwitchWorkflow:
+    # Annotated with the chain's eventual result type (LoopingWorkflow returns
+    # List[str]); the client infers result_type from this run signature, and a
+    # mismatched annotation would now fail to decode — matching temporalio's
+    # type-faithful result conversion rather than pickle's exact-object pass.
     @workflow.run
-    async def run(self) -> str:
+    async def run(self) -> List[str]:
         workflow.continue_as_new(args=[["switched"], 0], workflow=LoopingWorkflow.run)
 
 
