@@ -219,6 +219,7 @@ def serialize_failure(exc: BaseException) -> FailureEnvelope:
             "type": exc.type,
             "details": conversion.encode_values_sync(list(exc.details)),
             "non_retryable": exc.non_retryable,
+            "category": int(exc.category),
             "next_retry_delay": (
                 exc.next_retry_delay.total_seconds()
                 if exc.next_retry_delay is not None
@@ -292,12 +293,18 @@ def deserialize_failure(env: FailureEnvelope) -> exceptions.FailureError:
     exc: exceptions.FailureError
     if cls == "ApplicationError":
         delay = env.get("next_retry_delay")
+        category = env.get("category")
         exc = exceptions.ApplicationError(
             env["message"],
             *_decode_details(env.get("details", [])),
             type=env.get("type"),
             non_retryable=bool(env.get("non_retryable", False)),
             next_retry_delay=timedelta(seconds=delay) if delay is not None else None,
+            category=(
+                exceptions.ApplicationErrorCategory(category)
+                if category is not None
+                else exceptions.ApplicationErrorCategory.UNSPECIFIED
+            ),
         )
     elif cls == "CancelledError":
         exc = exceptions.CancelledError(

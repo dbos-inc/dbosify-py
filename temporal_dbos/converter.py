@@ -43,6 +43,7 @@ from itertools import zip_longest
 from types import UnionType
 from typing import (
     Any,
+    Callable,
     ClassVar,
     Dict,
     List,
@@ -417,6 +418,18 @@ class DefaultPayloadConverter(CompositePayloadConverter):
         super().__init__(*DefaultPayloadConverter.default_encoding_payload_converters)
 
 
+def _get_iso_datetime_parser() -> Callable[[str], datetime]:
+    """The ISO-8601 datetime parser for this interpreter (mirrors temporalio):
+    ``datetime.fromisoformat`` on 3.11+, ``dateutil.isoparse`` on older
+    versions where ``fromisoformat`` rejects valid ISO-8601 strings (a trailing
+    "Z", basic format, …). The dependency is only installed for python <3.11."""
+    if sys.version_info >= (3, 11):
+        return datetime.fromisoformat
+    from dateutil import parser
+
+    return parser.isoparse
+
+
 def value_to_type(
     hint: type,
     value: Any,
@@ -441,7 +454,7 @@ def value_to_type(
     elif hint is datetime:
         if isinstance(value, str):
             try:
-                return datetime.fromisoformat(value)
+                return _get_iso_datetime_parser()(value)
             except ValueError as err:
                 raise TypeError(f"Failed parsing datetime string: {value}") from err
         elif isinstance(value, datetime):

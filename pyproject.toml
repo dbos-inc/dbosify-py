@@ -18,6 +18,9 @@ classifiers = [
 ]
 dependencies = [
     "dbos==2.24.0a12",
+    # datetime.fromisoformat can't parse some ISO-8601 forms before 3.11;
+    # value_to_type falls back to dateutil there (mirrors temporalio).
+    "python-dateutil>=2.8.2,<3 ; python_version < '3.11'",
 ]
 
 [dependency-groups]
@@ -55,6 +58,13 @@ atomic = true
 [tool.mypy]
 strict = true
 files = ["temporal_dbos", "tests", "publish"]
+
+# dateutil (the pre-3.11 ISO datetime fallback) ships no type stubs; the import
+# is also unreachable on 3.11+, so an inline ignore would be flagged unused
+# there. Silence it at the module level to stay version-robust.
+[[tool.mypy.overrides]]
+module = ["dateutil.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-s"

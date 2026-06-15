@@ -1516,15 +1516,19 @@ class Interpreter(_Runtime):
         envelope: inbox.Envelope = message
         self._advance_time(envelope.get("sent_at"))
         kind = envelope["kind"]
-        if kind in ("signal", "update", "query"):
-            # Decode the message args against the matching handler's signature
-            # (one place, so the handlers see ready-to-call values).
-            envelope = await self._decode_message_args(envelope)
         if kind == "signal":
-            self._apply_signal(envelope)
+            # Decode happens inside _apply_signal's handler branch, NOT here: a
+            # signal with no handler is buffered and may be forwarded across a
+            # continue-as-new, so it must keep its *encoded* args for the
+            # consuming run to decode against that run's handler signature.
+            await self._apply_signal(envelope)
         elif kind == "update":
+            # Updates/queries always have a handler (an unknown one is rejected,
+            # never buffered/forwarded), so decode against its signature here.
+            envelope = await self._decode_message_args(envelope)
             await self._apply_update(envelope)
         elif kind == "query":
+            envelope = await self._decode_message_args(envelope)
             self._apply_query(envelope)
         elif kind == "activity_result":
             await self._apply_activity_result(envelope)
@@ -1693,11 +1697,15 @@ class Interpreter(_Runtime):
         if self._primary_task is not None and not self._primary_task.done():
             self._vloop.call_soon(self._primary_task.cancel)
 
-    def _apply_signal(self, envelope: inbox.Envelope) -> None:
+    async def _apply_signal(self, envelope: inbox.Envelope) -> None:
         defn = self._defn.signals.get(envelope["name"])
         if defn is None:
-            # Buffered for delivery if a handler is registered later
-            # (dynamic registration arrives in Phase 2).
+            # Buffered with its *encoded* args for delivery if a handler is
+            # registered later (dynamic registration arrives in Phase 2) or, more
+            # commonly, for forwarding across a continue-as-new. Decoding here
+            # would corrupt that forward path (the next run re-decodes against
+            # its own handler signature, and the JSON serializer would choke on
+            # raw user values at the send checkpoint).
             self._buffered_signals.setdefault(envelope["name"], []).append(envelope)
             logger.debug(
                 "Workflow %s: buffering signal %r with no handler",
@@ -1705,8 +1713,9 @@ class Interpreter(_Runtime):
                 envelope["name"],
             )
             return
+        decoded = await self._decode_message_args(envelope)
         self._spawn_handler(
-            self._run_signal_handler(defn.fn, envelope["args"]),
+            self._run_signal_handler(defn.fn, decoded["args"]),
             kind="signal",
             name=defn.name,
             policy=defn.unfinished_policy,
