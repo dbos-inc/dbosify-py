@@ -52,6 +52,7 @@ from typing import (
     Optional,
     Type,
     TypeVar,
+    cast,
     get_type_hints,
 )
 
@@ -427,7 +428,9 @@ def _get_iso_datetime_parser() -> Callable[[str], datetime]:
         return datetime.fromisoformat
     from dateutil import parser
 
-    return parser.isoparse
+    # dateutil ships no stubs, so isoparse is Any; cast to keep mypy --strict
+    # happy on <3.11 (this branch is unreachable, hence cast-free, on 3.11+).
+    return cast(Callable[[str], datetime], parser.isoparse)
 
 
 def value_to_type(
