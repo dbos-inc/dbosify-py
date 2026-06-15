@@ -272,9 +272,10 @@ class AsyncActivityHandle:
     ) -> None:
         """Complete the activity with a result."""
         _ignore_rpc_options("async activity complete", rpc_metadata, rpc_timeout)
+        value = None if result is _arg_unset else result
         await self._send(
             inbox.activity_result_envelope(
-                self._activity_id, result=None if result is _arg_unset else result
+                self._activity_id, result=await conversion.encode_value(value)
             )
         )
 
@@ -305,7 +306,9 @@ class AsyncActivityHandle:
         """Send a heartbeat for the activity."""
         _ignore_rpc_options("async activity heartbeat", rpc_metadata, rpc_timeout)
         await self._send(
-            inbox.activity_heartbeat_envelope(self._activity_id, list(details))
+            inbox.activity_heartbeat_envelope(
+                self._activity_id, await conversion.encode_values(list(details))
+            )
         )
 
     async def report_cancellation(

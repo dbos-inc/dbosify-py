@@ -1483,9 +1483,9 @@ class Interpreter(_Runtime):
         elif kind == "query":
             self._apply_query(envelope)
         elif kind == "activity_result":
-            self._apply_activity_result(envelope)
+            await self._apply_activity_result(envelope)
         elif kind == "activity_heartbeat":
-            self._apply_activity_heartbeat(envelope)
+            await self._apply_activity_heartbeat(envelope)
         elif kind == "cancel":
             self._apply_cancel(envelope)
         else:
@@ -1512,7 +1512,7 @@ class Interpreter(_Runtime):
                 return exec_state
         return None
 
-    def _apply_activity_result(self, envelope: inbox.Envelope) -> None:
+    async def _apply_activity_result(self, envelope: inbox.Envelope) -> None:
         """External completion of an async activity
         (client.get_async_activity_handle). Checkpointed inbox delivery, so
         the resolution replays identically; failures consult the retry
@@ -1536,7 +1536,14 @@ class Interpreter(_Runtime):
         elif envelope["ok"]:
             del self._pending_activities[seq]
             activity_api._forget_attempt_state((self._workflow_id, seq))
-            exec_state.future.set_result(envelope.get("result"))
+            from . import registry
+
+            try:
+                ret_type = registry.lookup_activity(exec_state.activity_name).ret_type
+            except KeyError:
+                ret_type = None
+            result = await conversion.decode_value(envelope.get("result"), ret_type)
+            exec_state.future.set_result(result)
         else:
             # An external fail goes through the retry policy, like Temporal:
             # the next attempt re-runs the activity function (which may park
@@ -1613,7 +1620,7 @@ class Interpreter(_Runtime):
             "act_hb", seq, DBOS.sleep_async(exec_state.heartbeat_timeout)
         )
 
-    def _apply_activity_heartbeat(self, envelope: inbox.Envelope) -> None:
+    async def _apply_activity_heartbeat(self, envelope: inbox.Envelope) -> None:
         """Heartbeat for an async-pending activity from the external
         completer; refreshes the parked heartbeat-timeout window, and the
         details surface on the next retry attempt (in-process, like
@@ -1622,8 +1629,8 @@ class Interpreter(_Runtime):
         exec_state = self._async_pending_by_id(activity_id)
         if exec_state is not None:
             exec_state.async_hb_seen = True
-            activity_api._heartbeat_store[(self._workflow_id, exec_state.seq)] = list(
-                envelope.get("details", [])
+            activity_api._heartbeat_store[(self._workflow_id, exec_state.seq)] = (
+                await conversion.decode_values(envelope.get("details", []))
             )
 
     def _apply_cancel(self, envelope: inbox.Envelope) -> None:
