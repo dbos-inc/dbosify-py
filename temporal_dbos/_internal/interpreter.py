@@ -530,8 +530,7 @@ class Interpreter(_Runtime):
         self._random.seed(init["seed"])
 
         # Rebuild the typed run arguments from their payloads (deterministic,
-        # so re-decoding each run/replay is replay-safe). Tolerant of raw args
-        # from the Phase-0 dispatcher helpers (see conversion.decode_values).
+        # so re-decoding each run/replay is replay-safe).
         self._args = await conversion.decode_values(self._args, self._defn.arg_types)
         self._instantiate()
         try:

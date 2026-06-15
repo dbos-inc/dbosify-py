@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import IntEnum
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import pytest
 
@@ -29,13 +29,13 @@ from temporal_dbos.converter import (
 PC = PayloadConverter.default
 
 
-def roundtrip(value, hint=None):
+def roundtrip(value: Any, hint: Any = None) -> Any:
     """Encode then decode a single value through the default converter."""
     payload = PC.to_payload(value)
     return PC.from_payload(payload, hint)
 
 
-def encoding_of(value) -> str:
+def encoding_of(value: Any) -> str:
     return PC.to_payload(value).metadata["encoding"].decode()
 
 
@@ -73,7 +73,7 @@ def test_default_converter_chain_has_no_protobuf() -> None:
         ({"a": 1, "b": 2}, Dict[str, int]),
     ],
 )
-def test_primitive_roundtrip(value, hint) -> None:
+def test_primitive_roundtrip(value: Any, hint: Any) -> None:
     assert roundtrip(value, hint) == value
     # Without a hint, JSON-native values come back unchanged too.
     assert roundtrip(value) == value
@@ -273,4 +273,6 @@ def test_default_dataconverter_encode_decode_matches_payload_converter() -> None
 def test_custom_json_encoding_name() -> None:
     conv = JSONPlainPayloadConverter(encoding="json/custom")
     assert conv.encoding == "json/custom"
-    assert conv.to_payload({"x": 1}).metadata["encoding"] == b"json/custom"
+    payload = conv.to_payload({"x": 1})
+    assert payload is not None
+    assert payload.metadata["encoding"] == b"json/custom"

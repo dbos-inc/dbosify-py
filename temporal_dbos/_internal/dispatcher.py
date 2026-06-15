@@ -45,7 +45,7 @@ from .. import exceptions
 # temporalio.client.WorkflowUpdateFailedError.
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from . import activities as activities_mod
-from . import ids, inbox, registry, schedules
+from . import conversion, ids, inbox, registry, schedules
 from .interpreter import (
     Interpreter,
     WorkflowCancelled,
@@ -431,7 +431,7 @@ def start_workflow(
     """Start a Temporal workflow; returns the underlying DBOS handle."""
     fn = registry.dbos_workflow_for(_type_name(workflow))
     with SetWorkflowID(workflow_id):
-        return DBOS.start_workflow(fn, list(args))
+        return DBOS.start_workflow(fn, conversion.encode_values_sync(args))
 
 
 def signal_workflow(
