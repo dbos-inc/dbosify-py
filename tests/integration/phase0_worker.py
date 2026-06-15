@@ -182,7 +182,9 @@ def main() -> None:
         handle = DBOS.retrieve_workflow(workflow_id)
     print("STARTED", flush=True)
 
-    result = handle.get_result()
+    # get_result() returns the encoded result envelope; decode it (the
+    # converter boundary, same as the Client facade does).
+    result = dispatcher.workflow_result(handle)
     print("RESULT " + json.dumps(result), flush=True)
     DBOS.destroy()
 
