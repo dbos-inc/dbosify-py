@@ -13,6 +13,12 @@ run id. Scheme (resolved decision §10.3):
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 RUN_SEPARATOR = "--r"
+# Cross-queue activity workflow ids are ``{run}--a{seq}`` (§6.1.2). Reserving
+# this separator (like ``--r``) keeps an activity workflow id from ever
+# colliding with a user-chosen or auto-generated workflow/child id, which would
+# otherwise make the idempotent ``SetWorkflowID`` enqueue silently re-attach to
+# an unrelated workflow.
+ACTIVITY_SEPARATOR = "--a"
 
 # Chain resolution probes (see resolve_latest_run): chains up to this many
 # runs resolve in a single batched primary-key lookup.
@@ -26,11 +32,12 @@ REFINE_BATCH = 16
 def validate_workflow_id(workflow_id: str) -> None:
     if not workflow_id:
         raise ValueError("Workflow id must be non-empty")
-    if RUN_SEPARATOR in workflow_id:
-        raise ValueError(
-            f"Workflow ids may not contain {RUN_SEPARATOR!r} "
-            f"(reserved for temporal-dbos run-chain ids): {workflow_id!r}"
-        )
+    for separator in (RUN_SEPARATOR, ACTIVITY_SEPARATOR):
+        if separator in workflow_id:
+            raise ValueError(
+                f"Workflow ids may not contain {separator!r} "
+                f"(reserved for temporal-dbos internal ids): {workflow_id!r}"
+            )
 
 
 def run_dbos_id(workflow_id: str, run_index: int) -> str:
@@ -38,6 +45,13 @@ def run_dbos_id(workflow_id: str, run_index: int) -> str:
     if run_index == 0:
         return workflow_id
     return f"{workflow_id}{RUN_SEPARATOR}{run_index}"
+
+
+def activity_dbos_id(run_id: str, seq: int) -> str:
+    """The ``__temporal_activity`` workflow id for a cross-queue activity (§6.1.2).
+    Deterministic in ``seq``, and in the reserved ``--a`` namespace so it cannot
+    collide with any user/child/run id."""
+    return f"{run_id}{ACTIVITY_SEPARATOR}{seq}"
 
 
 def parse_run(dbos_id: str) -> "tuple[str, int]":

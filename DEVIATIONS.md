@@ -368,9 +368,10 @@ in-process step — the interpreter enqueues a generic `__temporal_activity` DBO
 workflow onto that queue and awaits its result, exactly as it enqueues and
 awaits a child workflow. Whatever worker listens on that queue runs the
 activity, so "activities run on a different worker" holds. The activity workflow
-id is the deterministic `{parent_run_id}-a{seq}`, so a crash anywhere after the
-enqueue re-attaches idempotently on recovery (no twin), and a SIGKILL of either
-the workflow worker or the activity worker resumes correctly.
+id is the deterministic `{parent_run_id}--a{seq}` (the `--a` separator is reserved
+like `--r`, so it can never collide with a user/child/run id), so a crash anywhere
+after the enqueue re-attaches idempotently on recovery (no twin), and a SIGKILL of
+either the workflow worker or the activity worker resumes correctly.
 
 Operational requirement and current scope:
 
@@ -406,6 +407,15 @@ Operational requirement and current scope:
   activity is cancelled at its next await (more eagerly than Temporal, which
   delivers only at `heartbeat()`); a sync activity observes it at its next
   `heartbeat()`.
+- **A terminal close cancels in-flight cross-queue activities.** Continue-as-new,
+  normal completion, and cooperative cancel all run the same close path, which
+  sends the cross-process cancel signal to any still-pending queued activity — so
+  a fire-and-forget or not-yet-finished activity does not outlive its workflow.
+  **Exception: forceful `terminate`** is a native DBOS cancel that runs no close
+  code, so it does *not* cancel in-flight cross-queue activities (they finish on
+  their worker, their result discarded) — the same "no cleanup" behaviour
+  `terminate` already has for child workflows. Use cooperative cancel if you need
+  the activity stopped.
 - **`schedule_to_start_timeout` bounds the queue dwell.** The activity workflow
   compares its enqueue time (`created_at`) to its start time on the worker and,
   if the budget was exceeded, fails with `TimeoutType.SCHEDULE_TO_START` before

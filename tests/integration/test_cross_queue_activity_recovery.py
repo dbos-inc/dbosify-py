@@ -120,10 +120,10 @@ def test_sigkill_workflow_worker_reattaches_to_activity(tmp_path: Path) -> None:
     # The activity executed exactly once (re-attach, not re-dispatch).
     assert effects.read_text() == "ran\n"
 
-    # Exactly one activity workflow exists: {parent}-a{seq}, no twin.
+    # Exactly one activity workflow exists: {parent}--a{seq}, no twin.
     client = DBOSClient(system_database_url=system_database_url())
     try:
-        rows = client.list_workflows(workflow_id_prefix=f"{wf_id}-a")
-        assert [r.workflow_id for r in rows] == [f"{wf_id}-a1"]
+        rows = client.list_workflows(workflow_id_prefix=f"{wf_id}--a")
+        assert [r.workflow_id for r in rows] == [f"{wf_id}--a1"]
     finally:
         client.destroy()

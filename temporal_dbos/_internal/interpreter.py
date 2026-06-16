@@ -681,13 +681,23 @@ class Interpreter(_Runtime):
                 await self._deliver(done)
         finally:
             if self._outcome is not None and self._outcome[0] != "task_failure":
-                # Mark in-flight attempts cancelled BEFORE tearing down
-                # their waiter tasks below: task cancellation unregisters
-                # the attempt's live context, after which a still-running
-                # (threaded) activity function could no longer be reached
-                # and would spin forever.
+                # Cancel in-flight activities at a terminal close (including
+                # continue-as-new), so a fire-and-forget or still-running
+                # activity does not outlive the workflow. Local attempts are
+                # marked BEFORE tearing down their waiter tasks below (task
+                # cancellation unregisters the attempt's live context, after
+                # which a still-running threaded function could no longer be
+                # reached and would spin forever); a queued activity runs on
+                # another worker, so it gets the cross-process cancel signal
+                # instead — otherwise its `__temporal_activity` workflow would
+                # keep running to completion, orphaned.
                 for exec_state in self._pending_activities.values():
-                    activity_api._request_cancel((self._workflow_id, exec_state.seq))
+                    if exec_state.queued_dbos_id is not None:
+                        await self._signal_queued_activity_cancel(exec_state)
+                    else:
+                        activity_api._request_cancel(
+                            (self._workflow_id, exec_state.seq)
+                        )
                 # Terminal outcome (not a retryable task failure): apply
                 # ParentClosePolicy to still-running children.
                 await self._sweep_children_on_close()
@@ -1396,12 +1406,12 @@ class Interpreter(_Runtime):
         ``__temporal_activity`` workflow on the target DBOS queue and await its
         result envelope, mirroring the child-workflow enqueue (``_start_child``).
 
-        The activity-workflow id is the deterministic ``{run_id}-a{seq}`` so a
+        The activity-workflow id is the deterministic ``{run_id}--a{seq}`` so a
         crash anywhere after the enqueue replays into an idempotent re-attach
         (``SetWorkflowID``), exactly as child ids do — DBOS records the
         in-workflow start, so recovery re-attaches to the same activity instead
-        of spawning a twin. (No collision with the ``--r{n}`` run-chain suffix:
-        ``ids.parse_run`` only treats a pure-digit ``--r`` suffix as a run.)
+        of spawning a twin. ``--a`` is a reserved separator (``ids.ACTIVITY_SEPARATOR``,
+        like ``--r``), so the id can never collide with a user/child/run id.
         """
         from dbos import SetWorkflowID
 
@@ -1411,7 +1421,7 @@ class Interpreter(_Runtime):
         # from our own queue.
         assert exec_state.task_queue is not None
         seq = exec_state.seq
-        activity_dbos_id = f"{self._workflow_id}-a{seq}"
+        activity_dbos_id = ids.activity_dbos_id(self._workflow_id, seq)
         meta = {
             "activity_id": exec_state.activity_id,
             "activity_type": exec_state.activity_name,
