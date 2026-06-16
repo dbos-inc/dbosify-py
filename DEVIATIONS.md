@@ -508,6 +508,14 @@ the SDK so signatures match. Scope and edges:
   auto-carry across `continue_as_new` (the outbound interceptor re-injects them,
   matching Temporal); cancel-of-external is not a header-carrying verb;
   schedule-started actions begin with empty headers.
+  - **A configured `PayloadCodec` is *not* applied to header values** — they ride
+    as inline payload dicts, set/read on synchronous interceptor boundaries
+    (`start_activity` is sync). This is the same sync-serialization codec gap as
+    the values noted below (failure `details`, cron `last_completion`): headers
+    are payload-*converted* but not codec-transformed, so an encrypting codec
+    leaves them in the clear. Fine for the usual tracing/baggage ids; don't put
+    codec-protected secrets in headers. Temporal applies codecs to header
+    payloads, so this is a deviation.
 - **Other copied-but-inert `*Input` fields.** `ExecuteActivityInput.executor` is
   always `None` (sync activities run via `asyncio.to_thread`, not a user
   executor); `WorkflowInterceptorClassInput.unsafe_extern_functions` is inert

@@ -1257,8 +1257,16 @@ async def start_child_workflow(
         if value is not None:
             logger.debug("start_child_workflow: ignoring unsupported option %r", key)
     _warn_on_deprecated_search_attributes(search_attributes)
+    from ._internal import ids as _ids
     from ._internal.workflow_interceptor import StartChildWorkflowInput
 
+    # An explicitly-provided id is validated here (an empty/invalid id is a
+    # caller bug — matching client start_workflow); a None id stays auto (the
+    # interpreter derives ``{parent}_{seq}``, README deviation #5). The input's
+    # ``id`` is a non-optional str (temporalio parity), so auto is carried as ""
+    # and the outbound root maps "" back to None.
+    if id is not None:
+        _ids.validate_workflow_id(id)
     input = StartChildWorkflowInput(
         workflow=_resolve_workflow_type(workflow),
         args=_resolve_args(arg, args),
