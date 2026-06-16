@@ -3,6 +3,7 @@ delete against real Postgres, plus an automatic cron fire and persistence
 across a worker restart.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -80,6 +81,26 @@ class OverlapAction:
         await workflow.sleep(seconds)
 
 
+@workflow.defn
+class BlockingAction:
+    """Records its start, then runs forever until released by signal — lets a
+    test hold one action 'running' across an unbounded number of fires."""
+
+    def __init__(self) -> None:
+        self._released = False
+
+    @workflow.signal
+    def release(self) -> None:
+        self._released = True
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.execute_activity(
+            overlap_record, start_to_close_timeout=timedelta(seconds=10)
+        )
+        await workflow.wait_condition(lambda: self._released)
+
+
 def _overlap_schedule(
     overlap: ScheduleOverlapPolicy, *, action_id: str, seconds: float = 2.0
 ) -> Schedule:
@@ -110,12 +131,17 @@ async def _wait_for_started(at_least: int) -> None:
         raise AssertionError(f"only {_overlap['started']} actions started")
 
 
-async def _wait_for_action_success_count(client: Client, at_least: int) -> None:
-    """Poll until at least ``at_least`` OverlapAction workflows have completed."""
-    rows = await client._dbos_client.list_workflows_async(name="wf:OverlapAction")
-    done = sum(1 for row in rows if row.status == "SUCCESS")
+async def _success_count(client: Client, name: str) -> int:
+    rows = await client._dbos_client.list_workflows_async(name=name)
+    return sum(1 for row in rows if row.status == "SUCCESS")
+
+
+async def _wait_for_fire_count(client: Client, at_least: int) -> None:
+    """Poll until at least ``at_least`` schedule fires have completed (each fire
+    runs the dispatcher even when it skips), proving the schedule is firing."""
+    done = await _success_count(client, "__temporal_schedule_fire")
     if done < at_least:
-        raise AssertionError(f"only {done} OverlapAction workflows done")
+        raise AssertionError(f"only {done} schedule fires so far")
 
 
 def _fast_scheduler_config() -> DBOSConfig:
@@ -131,7 +157,7 @@ async def _env(config: Optional[DBOSConfig] = None) -> AsyncIterator[Client]:
     worker = Worker(
         config or default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[ScheduledGreeter, OverlapAction],
+        workflows=[ScheduledGreeter, OverlapAction, BlockingAction],
         activities=[greet, overlap_record],
     )
     async with worker:
@@ -265,6 +291,99 @@ async def test_automatic_cron_fire() -> None:
         await handle.delete()
 
 
+async def test_fires_on_schedule_with_right_inputs() -> None:
+    # An every-1s schedule should fire repeatedly, on the 1-second cron grid,
+    # each run receiving the scheduled argument. We collect several completed
+    # actions and check (a) every result reflects the scheduled input and (b) the
+    # occurrence times encoded in the action ids are consecutive whole seconds —
+    # i.e. it fired on time, once per period, not in a burst or with drift.
+    async with _env(_fast_scheduler_config()) as client:
+        await client.create_schedule(
+            "sched-ontime",
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    ScheduledGreeter.run,
+                    "Timely",
+                    id="ontime-wf",
+                    task_queue=TASK_QUEUE,
+                ),
+                spec=ScheduleSpec(
+                    intervals=[ScheduleIntervalSpec(every=timedelta(seconds=1))]
+                ),
+                # ALLOW_ALL so every occurrence fires (the default SKIP would drop
+                # occurrences while an action is still running, hiding the grid).
+                policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.ALLOW_ALL),
+            ),
+        )
+
+        async def four_completed() -> "list[str]":
+            rows = await client._dbos_client.list_workflows_async(name=ACTION_WF_NAME)
+            done = [r.workflow_id for r in rows if r.status == "SUCCESS"]
+            if len(done) < 4:
+                raise AssertionError(f"only {len(done)} fired so far")
+            return done
+
+        ids = await retry_until_success_async(four_completed)
+        await client.get_schedule_handle("sched-ontime").delete()
+
+        # Right inputs: every fire ran with the scheduled arg.
+        for wid in ids:
+            handle = client.get_workflow_handle(wid, result_type=str)
+            assert await handle.result() == "Hello, Timely!"
+
+        # On time: action ids are ``ontime-wf-<epoch>`` where epoch is the nominal
+        # cron occurrence. Four consecutive 1s occurrences → a contiguous run of
+        # whole-second epochs (span == count - 1).
+        epochs = sorted({int(wid.rsplit("-", 1)[1]) for wid in ids})
+        assert epochs[-1] - epochs[0] == len(epochs) - 1, epochs
+
+
+async def test_pause_stops_firing() -> None:
+    # Pause must actually stop the schedule from firing (not just flip the
+    # describe status). After pausing, the fire count must stop growing.
+    async with _env(_fast_scheduler_config()) as client:
+        handle = await client.create_schedule(
+            "sched-pausefire",
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    ScheduledGreeter.run,
+                    "P",
+                    id="pausefire-wf",
+                    task_queue=TASK_QUEUE,
+                ),
+                spec=ScheduleSpec(
+                    intervals=[ScheduleIntervalSpec(every=timedelta(seconds=1))]
+                ),
+            ),
+        )
+        # Confirm it is actively firing, then pause.
+        await retry_until_success_async(lambda: _wait_for_fire_count(client, 2))
+        await handle.pause()
+
+        # The fire count must settle: sample until two reads spaced over several
+        # cron periods agree (a paused schedule produces no new fires; at most one
+        # already-enqueued fire may still land). Polling for *stability* is how we
+        # assert the absence of further fires without a magic sleep.
+        async def settled() -> int:
+            first = await _success_count(client, "__temporal_schedule_fire")
+            await asyncio.sleep(2.0)  # > 2 cron periods
+            second = await _success_count(client, "__temporal_schedule_fire")
+            if second > first + 1:
+                raise AssertionError(f"still firing while paused: {first} -> {second}")
+            return second
+
+        paused_count = await retry_until_success_async(
+            settled, interval=0.0, max_attempts=3
+        )
+
+        # Unpause: firing must resume, so the count climbs past the paused level.
+        await handle.unpause()
+        await retry_until_success_async(
+            lambda: _wait_for_fire_count(client, paused_count + 2)
+        )
+        await handle.delete()
+
+
 async def test_schedule_persists_across_worker_restart() -> None:
     # Create the schedule under one worker, then run a fresh worker (DBOS
     # destroy/relaunch) and confirm the persisted row still fires on trigger.
@@ -288,24 +407,39 @@ async def test_schedule_persists_across_worker_restart() -> None:
 
 
 async def test_overlap_skip_suppresses_runs() -> None:
-    # SKIP: while one ~3s action runs, the ~1/s occurrences are dropped. We wait
-    # for the first action to *complete* (a real milestone, ~3s, during which 3
-    # occurrences fired and were skipped), then assert almost nothing else
-    # started — at most the running one plus the fire-time TOCTOU race (D22). A
-    # broken SKIP (≈ ALLOW_ALL) would have started ~3 actions by then.
+    # Robust SKIP: the first action *blocks forever* (until released), so it stays
+    # running across an unbounded number of occurrences. We wait until many fires
+    # have happened (each runs the dispatcher, which skips), then assert that
+    # despite all those fires only the one blocked action ever started (≤2,
+    # tolerating the documented fire-time TOCTOU race, D22). A broken SKIP would
+    # have started one action *per fire* (~6). The huge margin (≤2 vs ≥6) is what
+    # makes this reliable rather than timing-dependent.
     _overlap.update(started=0)
     async with _env(_fast_scheduler_config()) as client:
-        await client.create_schedule(
+        handle = await client.create_schedule(
             "ov-skip",
-            _overlap_schedule(
-                ScheduleOverlapPolicy.SKIP, action_id="ov-skip-wf", seconds=3.0
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    BlockingAction.run, id="ov-skip-wf", task_queue=TASK_QUEUE
+                ),
+                spec=ScheduleSpec(
+                    intervals=[ScheduleIntervalSpec(every=timedelta(seconds=1))]
+                ),
+                policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
             ),
         )
-        await retry_until_success_async(
-            lambda: _wait_for_action_success_count(client, 1)
-        )
-        assert _overlap["started"] <= 2
-        await client.get_schedule_handle("ov-skip").delete()
+        # ≥6 occurrences fired while the first action was blocked.
+        await retry_until_success_async(lambda: _wait_for_fire_count(client, 6))
+        assert 1 <= _overlap["started"] <= 2
+        # Release the blocked action so the worker can shut down cleanly.
+        await handle.delete()
+        for row in await client._dbos_client.list_workflows_async(
+            name="wf:BlockingAction"
+        ):
+            if row.status in ("PENDING", "ENQUEUED"):
+                await client.get_workflow_handle(row.workflow_id).signal(
+                    BlockingAction.release
+                )
 
 
 async def test_overlap_allow_all_runs_concurrently() -> None:
