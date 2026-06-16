@@ -24,7 +24,12 @@ from temporal_dbos.client import (
     ScheduleIntervalSpec,
     ScheduleSpec,
 )
-from temporal_dbos.common import RetryPolicy
+from temporal_dbos.common import (
+    RetryPolicy,
+    SearchAttributeKey,
+    SearchAttributePair,
+    TypedSearchAttributes,
+)
 from temporal_dbos.exceptions import ApplicationError
 from temporal_dbos.worker import (
     ActivityInboundInterceptor,
@@ -537,3 +542,55 @@ async def test_activity_interceptor_fires_for_local_activity() -> None:
 
     assert result == "intercepted(loc:echo)"
     assert ("execute_activity", "echo") in events
+
+
+# --- Interceptor x search attributes (the post-merge seam) ----------------
+
+
+INJECTED_SA = SearchAttributeKey.for_keyword("InjectedByInterceptor")
+
+
+class _InjectingOutbound(OutboundInterceptor):
+    """Injects a search attribute + memo entry onto every workflow start —
+    the canonical context-propagation use case."""
+
+    async def start_workflow(self, input: Any) -> Any:
+        input.search_attributes = TypedSearchAttributes(
+            [SearchAttributePair(INJECTED_SA, "yes")]
+        )
+        memo = dict(input.memo) if input.memo else {}
+        memo["injected_memo"] = "from-interceptor"
+        input.memo = memo
+        return await super().start_workflow(input)
+
+
+class _InjectingClientInterceptor(ClientInterceptor):
+    def intercept_client(self, next: OutboundInterceptor) -> OutboundInterceptor:
+        return _InjectingOutbound(next)
+
+
+async def test_client_interceptor_injects_search_attributes_and_memo() -> None:
+    """A client interceptor that mutates StartWorkflowInput.search_attributes /
+    .memo is honored durably: the injected values flow through the relocated
+    _start_workflow_impl into the attributes column and back out via describe().
+    Guards the seam where interceptors meet search attributes."""
+    worker = Worker(default_config(), task_queue=TASK_QUEUE, workflows=[QuickGreeter])
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(
+                dbos_client, interceptors=[_InjectingClientInterceptor()]
+            )
+            # Started with neither search_attributes nor memo — the interceptor
+            # adds both.
+            handle = await client.start_workflow(
+                QuickGreeter.run, "x", id="ic-inject", task_queue=TASK_QUEUE
+            )
+            assert await handle.result() == "hi x"
+
+            desc = await handle.describe()
+            assert desc.typed_search_attributes[INJECTED_SA] == "yes"
+            assert desc.search_attributes["InjectedByInterceptor"] == ["yes"]
+            assert await desc.memo() == {"injected_memo": "from-interceptor"}
+        finally:
+            dbos_client.destroy()
