@@ -43,17 +43,17 @@ from ..common import (
 )
 
 if TYPE_CHECKING:
+    from .._schedule import (
+        ScheduleAsyncIterator,
+        ScheduleDescription,
+        ScheduleHandle,
+    )
     from ..client import (
         AsyncActivityHandle,
         WorkflowExecutionDescription,
         WorkflowHandle,
         WorkflowUpdateHandle,
         WorkflowUpdateStage,
-    )
-    from .._schedule import (
-        ScheduleAsyncIterator,
-        ScheduleDescription,
-        ScheduleHandle,
     )
 
 __all__ = [

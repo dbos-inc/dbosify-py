@@ -458,7 +458,8 @@ def test_supported_params_explicitly_accepted(qualname: str) -> None:
     accepted = {
         p.name
         for p in _params_of(ours)
-        if p.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+        if p.kind
+        not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
     }
     their_names = {p.name for p in _params_of(their_obj)}
 

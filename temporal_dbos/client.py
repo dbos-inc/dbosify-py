@@ -27,6 +27,30 @@ from ._internal import conversion, ids, inbox
 from ._internal import registry as _registry
 from ._internal import schedules as _schedules
 from ._internal import status as _status
+from ._internal.client_interceptor import (
+    BackfillScheduleInput,
+    CancelWorkflowInput,
+    CompleteAsyncActivityInput,
+    CreateScheduleInput,
+    DeleteScheduleInput,
+    DescribeScheduleInput,
+    DescribeWorkflowInput,
+    FailAsyncActivityInput,
+    HeartbeatAsyncActivityInput,
+    Interceptor,
+    ListSchedulesInput,
+    OutboundInterceptor,
+    PauseScheduleInput,
+    QueryWorkflowInput,
+    ReportCancellationAsyncActivityInput,
+    SignalWorkflowInput,
+    StartWorkflowInput,
+    StartWorkflowUpdateInput,
+    TerminateWorkflowInput,
+    TriggerScheduleInput,
+    UnpauseScheduleInput,
+    UpdateScheduleInput,
+)
 from ._internal.payloads import (
     RunMeta,
     SerializedContinueAsNew,
@@ -68,30 +92,6 @@ from ._schedule import (  # noqa: E402
     ScheduleState,
     ScheduleUpdate,
     ScheduleUpdateInput,
-)
-from ._internal.client_interceptor import (
-    BackfillScheduleInput,
-    CancelWorkflowInput,
-    CompleteAsyncActivityInput,
-    CreateScheduleInput,
-    DeleteScheduleInput,
-    DescribeScheduleInput,
-    DescribeWorkflowInput,
-    FailAsyncActivityInput,
-    HeartbeatAsyncActivityInput,
-    Interceptor,
-    ListSchedulesInput,
-    OutboundInterceptor,
-    PauseScheduleInput,
-    QueryWorkflowInput,
-    ReportCancellationAsyncActivityInput,
-    SignalWorkflowInput,
-    StartWorkflowInput,
-    StartWorkflowUpdateInput,
-    TerminateWorkflowInput,
-    TriggerScheduleInput,
-    UnpauseScheduleInput,
-    UpdateScheduleInput,
 )
 from .common import (
     QueryRejectCondition,
@@ -849,9 +849,7 @@ class Client:
         )
         return await self._impl.start_workflow(input)
 
-    async def _start_workflow_impl(
-        self, input: StartWorkflowInput
-    ) -> "WorkflowHandle":
+    async def _start_workflow_impl(self, input: StartWorkflowInput) -> "WorkflowHandle":
         """Root of the ``start_workflow`` outbound chain (DESIGN §6.8): the
         actual enqueue, reading the (possibly interceptor-modified) input."""
         workflow_args = input.args
@@ -1201,9 +1199,7 @@ class Client:
             )
         )
 
-    async def _create_schedule_impl(
-        self, input: CreateScheduleInput
-    ) -> ScheduleHandle:
+    async def _create_schedule_impl(self, input: CreateScheduleInput) -> ScheduleHandle:
         await _schedule.create_schedule_row(
             self,
             input.id,
@@ -1526,7 +1522,9 @@ class WorkflowHandle:
         )
 
     async def _query_impl(self, input: QueryWorkflowInput) -> Any:
-        condition = input.reject_condition or self._client._default_query_reject_condition
+        condition = (
+            input.reject_condition or self._client._default_query_reject_condition
+        )
         if condition is not None and condition != QueryRejectCondition.NONE:
             # Client-side check (no server arbiter — DEVIATIONS D7 family):
             # the status read and the query send are not atomic.
@@ -1879,9 +1877,9 @@ class _ClientOutbound(OutboundInterceptor):
         return await self._client._start_workflow_impl(input)
 
     async def cancel_workflow(self, input: CancelWorkflowInput) -> None:
-        await WorkflowHandle(
-            self._client, input.id, run_id=input.run_id
-        )._cancel_impl(input)
+        await WorkflowHandle(self._client, input.id, run_id=input.run_id)._cancel_impl(
+            input
+        )
 
     async def describe_workflow(
         self, input: DescribeWorkflowInput
@@ -1896,9 +1894,9 @@ class _ClientOutbound(OutboundInterceptor):
         )._query_impl(input)
 
     async def signal_workflow(self, input: SignalWorkflowInput) -> None:
-        await WorkflowHandle(
-            self._client, input.id, run_id=input.run_id
-        )._signal_impl(input)
+        await WorkflowHandle(self._client, input.id, run_id=input.run_id)._signal_impl(
+            input
+        )
 
     async def terminate_workflow(self, input: TerminateWorkflowInput) -> None:
         await WorkflowHandle(
@@ -1917,14 +1915,12 @@ class _ClientOutbound(OutboundInterceptor):
     async def heartbeat_async_activity(
         self, input: HeartbeatAsyncActivityInput
     ) -> None:
-        await AsyncActivityHandle(
-            self._client, input.id_or_token
-        )._heartbeat_impl(input)
+        await AsyncActivityHandle(self._client, input.id_or_token)._heartbeat_impl(
+            input
+        )
 
     async def complete_async_activity(self, input: CompleteAsyncActivityInput) -> None:
-        await AsyncActivityHandle(
-            self._client, input.id_or_token
-        )._complete_impl(input)
+        await AsyncActivityHandle(self._client, input.id_or_token)._complete_impl(input)
 
     async def fail_async_activity(self, input: FailAsyncActivityInput) -> None:
         await AsyncActivityHandle(self._client, input.id_or_token)._fail_impl(input)

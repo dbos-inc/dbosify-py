@@ -22,7 +22,9 @@ from temporal_dbos.worker import (
     ExecuteActivityInput,
 )
 from temporal_dbos.worker import Interceptor as WorkerInterceptor
-from temporal_dbos.worker import Worker
+from temporal_dbos.worker import (
+    Worker,
+)
 from tests.dbconfig import default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("tdb_env")
