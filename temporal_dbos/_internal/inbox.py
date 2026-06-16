@@ -17,7 +17,7 @@ replay-stable).
 """
 
 import time
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 INBOX_TOPIC = "__tdb_inbox"
 
@@ -33,21 +33,32 @@ RECV_TIMEOUT_SECONDS = 3600.0
 Envelope = Dict[str, Any]
 
 
-def signal_envelope(name: str, args: Sequence[Any]) -> Envelope:
+def signal_envelope(
+    name: str,
+    args: Sequence[Any],
+    headers: Optional[Mapping[str, Any]] = None,
+) -> Envelope:
     return {
         "kind": "signal",
         "name": name,
         "args": list(args),
+        "headers": dict(headers) if headers else {},
         "sent_at": time.time(),
     }
 
 
-def update_envelope(name: str, args: Sequence[Any], update_id: str) -> Envelope:
+def update_envelope(
+    name: str,
+    args: Sequence[Any],
+    update_id: str,
+    headers: Optional[Mapping[str, Any]] = None,
+) -> Envelope:
     return {
         "kind": "update",
         "name": name,
         "args": list(args),
         "update_id": update_id,
+        "headers": dict(headers) if headers else {},
         "sent_at": time.time(),
     }
 
@@ -109,12 +120,18 @@ def activity_cancel_key(activity_id: str) -> str:
     return f"__tdb_act_{activity_id}_cancel"
 
 
-def query_envelope(name: str, args: Sequence[Any], request_id: str) -> Envelope:
+def query_envelope(
+    name: str,
+    args: Sequence[Any],
+    request_id: str,
+    headers: Optional[Mapping[str, Any]] = None,
+) -> Envelope:
     return {
         "kind": "query",
         "name": name,
         "args": list(args),
         "request_id": request_id,
+        "headers": dict(headers) if headers else {},
         "sent_at": time.time(),
     }
 

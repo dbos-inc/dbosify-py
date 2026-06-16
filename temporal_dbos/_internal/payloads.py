@@ -56,6 +56,12 @@ class RunMeta:
     # memo() and forward across chain hops; the durable searchable copy lives in
     # the DBOS attributes column.
     attributes: Optional[Dict[str, Any]] = None
+    # The run's interceptor headers in wire form (str -> payload dict). Set from
+    # the client start (or a child/continue-as-new), surfaced to workflow
+    # interceptors as ExecuteWorkflowInput.headers (DEVIATIONS D24). Carried
+    # across cron/retry hops (the same run re-running); continue-as-new sets its
+    # own (an interceptor re-injects them).
+    headers: Optional[Dict[str, Any]] = None
 
     def is_empty(self) -> bool:
         return (
@@ -66,6 +72,7 @@ class RunMeta:
             and self.last_completion is None
             and self.last_failure is None
             and self.attributes is None
+            and not self.headers
         )
 
     def carried_forward(self) -> "RunMeta":
@@ -79,6 +86,7 @@ class RunMeta:
             last_completion=self.last_completion,
             last_failure=self.last_failure,
             attributes=self.attributes,
+            headers=self.headers,
         )
 
 
@@ -98,6 +106,7 @@ def wrap_input(args: Sequence[Any], meta: Optional[RunMeta] = None) -> Any:
             "last_completion": meta.last_completion,
             "last_failure": meta.last_failure,
             "attributes": meta.attributes,
+            "headers": meta.headers,
         },
     }
 
@@ -113,6 +122,7 @@ def unwrap_input(payload: Any) -> Tuple[List[Any], RunMeta]:
             last_completion=raw.get("last_completion"),
             last_failure=raw.get("last_failure"),
             attributes=raw.get("attributes"),
+            headers=raw.get("headers"),
         )
     return list(payload), RunMeta()
 

@@ -51,6 +51,21 @@ __all__ = [
     "wait_for_cancelled_sync",
 ]
 
+
+def payload_converter() -> PayloadConverter:
+    """The payload converter for this activity (the process's active
+    ``DataConverter``'s payload converter), mirroring
+    ``temporalio.activity.payload_converter``.
+
+    Use it to convert the ``RawValue`` arguments a dynamic activity receives
+    (``payload_converter().from_payload(args[0].payload, MyType)``) or to
+    encode/decode interceptor header values (``to_payload``/``from_payload``).
+    """
+    from ._internal import conversion
+
+    return conversion.get_converter().payload_converter
+
+
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 logger = logging.getLogger("temporal_dbos.activity")
@@ -102,18 +117,6 @@ def defn(
     if fn is not None:
         return decorator(fn)
     return decorator
-
-
-def payload_converter() -> PayloadConverter:
-    """The payload converter for this activity (the process's active
-    ``DataConverter``'s payload converter), mirroring
-    ``temporalio.activity.payload_converter``. Use it to convert the
-    ``RawValue`` arguments a dynamic activity receives, e.g.
-    ``payload_converter().from_payload(args[0].payload, MyType)``.
-    """
-    from ._internal import conversion
-
-    return conversion.get_converter().payload_converter
 
 
 @dataclass(frozen=True)

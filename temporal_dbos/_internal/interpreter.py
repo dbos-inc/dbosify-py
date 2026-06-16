@@ -53,6 +53,7 @@ from typing import (
     Dict,
     List,
     Mapping,
+    NoReturn,
     Optional,
     Sequence,
     Set,
@@ -85,6 +86,7 @@ from ..workflow import (
 from . import activities as activities_mod
 from . import attributes as _attributes
 from . import conversion, ids, inbox
+from . import workflow_interceptor as _wfi
 from .payloads import (
     FailureEnvelope,
     RunMeta,
@@ -535,6 +537,9 @@ class _ActivityExec:
     # schedule_to_start_timeout in seconds; only meaningful on the queued path
     # (the local path has no queue wait), where it bounds the queue dwell.
     schedule_to_start: Optional[float] = None
+    # Interceptor headers in wire form (str -> payload dict), set by the
+    # outbound chain; delivered to the activity attempt as ExecuteActivityInput.
+    headers: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -558,6 +563,177 @@ class _ChildExec:
     memo: Optional[Mapping[str, Any]] = None
     search_attributes: Optional[Union[TypedSearchAttributes, SearchAttributes]] = None
     started: bool = False
+    # Interceptor headers in wire form (str -> payload dict), set by the
+    # outbound chain; delivered to the child run as ExecuteWorkflowInput.headers.
+    headers: Dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Workflow interceptor chain roots (DEVIATIONS D24). Built fresh per execution
+# in Interpreter._build_interceptor_chains; the inbound root performs the real
+# dispatch into user handlers, the outbound root performs the real activity /
+# child / signal / continue-as-new operations via the interpreter's runtime
+# methods. User interceptors (from Worker(interceptors=...)) wrap these.
+# ---------------------------------------------------------------------------
+
+
+class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
+    """Root of the workflow inbound chain: invokes the user's run / signal /
+    query / update handlers. ``init`` installs the (possibly wrapped) outbound
+    on the interpreter so workflow outbound calls route through it."""
+
+    def __init__(self, interp: "Interpreter") -> None:
+        # Chain root: no ``next`` to delegate to.
+        self._interp = interp
+
+    def init(self, outbound: _wfi.WorkflowOutboundInterceptor) -> None:
+        self._interp._outbound = outbound
+
+    async def execute_workflow(self, input: _wfi.ExecuteWorkflowInput) -> Any:
+        return await input.run_fn(self._interp._instance, *input.args)
+
+    async def handle_signal(self, input: _wfi.HandleSignalInput) -> None:
+        # Exact match first, then the dynamic (catch-all) handler — a dynamic
+        # handler is keyed ``None`` and called as ``fn(self, name, args)`` (the
+        # args were shaped to ``[name, Sequence[RawValue]]`` in _decode).
+        signals = self._interp._defn.signals
+        defn = signals.get(input.signal) or signals.get(None)
+        if defn is None:  # pragma: no cover — _apply_signal resolved it
+            return
+        result = defn.fn(self._interp._instance, *input.args)
+        if asyncio.iscoroutine(result):
+            await result
+
+    async def handle_query(self, input: _wfi.HandleQueryInput) -> Any:
+        queries = self._interp._defn.queries
+        defn = queries.get(input.query) or queries.get(None)
+        assert defn is not None  # _apply_query resolved it before routing
+        return defn.fn(self._interp._instance, *input.args)
+
+    def handle_update_validator(self, input: _wfi.HandleUpdateInput) -> None:
+        updates = self._interp._defn.updates
+        defn = updates.get(input.update) or updates.get(None)
+        assert defn is not None  # _apply_update resolved it before routing
+        if defn.validator is None:  # pragma: no cover — only routed when set
+            return
+        # Synchronous, read-only, against current state; a rejected update
+        # must leave no trace in workflow state.
+        self._interp._read_only = True
+        try:
+            defn.validator(self._interp._instance, *input.args)
+        finally:
+            self._interp._read_only = False
+
+    async def handle_update_handler(self, input: _wfi.HandleUpdateInput) -> Any:
+        updates = self._interp._defn.updates
+        defn = updates.get(input.update) or updates.get(None)
+        assert defn is not None  # _apply_update resolved it before routing
+        result = defn.fn(self._interp._instance, *input.args)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
+
+
+class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
+    """Root of the workflow outbound chain: performs the real activity / child /
+    signal / continue-as-new operations via the interpreter's runtime methods."""
+
+    def __init__(self, interp: "Interpreter") -> None:
+        self._interp = interp
+
+    def continue_as_new(self, input: _wfi.ContinueAsNewInput) -> "NoReturn":
+        err = ContinueAsNewError("Workflow continued as new")
+        err._tdb_args = list(input.args)
+        err._tdb_workflow = input.workflow
+        err._tdb_task_queue = input.task_queue
+        err._tdb_run_timeout = input.run_timeout
+        err._tdb_retry_policy = input.retry_policy
+        err._tdb_memo = input.memo
+        err._tdb_search_attributes = input.search_attributes
+        # Raw Payloads; codec-encoded on the real loop in _begin_continue_as_new
+        # (this runs on the virtual loop, which can't await the async codec).
+        err._tdb_headers = dict(input.headers)
+        raise err
+
+    def info(self) -> Info:
+        return self._interp.runtime_info()
+
+    async def signal_child_workflow(self, input: _wfi.SignalChildWorkflowInput) -> None:
+        # Raw-Payload headers ride in the envelope; the send command encodes them
+        # (with args) on the real loop in _process_commands.
+        envelope = inbox.signal_envelope(
+            input.signal,
+            list(input.args),
+            headers=dict(input.headers),
+        )
+        # The child may have continued as new; resolve to its current run.
+        await self._interp.runtime_send_to_workflow(
+            input.child_workflow_id, envelope, resolve_chain=True
+        )
+
+    async def signal_external_workflow(
+        self, input: _wfi.SignalExternalWorkflowInput
+    ) -> None:
+        envelope = inbox.signal_envelope(
+            input.signal,
+            list(input.args),
+            headers=dict(input.headers),
+        )
+        await self._interp.runtime_send_to_workflow(
+            input.workflow_run_id or input.workflow_id,
+            envelope,
+            resolve_chain=input.workflow_run_id is None,
+        )
+
+    def start_activity(self, input: _wfi.StartActivityInput) -> ActivityHandle:
+        return self._interp.runtime_start_activity(
+            input.activity,
+            list(input.args),
+            schedule_to_close_timeout=input.schedule_to_close_timeout,
+            start_to_close_timeout=input.start_to_close_timeout,
+            retry_policy=input.retry_policy,
+            activity_id=input.activity_id,
+            cancellation_type=int(input.cancellation_type),
+            heartbeat_timeout=input.heartbeat_timeout,
+            result_type=input.ret_type,
+            task_queue=input.task_queue,
+            schedule_to_start_timeout=input.schedule_to_start_timeout,
+            # Raw Payloads; codec-encoded on the real loop in _process_commands.
+            headers=input.headers,
+        )
+
+    def start_local_activity(
+        self, input: _wfi.StartLocalActivityInput
+    ) -> ActivityHandle:
+        return self._interp.runtime_start_activity(
+            input.activity,
+            list(input.args),
+            schedule_to_close_timeout=input.schedule_to_close_timeout,
+            start_to_close_timeout=input.start_to_close_timeout,
+            retry_policy=input.retry_policy,
+            activity_id=input.activity_id,
+            cancellation_type=int(input.cancellation_type),
+            result_type=input.ret_type,
+            headers=input.headers,
+        )
+
+    async def start_child_workflow(
+        self, input: _wfi.StartChildWorkflowInput
+    ) -> ChildWorkflowHandle:
+        return await self._interp.runtime_start_child_workflow(
+            input.workflow,
+            list(input.args),
+            # An empty id means "auto" (the interpreter derives {parent}_{seq});
+            # workflow.start_child_workflow passes "" when the caller gave no id.
+            child_id=input.id or None,
+            task_queue=input.task_queue,
+            parent_close_policy=int(input.parent_close_policy),
+            cancellation_type=int(input.cancellation_type),
+            memo=input.memo,
+            search_attributes=input.search_attributes,
+            # Raw Payloads; codec-encoded on the real loop in _start_child.
+            headers=input.headers,
+        )
 
 
 class Interpreter(_Runtime):
@@ -624,6 +800,32 @@ class Interpreter(_Runtime):
         self._start_time = 0.0
         # ("ok", result) | ("failure", exc) | ("task_failure", exc)
         self._outcome: Optional[Tuple[str, Any]] = None
+        # Workflow interceptor chains (DEVIATIONS D24), built in execute().
+        # _inbound wraps run/handler dispatch; _outbound (installed via
+        # _inbound.init) wraps activity/child/signal/continue-as-new calls.
+        self._inbound: Optional[_wfi.WorkflowInboundInterceptor] = None
+        self._outbound: Optional[_wfi.WorkflowOutboundInterceptor] = None
+        # The run's interceptor headers, decoded to Payloads in execute().
+        self._headers: Mapping[str, Any] = {}
+
+    def _build_interceptor_chains(self) -> None:
+        """Build the inbound/outbound interceptor chains for this execution from
+        the worker's registered interceptors (mirroring temporalio's per-execution
+        construction). With no interceptors this is just the roots, preserving the
+        prior dispatch exactly."""
+        from . import registry
+
+        inbound: _wfi.WorkflowInboundInterceptor = _RootWorkflowInbound(self)
+        for interceptor in reversed(registry.worker_interceptors):
+            cls = interceptor.workflow_interceptor_class(
+                _wfi.WorkflowInterceptorClassInput(unsafe_extern_functions={})
+            )
+            if cls is not None:
+                inbound = cls(inbound)
+        self._inbound = inbound
+        # init() walks the chain installing the (possibly wrapped) outbound; the
+        # root inbound's init stores the final outbound on self._outbound.
+        inbound.init(_RootWorkflowOutbound(self))
 
     # ------------------------------------------------------------------
     # The outer loop (real asyncio loop, inside the DBOS workflow)
@@ -678,6 +880,10 @@ class Interpreter(_Runtime):
         self._memo, self._typed_sa = await _attributes.decode_attributes(
             self._meta.attributes
         )
+        # Decode the run's headers to Payloads (ExecuteWorkflowInput.headers) and
+        # build the interceptor chains before any workflow code runs.
+        self._headers = await conversion.decode_headers(self._meta.headers)
+        self._build_interceptor_chains()
         self._instantiate()
         try:
             while True:
@@ -799,6 +1005,13 @@ class Interpreter(_Runtime):
         # Temporal). continue_as_new's own run_timeout/retry_policy
         # arguments override the carried values for the new run.
         carried = self._meta.carried_forward()
+        # Headers do NOT auto-carry across continue-as-new (Temporal semantics):
+        # the outbound chain sets them explicitly (an interceptor re-injects
+        # context). _tdb_headers holds raw Payloads; codec-encode here (real
+        # loop) into wire form for the next run.
+        carried.headers = (
+            await conversion.encode_headers(getattr(can, "_tdb_headers", None)) or None
+        )
         if can._tdb_run_timeout is not None:
             carried.run_timeout = can._tdb_run_timeout.total_seconds()
         if can._tdb_retry_policy is not None:
@@ -892,7 +1105,14 @@ class Interpreter(_Runtime):
 
     async def _run_primary(self) -> None:
         try:
-            result = await self._defn.run_fn(self._instance, *self._args)
+            assert self._inbound is not None
+            input = _wfi.ExecuteWorkflowInput(
+                type=self._defn.cls,
+                run_fn=self._defn.run_fn,
+                args=self._args,
+                headers=self._headers,
+            )
+            result = await self._inbound.execute_workflow(input)
             self._set_outcome(("ok", result))
         except ContinueAsNewError as can:
             self._set_outcome(("continue_as_new", can))
@@ -1050,6 +1270,7 @@ class Interpreter(_Runtime):
         result_type: Optional[type] = None,
         task_queue: Optional[str] = None,
         schedule_to_start_timeout: Optional[timedelta] = None,
+        headers: Optional[Mapping[str, Any]] = None,
     ) -> ActivityHandle:
         self._assert_not_read_only("start an activity")
         if task_queue is None:
@@ -1101,6 +1322,7 @@ class Interpreter(_Runtime):
                 if schedule_to_start_timeout
                 else None
             ),
+            headers=dict(headers or {}),
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
@@ -1172,9 +1394,12 @@ class Interpreter(_Runtime):
                     # saw CancelledError) and nothing was dispatched on either
                     # path — so there is nothing to launch or cancel.
                     continue
-                # Encode the args once (reused across retries); the step
-                # decodes them against the activity's signature.
+                # Encode the args + headers once (reused across retries); the
+                # step decodes them. Done here on the real loop so a codec's
+                # async work stays off the virtual loop (headers held raw Payloads
+                # from the sync outbound root until now).
                 exec_state.args = await conversion.encode_values(exec_state.args)
+                exec_state.headers = await conversion.encode_headers(exec_state.headers)
                 # Resolve our own queue only when a task_queue was requested,
                 # so workflows that never use cross-queue dispatch keep their
                 # exact checkpoint shape (no extra status read).
@@ -1195,12 +1420,16 @@ class Interpreter(_Runtime):
             elif kind == "send":
                 target, envelope, future, resolve_chain = self._pending_sends.pop(seq)
                 if isinstance(envelope, dict) and envelope.get("kind") == "signal":
-                    # Encode the signal args here (real loop), not in workflow
-                    # code, so a codec's async work stays off the virtual loop.
+                    # Encode the signal args + headers here (real loop), not in
+                    # workflow code, so a codec's async work stays off the
+                    # virtual loop (the outbound root left both raw).
                     envelope = {
                         **envelope,
                         "args": await conversion.encode_values(
                             envelope.get("args", [])
+                        ),
+                        "headers": await conversion.encode_headers(
+                            envelope.get("headers")
                         ),
                     }
                 # send_async is checkpointed; awaited inline so its
@@ -1288,10 +1517,15 @@ class Interpreter(_Runtime):
             child_attrs = await _attributes.encode_attributes(
                 child.memo, child.search_attributes
             )
-            child_payload = wrap_input(
-                child_args,
-                RunMeta(attributes=child_attrs) if child_attrs is not None else None,
+            # Encode headers here (real loop) — child.headers held raw Payloads
+            # from the sync outbound root, and a codec is async.
+            child_headers = await conversion.encode_headers(child.headers)
+            child_meta = (
+                RunMeta(attributes=child_attrs, headers=child_headers or None)
+                if child_attrs is not None or child_headers
+                else None
             )
+            child_payload = wrap_input(child_args, child_meta)
             attrs_ctx = (
                 SetWorkflowAttributes(child_attrs)
                 if child_attrs is not None
@@ -1449,6 +1683,7 @@ class Interpreter(_Runtime):
             "workflow_id": ids.parse_run(self._workflow_id)[0],
             "workflow_run_id": self._workflow_id,
             "workflow_type": self._defn.name,
+            "headers": exec_state.headers,
         }
         # Call step_fn synchronously so its function_id is claimed here (a
         # deterministic position); the result decode rides outside the
@@ -1511,6 +1746,7 @@ class Interpreter(_Runtime):
             "workflow_id": ids.parse_run(self._workflow_id)[0],
             "workflow_run_id": self._workflow_id,
             "workflow_type": self._defn.name,
+            "headers": exec_state.headers,
             # Tells the attempt step to poll the cross-process cancel event.
             "queued": True,
             # The activity workflow id, so info().task_token addresses this
@@ -1885,7 +2121,7 @@ class Interpreter(_Runtime):
             await self._apply_update(envelope)
         elif kind == "query":
             envelope = await self._decode_message_args(envelope)
-            self._apply_query(envelope)
+            await self._apply_query(envelope)
         elif kind == "activity_result":
             await self._apply_activity_result(envelope)
         elif kind == "activity_heartbeat":
@@ -2080,8 +2316,14 @@ class Interpreter(_Runtime):
             )
             return
         decoded = await self._decode_message_args(envelope)
+        # Decode headers here (real loop) so the codec runs off the virtual loop;
+        # the handler task gets ready Payloads.
+        headers = await conversion.decode_headers(envelope.get("headers"))
         self._spawn_handler(
-            self._run_signal_handler(defn.fn, decoded["args"]),
+            # Pass the incoming signal name (not defn.name, which is None for a
+            # dynamic handler): the inbound chain re-resolves it, and an
+            # interceptor sees the real name.
+            self._run_signal_handler(envelope["name"], decoded["args"], headers),
             kind="signal",
             # A dynamic handler has no name of its own; label it by the
             # incoming signal name (for unfinished-handler warnings).
@@ -2090,12 +2332,13 @@ class Interpreter(_Runtime):
         )
 
     async def _run_signal_handler(
-        self, fn: Callable[..., Any], args: Sequence[Any]
+        self, name: str, args: Sequence[Any], headers: Mapping[str, Any]
     ) -> None:
         try:
-            result = fn(self._instance, *args)
-            if asyncio.iscoroutine(result):
-                await result
+            assert self._inbound is not None
+            await self._inbound.handle_signal(
+                _wfi.HandleSignalInput(signal=name, args=args, headers=headers)
+            )
         except ContinueAsNewError as can:
             # Handlers may initiate continue-as-new (as in Temporal).
             self._set_outcome(("continue_as_new", can))
@@ -2204,17 +2447,24 @@ class Interpreter(_Runtime):
             self._reply(acceptance_key, status="rejected", failure=failure)
             self._reply(reply_key, status="rejected", failure=failure)
             return
+        # Decode headers once here (real loop) so the codec runs off the virtual
+        # loop; both the validator and the handler task get ready Payloads.
+        update_headers = await conversion.decode_headers(envelope.get("headers"))
         if defn.validator is not None:
-            validator = defn.validator
 
             def run_validator() -> None:
-                # Synchronous, read-only, against current state; a rejected
-                # update must leave no trace in workflow state.
-                self._read_only = True
-                try:
-                    validator(self._instance, *envelope["args"])
-                finally:
-                    self._read_only = False
+                # Routed through the inbound chain; the root sets the read-only,
+                # against-current-state context (a rejected update must leave no
+                # trace in workflow state).
+                assert self._inbound is not None
+                self._inbound.handle_update_validator(
+                    _wfi.HandleUpdateInput(
+                        id=self._workflow_id,
+                        update=envelope["name"],
+                        args=envelope["args"],
+                        headers=update_headers,
+                    )
+                )
 
             # The verdict is a checkpoint: the validator runs exactly once,
             # at first delivery; replay reads the recorded verdict.
@@ -2233,7 +2483,14 @@ class Interpreter(_Runtime):
         # ACCEPTED); the handler runs as a tracked vloop task.
         self._reply(acceptance_key, status="accepted")
         self._spawn_handler(
-            self._run_update_handler(defn.fn, envelope["args"], reply_key),
+            self._run_update_handler(
+                # Incoming update name (not defn.name, None for a dynamic
+                # handler): the inbound chain re-resolves it.
+                envelope["name"],
+                envelope["args"],
+                reply_key,
+                update_headers,
+            ),
             kind="update",
             # A dynamic handler has no name of its own; label it by the
             # incoming update name.
@@ -2243,12 +2500,22 @@ class Interpreter(_Runtime):
         )
 
     async def _run_update_handler(
-        self, fn: Callable[..., Any], args: Sequence[Any], reply_key: str
+        self,
+        name: str,
+        args: Sequence[Any],
+        reply_key: str,
+        headers: Mapping[str, Any],
     ) -> None:
         try:
-            result = fn(self._instance, *args)
-            if asyncio.iscoroutine(result):
-                result = await result
+            assert self._inbound is not None
+            result = await self._inbound.handle_update_handler(
+                _wfi.HandleUpdateInput(
+                    id=self._workflow_id,
+                    update=name,
+                    args=args,
+                    headers=headers,
+                )
+            )
         except ContinueAsNewError as can:
             # The update never completes (no result event); like Temporal,
             # prefer initiating CAN from the primary coroutine.
@@ -2264,7 +2531,7 @@ class Interpreter(_Runtime):
             return
         self._reply(reply_key, status="completed", result=result)
 
-    def _apply_query(self, envelope: inbox.Envelope) -> None:
+    async def _apply_query(self, envelope: inbox.Envelope) -> None:
         reply_key = inbox.query_result_key(envelope["request_id"])
         defn = self._defn.queries.get(envelope["name"]) or self._defn.queries.get(None)
         if defn is None:
@@ -2275,9 +2542,25 @@ class Interpreter(_Runtime):
             )
             self._reply(reply_key, status="failed", failure=failure)
             return
+        # Queries are synchronous (DEVIATIONS #11): the inbound chain is driven
+        # to completion without suspension (the root invokes the sync handler).
         self._read_only = True
         try:
-            result = defn.fn(self._instance, *envelope["args"])
+            assert self._inbound is not None
+            result = await self._inbound.handle_query(
+                _wfi.HandleQueryInput(
+                    id=self._workflow_id,
+                    query=envelope["name"],
+                    args=envelope["args"],
+                    headers=await conversion.decode_headers(envelope.get("headers")),
+                )
+            )
+        except asyncio.CancelledError:
+            # Never swallow cancellation as a query failure: queries are driven
+            # synchronously so this is unreachable in practice, but if a query
+            # interceptor ever suspended, the cancel must propagate, not become
+            # a "failed" reply.
+            raise
         except BaseException as err:  # noqa: BLE001
             self._reply(reply_key, status="failed", failure=err)
             return
@@ -2308,6 +2591,10 @@ class Interpreter(_Runtime):
     # ------------------------------------------------------------------
     # workflow.py runtime backing (_Runtime)
     # ------------------------------------------------------------------
+
+    def runtime_outbound(self) -> _wfi.WorkflowOutboundInterceptor:
+        assert self._outbound is not None, "interceptor chains not built"
+        return self._outbound
 
     def runtime_info(self) -> Info:
         return Info(
@@ -2407,6 +2694,7 @@ class Interpreter(_Runtime):
         search_attributes: Optional[
             Union[TypedSearchAttributes, SearchAttributes]
         ] = None,
+        headers: Optional[Mapping[str, Any]] = None,
     ) -> "ChildWorkflowHandle":
         self._assert_not_read_only("start a child workflow")
         seq = self._next_seq("child")
@@ -2428,6 +2716,7 @@ class Interpreter(_Runtime):
             result_future=self._vloop.create_future(),
             memo=memo,
             search_attributes=search_attributes,
+            headers=dict(headers or {}),
         )
         self._pending_children[seq] = child
         self._commands.append(("child", seq))

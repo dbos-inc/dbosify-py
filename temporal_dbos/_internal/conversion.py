@@ -15,7 +15,17 @@ its args, so the decode side always receives payload dicts.
 import base64
 import inspect
 import json
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, get_type_hints
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    get_type_hints,
+)
 
 from ..converter import DataConverter, Payload
 
@@ -131,6 +141,49 @@ def decode_value_sync(value: Any, type_hint: Optional[type] = None) -> Any:
     payload = _payload_from_dict(value)
     hints = [type_hint] if type_hint is not None else None
     return _active_converter.payload_converter.from_payloads([payload], hints)[0]
+
+
+# ---------------------------------------------------------------------------
+# Headers (interceptor header-propagation channel, DEVIATIONS D24).
+#
+# At the interceptor boundary a header value is a :py:class:`Payload` (as in
+# temporalio — the user encodes/decodes it with ``workflow.payload_converter``/
+# ``activity.payload_converter``). On the wire (run meta, inbox envelopes,
+# activity step meta) it is the same small payload dict every other value uses,
+# so it checkpoints as JSON. A configured ``PayloadCodec`` runs on header bytes
+# too (like args), so an encrypting codec protects header values; both are async
+# and called only on the real loop, at the same boundaries args are encoded.
+# ---------------------------------------------------------------------------
+
+
+async def encode_headers(headers: Optional[Mapping[str, Payload]]) -> Dict[str, Any]:
+    """Convert boundary headers (str -> Payload) to wire form (str -> payload
+    dict), codec-encoding the bytes when a codec is configured. Empty/None maps
+    to ``{}``."""
+    if not headers:
+        return {}
+    keys = list(headers.keys())
+    payloads: Sequence[Payload] = list(headers.values())
+    inline = _active_converter.payload_codec is None
+    if _active_converter.payload_codec is not None:
+        payloads = await _active_converter.payload_codec.encode(list(payloads))
+    return {
+        key: _payload_to_dict(payload, inline_json=inline)
+        for key, payload in zip(keys, payloads)
+    }
+
+
+async def decode_headers(wire: Optional[Mapping[str, Any]]) -> Dict[str, Payload]:
+    """Convert wire-form headers (str -> payload dict) back to boundary headers
+    (str -> Payload), codec-decoding the bytes when a codec is configured.
+    Empty/None maps to ``{}``."""
+    if not wire:
+        return {}
+    keys = list(wire.keys())
+    payloads: Sequence[Payload] = [_payload_from_dict(value) for value in wire.values()]
+    if _active_converter.payload_codec is not None:
+        payloads = await _active_converter.payload_codec.decode(list(payloads))
+    return dict(zip(keys, payloads))
 
 
 def type_hints_from_func(

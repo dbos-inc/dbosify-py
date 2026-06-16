@@ -6,13 +6,15 @@ process and observe real calls. Activity interceptors are configured on the
 Worker; client interceptors on the Client.
 """
 
+import contextvars
 from datetime import timedelta
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import pytest
 from dbos import DBOSClient
 
 from temporal_dbos import activity, workflow
+from temporal_dbos._internal import conversion
 from temporal_dbos.client import (
     Client,
 )
@@ -35,11 +37,19 @@ from temporal_dbos.exceptions import ApplicationError
 from temporal_dbos.worker import (
     ActivityInboundInterceptor,
     ActivityOutboundInterceptor,
+    ContinueAsNewInput,
     ExecuteActivityInput,
+    ExecuteWorkflowInput,
+    HandleSignalInput,
 )
 from temporal_dbos.worker import Interceptor as WorkerInterceptor
 from temporal_dbos.worker import (
+    StartActivityInput,
+    StartChildWorkflowInput,
     Worker,
+    WorkflowInboundInterceptor,
+    WorkflowInterceptorClassInput,
+    WorkflowOutboundInterceptor,
 )
 from tests.dbconfig import default_config, system_database_url
 from tests.harness import retry_until_success_async
@@ -676,3 +686,322 @@ async def test_schedule_update_does_not_invoke_describe_schedule_interceptor() -
     verbs = [e[0] for e in events]
     assert "update_schedule" in verbs
     assert "describe_schedule" not in verbs
+
+
+# --- Workflow interceptors + header propagation (DEVIATIONS D24) -----------
+#
+# A context-propagation interceptor (the canonical tracing/baggage shape): a
+# value set once at the client surfaces in the workflow, its activities, its
+# children (and their activities), signal handlers, and across continue-as-new.
+
+HEADER_KEY = "x-trace"
+
+# Process-global but task-local: each workflow run / activity attempt copies its
+# own context, so parent / child / activity values never bleed together.
+_wf_trace: contextvars.ContextVar[str] = contextvars.ContextVar("wf_trace", default="")
+_act_trace: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "act_trace", default=""
+)
+
+
+@activity.defn
+async def echo_trace() -> str:
+    """Returns the trace the activity *interceptor* extracted from headers."""
+    return _act_trace.get()
+
+
+@workflow.defn
+class TraceChildWorkflow:
+    @workflow.run
+    async def run(self) -> Dict[str, str]:
+        from_activity = await workflow.execute_activity(
+            echo_trace, start_to_close_timeout=timedelta(seconds=30)
+        )
+        return {"trace": _wf_trace.get(), "activity": from_activity}
+
+
+@workflow.defn
+class TraceParentWorkflow:
+    @workflow.run
+    async def run(self) -> Dict[str, Any]:
+        from_activity = await workflow.execute_activity(
+            echo_trace, start_to_close_timeout=timedelta(seconds=30)
+        )
+        child = await workflow.execute_child_workflow(
+            TraceChildWorkflow.run, id="ic-trace-child"
+        )
+        return {"trace": _wf_trace.get(), "activity": from_activity, "child": child}
+
+
+@workflow.defn
+class TraceSignalWorkflow:
+    def __init__(self) -> None:
+        self.seen: Optional[str] = None
+        self.done = False
+
+    @workflow.signal
+    def go(self) -> None:
+        # The inbound handle_signal interceptor put the header into _wf_trace.
+        self.seen = _wf_trace.get()
+        self.done = True
+
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.wait_condition(lambda: self.done)
+        return self.seen or ""
+
+
+@workflow.defn
+class TraceContinueWorkflow:
+    @workflow.run
+    async def run(self, hops: int) -> str:
+        if hops > 0:
+            workflow.continue_as_new(args=[hops - 1])
+        return _wf_trace.get()
+
+
+def _with_trace(headers: Dict[str, Any], value: str) -> Dict[str, Any]:
+    return {**headers, HEADER_KEY: workflow.payload_converter().to_payload(value)}
+
+
+class _TraceOutbound(WorkflowOutboundInterceptor):
+    def start_activity(self, input: StartActivityInput) -> Any:
+        trace = _wf_trace.get()
+        if trace:
+            input.headers = _with_trace(dict(input.headers), trace)
+        return self.next.start_activity(input)
+
+    async def start_child_workflow(self, input: StartChildWorkflowInput) -> Any:
+        trace = _wf_trace.get()
+        if trace:
+            input.headers = _with_trace(dict(input.headers), trace)
+        return await self.next.start_child_workflow(input)
+
+    def continue_as_new(self, input: ContinueAsNewInput) -> Any:
+        trace = _wf_trace.get()
+        if trace:
+            input.headers = _with_trace(dict(input.headers), trace)
+        self.next.continue_as_new(input)
+
+
+class _TraceInbound(WorkflowInboundInterceptor):
+    def init(self, outbound: WorkflowOutboundInterceptor) -> None:
+        super().init(_TraceOutbound(outbound))
+
+    async def execute_workflow(self, input: ExecuteWorkflowInput) -> Any:
+        header = input.headers.get(HEADER_KEY)
+        if header is not None:
+            _wf_trace.set(workflow.payload_converter().from_payload(header))
+        return await self.next.execute_workflow(input)
+
+    async def handle_signal(self, input: HandleSignalInput) -> None:
+        header = input.headers.get(HEADER_KEY)
+        if header is not None:
+            _wf_trace.set(workflow.payload_converter().from_payload(header))
+        await self.next.handle_signal(input)
+
+
+class _TraceActivityInbound(ActivityInboundInterceptor):
+    async def execute_activity(self, input: ExecuteActivityInput) -> Any:
+        header = input.headers.get(HEADER_KEY)
+        if header is not None:
+            _act_trace.set(activity.payload_converter().from_payload(header))
+        return await super().execute_activity(input)
+
+
+class _TraceWorkerInterceptor(WorkerInterceptor):
+    def workflow_interceptor_class(
+        self, input: WorkflowInterceptorClassInput
+    ) -> Optional[Type[WorkflowInboundInterceptor]]:
+        return _TraceInbound
+
+    def intercept_activity(
+        self, next: ActivityInboundInterceptor
+    ) -> ActivityInboundInterceptor:
+        return _TraceActivityInbound(next)
+
+
+class _TraceClientOutbound(OutboundInterceptor):
+    def __init__(self, next: OutboundInterceptor, value: str) -> None:
+        super().__init__(next)
+        self._value = value
+
+    async def start_workflow(self, input: Any) -> Any:
+        pc = conversion.get_converter().payload_converter
+        input.headers = {**input.headers, HEADER_KEY: pc.to_payload(self._value)}
+        return await super().start_workflow(input)
+
+    async def signal_workflow(self, input: Any) -> None:
+        pc = conversion.get_converter().payload_converter
+        input.headers = {**input.headers, HEADER_KEY: pc.to_payload(self._value)}
+        await super().signal_workflow(input)
+
+
+class _TraceClientInterceptor(ClientInterceptor):
+    def __init__(self, value: str = "hello") -> None:
+        self._value = value
+
+    def intercept_client(self, next: OutboundInterceptor) -> OutboundInterceptor:
+        return _TraceClientOutbound(next, self._value)
+
+
+async def test_header_propagates_to_workflow_activity_and_child() -> None:
+    """One value set by a client interceptor at start reaches the workflow, its
+    activity, the child workflow, and the child's activity."""
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[TraceParentWorkflow, TraceChildWorkflow],
+        activities=[echo_trace],
+        interceptors=[_TraceWorkerInterceptor()],
+    )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(
+                dbos_client, interceptors=[_TraceClientInterceptor()]
+            )
+            result = await client.execute_workflow(
+                TraceParentWorkflow.run, id="ic-trace-parent", task_queue=TASK_QUEUE
+            )
+        finally:
+            dbos_client.destroy()
+
+    assert result["trace"] == "hello"
+    assert result["activity"] == "hello"
+    assert result["child"] == {"trace": "hello", "activity": "hello"}
+
+
+async def test_header_channel_inert_without_client_injection() -> None:
+    """With the workflow interceptor present but no client injection, headers
+    are empty everywhere — the prior, header-free behavior is preserved."""
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[TraceParentWorkflow, TraceChildWorkflow],
+        activities=[echo_trace],
+        interceptors=[_TraceWorkerInterceptor()],
+    )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)  # no client interceptor
+            result = await client.execute_workflow(
+                TraceParentWorkflow.run, id="ic-trace-plain", task_queue=TASK_QUEUE
+            )
+        finally:
+            dbos_client.destroy()
+
+    assert result == {
+        "trace": "",
+        "activity": "",
+        "child": {"trace": "", "activity": ""},
+    }
+
+
+async def test_signal_header_reaches_handler() -> None:
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[TraceSignalWorkflow],
+        activities=[echo_trace],
+        interceptors=[_TraceWorkerInterceptor()],
+    )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(
+                dbos_client, interceptors=[_TraceClientInterceptor("from-signal")]
+            )
+            handle = await client.start_workflow(
+                TraceSignalWorkflow.run, id="ic-trace-signal", task_queue=TASK_QUEUE
+            )
+            await handle.signal(TraceSignalWorkflow.go)
+            assert await handle.result() == "from-signal"
+        finally:
+            dbos_client.destroy()
+
+
+async def test_header_survives_continue_as_new() -> None:
+    """The outbound continue_as_new interceptor re-injects the trace each hop,
+    so a value set at start survives the whole chain."""
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[TraceContinueWorkflow],
+        activities=[echo_trace],
+        interceptors=[_TraceWorkerInterceptor()],
+    )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(
+                dbos_client, interceptors=[_TraceClientInterceptor()]
+            )
+            result = await client.execute_workflow(
+                TraceContinueWorkflow.run,
+                args=[3],
+                id="ic-trace-can",
+                task_queue=TASK_QUEUE,
+            )
+        finally:
+            dbos_client.destroy()
+
+    assert result == "hello"
+
+
+async def test_header_survives_payload_codec() -> None:
+    """A configured PayloadCodec protects header values and round-trips them
+    through the full channel (client -> workflow -> activity -> child)."""
+    from typing import Sequence
+
+    from temporal_dbos.converter import DataConverter, Payload, PayloadCodec
+
+    class _XorCodec(PayloadCodec):
+        async def encode(self, payloads: Sequence[Payload]) -> List[Payload]:
+            return [
+                Payload(
+                    metadata={**p.metadata, "codec": b"xor"},
+                    data=bytes(b ^ 0x5A for b in p.data),
+                )
+                for p in payloads
+            ]
+
+        async def decode(self, payloads: Sequence[Payload]) -> List[Payload]:
+            return [
+                Payload(
+                    metadata={k: v for k, v in p.metadata.items() if k != "codec"},
+                    data=bytes(b ^ 0x5A for b in p.data),
+                )
+                for p in payloads
+            ]
+
+    converter = DataConverter(payload_codec=_XorCodec())
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[TraceParentWorkflow, TraceChildWorkflow],
+        activities=[echo_trace],
+        interceptors=[_TraceWorkerInterceptor()],
+        data_converter=converter,
+    )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(
+                dbos_client,
+                interceptors=[_TraceClientInterceptor()],
+                data_converter=converter,
+            )
+            result = await client.execute_workflow(
+                TraceParentWorkflow.run, id="ic-trace-codec", task_queue=TASK_QUEUE
+            )
+        finally:
+            dbos_client.destroy()
+
+    # The codec ran on every header hop and the values still arrive intact.
+    assert result == {
+        "trace": "hello",
+        "activity": "hello",
+        "child": {"trace": "hello", "activity": "hello"},
+    }

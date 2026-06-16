@@ -1,30 +1,36 @@
 """Worker-side interceptors, mirroring the activity portion of
 ``temporalio.worker`` (``temporalio/worker/_interceptor.py``).
 
-This is the Phase-3 surface: activity inbound/outbound interception. The
-classes are re-exported from :py:mod:`temporal_dbos.worker` so user code
-extends ``temporal_dbos.worker.Interceptor`` exactly as it would
+Activity inbound/outbound interception lives here; the workflow
+inbound/outbound classes and their ``*Input`` dataclasses live in
+:py:mod:`._internal.workflow_interceptor`. Both sets are re-exported from
+:py:mod:`temporal_dbos.worker` so user code extends
+``temporal_dbos.worker.Interceptor`` exactly as it would
 ``temporalio.worker.Interceptor``.
 
-Workflow inbound/outbound interception (``workflow_interceptor_class`` and the
-``WorkflowInbound/Outbound`` classes) is Phase 4 and intentionally absent here;
-Nexus interception is unsupported (DEVIATIONS D1). The base ``Interceptor``
-therefore exposes only ``intercept_activity``.
+A worker ``Interceptor`` advertises an activity interceptor via
+``intercept_activity`` and a workflow interceptor via
+``workflow_interceptor_class``. Nexus interception is unsupported
+(DEVIATIONS D1) and intentionally absent.
 
-The chain is built per activity attempt in
-``_internal/activities.py`` (mirroring temporalio's
-``_activity.py`` chaining): inbound interceptors wrap the real
-sync/async dispatch; outbound interceptors wrap ``activity.info()`` /
-``activity.heartbeat()``.
+The activity chain is built per attempt in ``_internal/activities.py``
+(mirroring temporalio's ``_activity.py`` chaining): inbound interceptors wrap
+the real sync/async dispatch; outbound interceptors wrap ``activity.info()`` /
+``activity.heartbeat()``. The workflow chains are built per execution in
+``_internal/interpreter.py``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence, Type
 
 if TYPE_CHECKING:
     from ..activity import Info
+    from .workflow_interceptor import (
+        WorkflowInboundInterceptor,
+        WorkflowInterceptorClassInput,
+    )
 
 __all__ = [
     "Interceptor",
@@ -55,6 +61,26 @@ class Interceptor:
         """
         return next
 
+    def workflow_interceptor_class(
+        self, input: "WorkflowInterceptorClassInput"
+    ) -> "Optional[Type[WorkflowInboundInterceptor]]":
+        """Class that will be instantiated and used to intercept workflows.
+
+        Called once per workflow execution (DESIGN §6.8). The returned class
+        must take the same constructor as
+        :py:meth:`WorkflowInboundInterceptor.__init__` (a single ``next``).
+        Returning ``None`` (the default) means this interceptor does not
+        intercept workflows.
+
+        Args:
+            input: Carries ``unsafe_extern_functions`` for parity; inert here
+                (temporal_dbos has no workflow sandbox, DEVIATIONS D3).
+
+        Returns:
+            The class to construct to intercept each workflow, or ``None``.
+        """
+        return None
+
 
 @dataclass
 class ExecuteActivityInput:
@@ -65,8 +91,9 @@ class ExecuteActivityInput:
     # Always ``None`` in temporal_dbos: sync activities run via
     # ``asyncio.to_thread``, not a user-supplied executor. Present for parity.
     executor: Any | None
-    # Always empty in temporal_dbos: there is no header-propagation path until
-    # workflow interceptors (Phase 4). Present for parity.
+    # Headers (str -> Payload) a workflow outbound interceptor set on
+    # StartActivityInput, propagated here (DEVIATIONS D24); empty when nothing
+    # set them. Decode values with ``activity.payload_converter()``.
     headers: Mapping[str, Any]
 
 
