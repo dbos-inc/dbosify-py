@@ -359,3 +359,84 @@ temporalio; these edges differ:
   applied (only `run_timeout` maps to a DBOS per-run timeout, as in
   `start_workflow` — see D-note #14). `list_schedules` returns all temporal-dbos
   schedules (the visibility `query` filter is ignored).
+
+### D23. Cross-queue activities run on a different worker, with caveats
+
+`execute_activity(..., task_queue=)` is honored (DESIGN §6.1.2): when the named
+queue differs from the workflow's own queue, the activity does not run as an
+in-process step — the interpreter enqueues a generic `__temporal_activity` DBOS
+workflow onto that queue and awaits its result, exactly as it enqueues and
+awaits a child workflow. Whatever worker listens on that queue runs the
+activity, so "activities run on a different worker" holds. The activity workflow
+id is the deterministic `{parent_run_id}--a{seq}` (the `--a` separator is reserved
+like `--r`, so it can never collide with a user/child/run id), so a crash anywhere
+after the enqueue re-attaches idempotently on recovery (no twin), and a SIGKILL of
+either the workflow worker or the activity worker resumes correctly.
+
+Operational requirement and current scope:
+
+- **Cooperating workers must share a DBOS application version.** DBOS scopes
+  queue dequeuing by application version, and a workflow worker and an
+  activity-only worker register different function sets — so their
+  auto-computed versions differ and the activity worker would never dequeue the
+  workflow worker's enqueue. Pin `DBOS__APPVERSION` to the same value across all
+  workers that dispatch activities to one another. (Temporal coordinates on the
+  task queue alone; this version pin is the DBOS-backed analogue.)
+- **The activity workflow owns the full retry loop** (Design A): the queued
+  path honors `retry_policy` (backoff, `maximum_attempts`, `non_retryable_error_types`,
+  `ApplicationError(non_retryable=...)`, `next_retry_delay`), `start_to_close_timeout`
+  (per attempt), and `schedule_to_close_timeout` — the last via the same
+  `activities.retry_decision` the local path uses, so it bounds the *retry
+  sequence* (checked between attempts), not an in-flight attempt
+  (`start_to_close` bounds that), exactly as on the local path. Backoff is a
+  durable `DBOS.sleep_async`, so a crash mid-backoff resumes at the right
+  attempt. Minor deviation: schedule-to-close elapsed is measured from the first
+  attempt's start on the activity worker, so the queue-wait before the first
+  attempt is not counted toward it.
+- **Cancellation reaches the activity cross-process.** When a queued activity is
+  cancelled (an explicit `handle.cancel()` or propagated workflow cancellation),
+  the interpreter sets a checkpointed cancel event on its run; the activity's
+  attempt step polls that event on the other worker and delivers cancellation
+  into the running activity (its `except`/`finally` cleanup runs), then reports
+  the attempt cancelled — a cancelled activity is terminal (never retried). If the
+  activity has async-parked (raise_complete_async), the interpreter also sends a
+  cancellation marker to its completion topic so the parked wait wakes.
+  `TRY_CANCEL` resolves the awaiter immediately; `WAIT_CANCELLATION_COMPLETED`
+  resolves it only after the activity confirms its unwind via the result step;
+  `ABANDON` leaves the activity running. Like the local path and D12, an async
+  activity is cancelled at its next await (more eagerly than Temporal, which
+  delivers only at `heartbeat()`); a sync activity observes it at its next
+  `heartbeat()`.
+- **A terminal close cancels in-flight cross-queue activities.** Continue-as-new,
+  normal completion, and cooperative cancel all run the same close path, which
+  sends the cross-process cancel signal to any still-pending queued activity — so
+  a fire-and-forget or not-yet-finished activity does not outlive its workflow.
+  This close-time cancellation is unconditional: it ignores the activity's
+  `ActivityCancellationType`, so an `ABANDON` cross-queue activity is *also*
+  cancelled at a non-`terminate` close, not left running to completion. (The
+  type still governs in-run `handle.cancel()`: `ABANDON` there detaches. This
+  matches the local path, which likewise cancels every in-flight attempt at
+  close regardless of type.) **Exception: forceful `terminate`** is a native
+  DBOS cancel that runs no close code, so it does *not* cancel in-flight
+  cross-queue activities (they finish on their worker, their result discarded) —
+  the same "no cleanup" behaviour `terminate` already has for child workflows.
+  Use cooperative cancel if you need the activity stopped.
+- **`schedule_to_start_timeout` bounds the queue dwell.** The activity workflow
+  compares its enqueue time (`created_at`) to its start time on the worker and,
+  if the budget was exceeded, fails with `TimeoutType.SCHEDULE_TO_START` before
+  running any attempt. (On the local path it is a no-op — there is no queue
+  wait — as in Temporal.)
+- **`raise_complete_async` parks on the queued path.** The activity workflow
+  waits on a dedicated completion topic; the task token carries the activity
+  workflow id so an `AsyncActivityHandle` (`complete`/`fail`/`report_cancellation`)
+  delivers there. A `fail` re-runs the activity per the retry policy; a
+  `heartbeat` is skipped (it is not a completion); the recv times out against the
+  start-to-close budget; and a completion / cancellation sets the gone-event so a
+  later completer raises `AsyncActivityCancelledError` instead of sending into the
+  void.
+- **Remaining gap on the queued path:** cross-process heartbeat-*detail*
+  forwarding to the workflow side. The in-activity heartbeat-timeout watchdog and
+  cross-attempt `info().heartbeat_details` work on the activity worker; only
+  surfacing live details to the workflow (rare) is absent — a `heartbeat` to an
+  async-parked activity is accepted but its details are dropped. Documented rather
+  than silently ignored.

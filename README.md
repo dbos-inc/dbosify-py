@@ -85,6 +85,12 @@ unmodified):
 | backfill_schedule | ✅ (`backfill` over a past window) |
 | delete_schedule | ✅ (`delete`) |
 
+`activity_worker/` (cross-queue / distributed activity dispatch, §6.1.2):
+
+| Sample | Status |
+|---|---|
+| activity_worker | ✅ capability-substituted — the samples-python sample is a Go workflow calling a Python activity over a server (unrunnable here: no server, no Go worker). The conformance test proves the capability it demonstrates: an activities-only worker reachable from a workflow on a different task queue, with both workers as separate processes. SIGKILL recovery of either worker is covered (integration). Queued-path scope: see [DEVIATIONS.md](DEVIATIONS.md) D23. |
+
 ## Known deviations from Temporal
 
 **[DEVIATIONS.md](DEVIATIONS.md) is the canonical, detailed record of

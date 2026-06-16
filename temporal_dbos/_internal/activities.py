@@ -15,13 +15,14 @@ to advance the workflow's virtual clock deterministically.
 
 import asyncio
 import time as time_mod
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from dbos import DBOS
 
 from .. import exceptions
-from . import registry
-from .payloads import serialize_failure
+from ..common import RetryPolicy
+from . import inbox, registry
+from .payloads import FailureEnvelope, serialize_failure
 
 AttemptStep = Callable[
     [List[Any], Optional[float], Dict[str, Any]], Coroutine[Any, Any, Dict[str, Any]]
@@ -53,6 +54,52 @@ def attempt_step_for(activity_name: str) -> AttemptStep:
     return step
 
 
+def retry_decision(
+    policy: RetryPolicy,
+    attempt: int,
+    failure: FailureEnvelope,
+    *,
+    elapsed: Optional[float],
+    schedule_to_close: Optional[float],
+) -> Tuple[Optional[float], exceptions.RetryState]:
+    """The activity retry decision (DESIGN §6.1.2), clock-independent so both
+    execution paths share it: the local path (interpreter, virtual time) and the
+    queued path (the ``__temporal_activity`` workflow, recorded-timestamp time).
+
+    Returns ``(backoff delay before the next attempt, or None to give up;
+    the retry state to report when giving up)``. ``elapsed`` is the time since
+    the activity was scheduled; pass it (with ``schedule_to_close``) so the
+    schedule-to-close budget gates retries — like Temporal, it bounds the retry
+    sequence, not an in-flight attempt (``start_to_close`` bounds that).
+    """
+    if failure.get("non_retryable"):
+        return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
+    failure_type = failure.get("type") or failure["cls"]
+    if policy.non_retryable_error_types and failure_type in set(
+        policy.non_retryable_error_types
+    ):
+        return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
+    if policy.maximum_attempts and attempt >= policy.maximum_attempts:
+        return None, exceptions.RetryState.MAXIMUM_ATTEMPTS_REACHED
+    override = failure.get("next_retry_delay")
+    if override is not None:
+        delay = float(override)
+    else:
+        delay = policy.initial_interval.total_seconds() * (
+            policy.backoff_coefficient ** (attempt - 1)
+        )
+        maximum = (
+            policy.maximum_interval.total_seconds()
+            if policy.maximum_interval
+            else policy.initial_interval.total_seconds() * 100
+        )
+        delay = min(delay, maximum)
+    if schedule_to_close is not None and elapsed is not None:
+        if elapsed + delay >= schedule_to_close:
+            return None, exceptions.RetryState.TIMEOUT
+    return delay, exceptions.RetryState.IN_PROGRESS
+
+
 def _make_attempt_step(activity_name: str) -> AttemptStep:
     async def attempt(
         args: List[Any], start_to_close: Optional[float], meta: Dict[str, Any]
@@ -64,6 +111,19 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
         attempt_started_at = time_mod.time()
         attempt_key = (str(meta.get("workflow_run_id", "")), int(meta.get("seq", -1)))
         heartbeat_timeout = meta.get("heartbeat_timeout")
+        # On the queued path the workflow runs in another process, so it can't
+        # set our in-process cancel Event; instead it sets a checkpointed cancel
+        # event on its run that we poll here (§6.1.2). Reads inside this step are
+        # not recorded as workflow steps, so the polling stays replay-safe.
+        queued = bool(meta.get("queued"))
+        cancel_target = str(meta.get("workflow_run_id", ""))
+        cancel_key = inbox.activity_cancel_key(str(meta.get("activity_id", "")))
+
+        async def _cancel_requested() -> bool:
+            from dbos import DBOS
+
+            return bool(await DBOS.get_event_async(cancel_target, cancel_key, 0))
+
         # The activity context (activity.info()/heartbeat()) rides a
         # contextvar; asyncio.to_thread copies the context, so sync
         # activities see it too. Registering the context lets the
@@ -103,7 +163,10 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             }
 
         async def run_attempt() -> Dict[str, Any]:
-            if heartbeat_timeout is None:
+            # A watchdog loop is needed when there's a heartbeat timeout to
+            # enforce, OR on the queued path to poll for cross-process
+            # cancellation. Otherwise run the activity directly.
+            if heartbeat_timeout is None and not queued:
                 return await call_user_activity()
             # Heartbeat-timeout watchdog (Temporal's liveness contract): an
             # attempt that stops heartbeating for longer than the timeout
@@ -112,7 +175,11 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             # unwinds at its next heartbeat — and abandoned, like
             # start-to-close enforcement.
             task = asyncio.ensure_future(call_user_activity())
-            poll = max(0.05, float(heartbeat_timeout) / 4)
+            poll = (
+                max(0.05, float(heartbeat_timeout) / 4)
+                if heartbeat_timeout is not None
+                else 0.25
+            )
             try:
                 return await _watch(task, poll)
             except asyncio.CancelledError:
@@ -125,25 +192,42 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
         async def _watch(
             task: "asyncio.Task[Dict[str, Any]]", poll: float
         ) -> Dict[str, Any]:
-            assert heartbeat_timeout is not None
             while True:
                 done, _ = await asyncio.wait({task}, timeout=poll)
                 if done:
                     return task.result()
-                stale = time_mod.monotonic() - ctx.last_heartbeat_at
-                if stale > float(heartbeat_timeout):
+                if queued and await _cancel_requested():
+                    # Cross-process cancellation: deliver it into the activity
+                    # (its next heartbeat raises; cancelling the task unwinds an
+                    # awaiting async activity now), let its cleanup run, then
+                    # report the attempt as cancelled.
                     ctx.cancelled.set()
                     task.cancel()
-                    hb_timeout = exceptions.TimeoutError(
-                        "activity Heartbeat timeout",
-                        type=exceptions.TimeoutType.HEARTBEAT,
-                        last_heartbeat_details=list(ctx.last_heartbeat),
-                    )
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    cancelled = exceptions.CancelledError("Activity cancelled")
                     return {
                         "ok": False,
-                        "failure": serialize_failure(hb_timeout),
+                        "failure": serialize_failure(cancelled),
                         "ended_at": time_mod.time(),
                     }
+                if heartbeat_timeout is not None:
+                    stale = time_mod.monotonic() - ctx.last_heartbeat_at
+                    if stale > float(heartbeat_timeout):
+                        ctx.cancelled.set()
+                        task.cancel()
+                        hb_timeout = exceptions.TimeoutError(
+                            "activity Heartbeat timeout",
+                            type=exceptions.TimeoutType.HEARTBEAT,
+                            last_heartbeat_details=list(ctx.last_heartbeat),
+                        )
+                        return {
+                            "ok": False,
+                            "failure": serialize_failure(hb_timeout),
+                            "ended_at": time_mod.time(),
+                        }
 
         try:
             # User exceptions (including user-raised TimeoutError) are

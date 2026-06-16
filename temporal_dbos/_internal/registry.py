@@ -104,6 +104,27 @@ def dbos_workflow_for(name: str) -> Callable[..., Any]:
     return fn
 
 
+# The process-global ``__temporal_activity`` dispatcher (the cross-queue
+# activity path, §6.1.2), registered by ``dispatcher.register_worker``. Stored
+# here (not in activity_workflow) so the interpreter can resolve it for the
+# enqueue without an import cycle, mirroring ``_dbos_workflows`` above.
+_activity_dispatcher: Optional[Callable[..., Any]] = None
+
+
+def register_activity_dispatcher_fn(fn: Callable[..., Any]) -> None:
+    global _activity_dispatcher
+    _activity_dispatcher = fn
+
+
+def activity_dispatcher_fn() -> Callable[..., Any]:
+    if _activity_dispatcher is None:
+        raise KeyError(
+            "The __temporal_activity dispatcher is not registered with this "
+            "worker (no Worker has been constructed in this process)."
+        )
+    return _activity_dispatcher
+
+
 # Worker-level failure exception types (Worker(workflow_failure_exception_types=...)),
 # merged across workers in this process; checked by the interpreter alongside
 # each definition's own list.

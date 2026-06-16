@@ -81,6 +81,7 @@ from .payloads import (
     RunMeta,
     deserialize_failure,
     deserialize_retry_policy,
+    serialize_retry_policy,
     wrap_input,
 )
 from .registry import WorkflowDefinition
@@ -143,6 +144,7 @@ CAN_SUGGESTION_THRESHOLD = int(
 _init_step: Optional[Callable[[], Any]] = None
 _child_result_step: Optional[Callable[[str], Any]] = None
 _child_exists_step: Optional[Callable[[str], Any]] = None
+_activity_result_step: Optional[Callable[[str], Any]] = None
 _update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
 _safe_status_step: Optional[Callable[[str], Any]] = None
 _safe_status_list_step: Optional[Callable[[List[str]], Any]] = None
@@ -276,6 +278,57 @@ def _child_id_taken(child_id: str) -> Any:
 
         _child_exists_step = child_exists_step
     return _child_exists_step(child_id)
+
+
+def _await_activity_result(activity_id: str) -> Any:
+    """The queued-activity result waiter (the cross-queue path, §6.1.2): our
+    own step wrapping the non-recording wait on the ``__temporal_activity``
+    workflow, returning its envelope. Same rationale as ``_await_child_result``
+    — DBOS's ``get_result`` claims its function_id at completion (a
+    nondeterministic position across racing waiters), so we wrap the raw await
+    in a step that claims the id at launch and records the outcome in our slot.
+
+    The activity workflow catches user exceptions and returns an envelope
+    (``ok=False``) rather than raising, so the only exceptions reaching here are
+    termination (native DBOS cancel of the activity workflow) or an
+    infrastructure error.
+    """
+    global _activity_result_step
+    if _activity_result_step is None:
+
+        @DBOS.step(name="__tdb_activity_result")
+        async def activity_result_step(activity_id: str) -> Dict[str, Any]:
+            from dbos._dbos import _get_dbos_instance  # see docs/phase0.md
+            from dbos._error import DBOSAwaitedWorkflowCancelledError
+
+            from .payloads import serialize_failure
+
+            dbos = _get_dbos_instance()
+            try:
+                envelope: Dict[str, Any] = (
+                    await dbos._sys_db.await_workflow_result_async(
+                        activity_id, CHILD_POLL_INTERVAL_SECONDS
+                    )
+                )
+            except DBOSAwaitedWorkflowCancelledError:
+                # The activity workflow was terminated (native DBOS cancel):
+                # surface it as a cancellation of the activity.
+                cancelled = exceptions.CancelledError("Activity cancelled")
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(cancelled),
+                    "ended_at": time_mod.time(),
+                }
+            except Exception as err:  # noqa: BLE001 — FAIL_FAST / infra errors
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(err),
+                    "ended_at": time_mod.time(),
+                }
+            return envelope
+
+        _activity_result_step = activity_result_step
+    return _activity_result_step(activity_id)
 
 
 # The status fields the interpreter actually reads — all JSON-serializable.
@@ -463,6 +516,16 @@ class _ActivityExec:
     # execute_activity(result_type=...) override; falls back to the activity's
     # registered return annotation.
     result_type: Optional[type] = None
+    # execute_activity(task_queue=...): when set and different from the
+    # workflow's own queue, the activity runs on another worker via the
+    # ``__temporal_activity`` queued path (§6.1.2) instead of a local step.
+    task_queue: Optional[str] = None
+    # The ``__temporal_activity`` workflow id once dispatched on the queued path
+    # (None on the local path); cancellation natively cancels this workflow.
+    queued_dbos_id: Optional[str] = None
+    # schedule_to_start_timeout in seconds; only meaningful on the queued path
+    # (the local path has no queue wait), where it bounds the queue dwell.
+    schedule_to_start: Optional[float] = None
 
 
 @dataclass
@@ -521,6 +584,10 @@ class Interpreter(_Runtime):
         self._cancel_requested = False
         self._cancel_reason: Optional[str] = None
         self._cancelled_activity_seqs: List[int] = []
+        # Queued-activity WAIT_CANCELLATION_COMPLETED requests: the cancel event
+        # is set in the (async) sweep, but the exec stays open until the
+        # activity confirms its unwind via the result step.
+        self._queued_wait_cancel_seqs: List[int] = []
         self._abandoned_tasks: Set["asyncio.Task[Any]"] = set()
         self._pending_children: Dict[int, _ChildExec] = {}
         self._children_registry: List[Dict[str, Any]] = []
@@ -614,13 +681,23 @@ class Interpreter(_Runtime):
                 await self._deliver(done)
         finally:
             if self._outcome is not None and self._outcome[0] != "task_failure":
-                # Mark in-flight attempts cancelled BEFORE tearing down
-                # their waiter tasks below: task cancellation unregisters
-                # the attempt's live context, after which a still-running
-                # (threaded) activity function could no longer be reached
-                # and would spin forever.
+                # Cancel in-flight activities at a terminal close (including
+                # continue-as-new), so a fire-and-forget or still-running
+                # activity does not outlive the workflow. Local attempts are
+                # marked BEFORE tearing down their waiter tasks below (task
+                # cancellation unregisters the attempt's live context, after
+                # which a still-running threaded function could no longer be
+                # reached and would spin forever); a queued activity runs on
+                # another worker, so it gets the cross-process cancel signal
+                # instead — otherwise its `__temporal_activity` workflow would
+                # keep running to completion, orphaned.
                 for exec_state in self._pending_activities.values():
-                    activity_api._request_cancel((self._workflow_id, exec_state.seq))
+                    if exec_state.queued_dbos_id is not None:
+                        await self._signal_queued_activity_cancel(exec_state)
+                    else:
+                        activity_api._request_cancel(
+                            (self._workflow_id, exec_state.seq)
+                        )
                 # Terminal outcome (not a retryable task failure): apply
                 # ParentClosePolicy to still-running children.
                 await self._sweep_children_on_close()
@@ -925,9 +1002,15 @@ class Interpreter(_Runtime):
         cancellation_type: int = 0,
         heartbeat_timeout: Optional[timedelta] = None,
         result_type: Optional[type] = None,
+        task_queue: Optional[str] = None,
+        schedule_to_start_timeout: Optional[timedelta] = None,
     ) -> ActivityHandle:
         self._assert_not_read_only("start an activity")
-        activities_mod.attempt_step_for(activity_name)  # raise early if unknown
+        if task_queue is None:
+            # Local path: the step must already be registered with this worker.
+            # The queued path (task_queue set) targets another worker, where
+            # the step lives — so don't require it here.
+            activities_mod.attempt_step_for(activity_name)  # raise early if unknown
         seq = self._next_seq("activity")
         resolved_activity_id = activity_id or f"{seq}"
         if any(
@@ -966,6 +1049,12 @@ class Interpreter(_Runtime):
                 heartbeat_timeout.total_seconds() if heartbeat_timeout else None
             ),
             result_type=result_type,
+            task_queue=task_queue,
+            schedule_to_start=(
+                schedule_to_start_timeout.total_seconds()
+                if schedule_to_start_timeout
+                else None
+            ),
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
@@ -993,12 +1082,17 @@ class Interpreter(_Runtime):
         if exec_state is None:
             return
         if exec_state.cancellation_type == 1 and not exec_state.async_pending:
-            # WAIT_CANCELLATION_COMPLETED: confirmed by the in-flight
-            # attempt's unwind. (A parked async activity has no attempt to
-            # confirm; it degrades to TRY_CANCEL below and the completer
-            # learns via the gone-event.)
+            # WAIT_CANCELLATION_COMPLETED: confirmed by the in-flight attempt's
+            # unwind — keep the exec open; the awaiter resolves on confirmation.
+            # (A parked async activity has no attempt to confirm; it degrades to
+            # TRY_CANCEL below and the completer learns via the gone-event.)
             exec_state.cancel_requested = True
-            activity_api._request_cancel((self._workflow_id, seq))
+            if exec_state.queued_dbos_id is not None:
+                # Cross-process: set the cancel event in the async sweep, then
+                # the result step delivers the cancelled envelope to confirm.
+                self._queued_wait_cancel_seqs.append(seq)
+            else:
+                activity_api._request_cancel((self._workflow_id, seq))
             return
         exec_state.future.cancel()
 
@@ -1024,11 +1118,31 @@ class Interpreter(_Runtime):
                 else:
                     self._launch_waiter("timer", seq, DBOS.sleep_async(real_delay))
             elif kind == "activity":
-                exec_state = self._pending_activities[seq]
+                exec_state = self._pending_activities.get(seq)
+                if exec_state is None:
+                    # Cancelled within the same drain that started it, before
+                    # this dispatch ran: the cancellation sweep already retired
+                    # the exec (TRY_CANCEL cancelled the future, so the awaiter
+                    # saw CancelledError) and nothing was dispatched on either
+                    # path — so there is nothing to launch or cancel.
+                    continue
                 # Encode the args once (reused across retries); the step
                 # decodes them against the activity's signature.
                 exec_state.args = await conversion.encode_values(exec_state.args)
-                self._launch_attempt(exec_state)
+                # Resolve our own queue only when a task_queue was requested,
+                # so workflows that never use cross-queue dispatch keep their
+                # exact checkpoint shape (no extra status read).
+                if exec_state.task_queue is not None:
+                    await self._resolve_own_queue()
+                if (
+                    exec_state.task_queue is None
+                    or exec_state.task_queue == self._own_queue_name
+                ):
+                    # Local / same-queue path: run as an in-process step.
+                    self._launch_attempt(exec_state)
+                else:
+                    # Cross-queue path (§6.1.2): enqueue on another worker.
+                    await self._launch_queued_activity(exec_state)
             elif kind == "child":
                 await self._start_child(self._pending_children[seq])
                 progressed = True  # the start future resolved either way
@@ -1147,29 +1261,65 @@ class Interpreter(_Runtime):
             }
         return envelope
 
+    async def _signal_queued_activity_cancel(self, exec_state: _ActivityExec) -> None:
+        """Deliver cancellation to a queued activity on its own worker, covering
+        both states it may be in: (1) running an attempt — its step polls the
+        cancel event and unwinds the activity; (2) async-parked after
+        raise_complete_async — its workflow is waiting on the completion topic,
+        so a cancellation marker there wakes it. Whichever applies fires; the
+        other signal is harmlessly ignored. Both are checkpointed (replay-safe).
+        """
+        assert exec_state.queued_dbos_id is not None
+        await DBOS.set_event_async(
+            inbox.activity_cancel_key(exec_state.activity_id), True
+        )
+        await DBOS.send_async(
+            exec_state.queued_dbos_id,
+            inbox.activity_result_envelope(exec_state.activity_id, cancelled=True),
+            inbox.ASYNC_COMPLETE_TOPIC,
+        )
+
     async def _sweep_cancellations(self) -> None:
         """Retire activities and children whose virtual-loop futures were
         cancelled during the drain. Cancellation decisions are deterministic
         workflow state, so this sweep replays identically.
 
-        Activities: TRY_CANCEL (default) cancels the real step task (which
-        records nothing — replays like a crash); ABANDON detaches it; WAIT
-        is approximated as TRY_CANCEL until Phase 3.
+        Activities (local path): TRY_CANCEL (default) cancels the real step task
+        (which records nothing — replays like a crash); ABANDON detaches it; WAIT
+        is handled in ``_request_activity_cancel`` (kept open until confirmed).
+
+        Activities (queued path, §6.1.2): the activity runs on another worker, so
+        cancellation is delivered cross-process by ``_signal_queued_activity_cancel``
+        (a cancel event the running attempt polls, plus a marker that wakes an
+        async-parked activity). ABANDON leaves it running. WAIT keeps the exec open until
+        the activity confirms via the result step (handled separately below).
 
         Children: non-ABANDON types deliver the child's cooperative-cancel
         envelope (a checkpointed send) and retire the waiter; ABANDON just
         retires the waiter. The WAIT variants are approximated (the awaiter
         is already gone once the future is cancelled).
         """
+        # WAIT_CANCELLATION_COMPLETED on the queued path: set the cancel event
+        # but keep the exec/waiter open — the result step delivers the activity's
+        # cancelled envelope to confirm the unwind (see _deliver_queued_activity_event).
+        wait_seqs, self._queued_wait_cancel_seqs = self._queued_wait_cancel_seqs, []
+        for seq in wait_seqs:
+            exec_state = self._pending_activities.get(seq)
+            if exec_state is not None and exec_state.queued_dbos_id is not None:
+                await self._signal_queued_activity_cancel(exec_state)
+
         seqs, self._cancelled_activity_seqs = self._cancelled_activity_seqs, []
         for seq in seqs:
             exec_state = self._pending_activities.pop(seq, None)
             if exec_state is None:
                 continue
             if exec_state.cancellation_type != 2:  # ABANDON never requests
-                # Mark the (possibly threaded, still-running) attempt so it
-                # observes cancellation at its next heartbeat.
-                activity_api._request_cancel((self._workflow_id, seq))
+                if exec_state.queued_dbos_id is not None:
+                    await self._signal_queued_activity_cancel(exec_state)
+                else:
+                    # Local: mark the (possibly threaded, still-running) attempt
+                    # so it observes cancellation at its next heartbeat.
+                    activity_api._request_cancel((self._workflow_id, seq))
             activity_api._forget_attempt_state((self._workflow_id, seq))
             if exec_state.async_pending:
                 # Tell the external completer (checkpointed event): its next
@@ -1178,7 +1328,7 @@ class Interpreter(_Runtime):
                     inbox.async_activity_gone_key(exec_state.activity_id), True
                 )
             for waiter in list(self._waiters):
-                if waiter.kind in ("activity", "act_s2c", "act_hb") and (
+                if waiter.kind in ("activity", "act_s2c", "act_hb", "q_activity") and (
                     waiter.seq == seq
                 ):
                     self._waiters.remove(waiter)
@@ -1258,6 +1408,102 @@ class Interpreter(_Runtime):
             }
         return envelope
 
+    async def _launch_queued_activity(self, exec_state: _ActivityExec) -> None:
+        """Cross-queue / distributed activity dispatch (§6.1.2): enqueue the
+        ``__temporal_activity`` workflow on the target DBOS queue and await its
+        result envelope, mirroring the child-workflow enqueue (``_start_child``).
+
+        The activity-workflow id is the deterministic ``{run_id}--a{seq}`` so a
+        crash anywhere after the enqueue replays into an idempotent re-attach
+        (``SetWorkflowID``), exactly as child ids do — DBOS records the
+        in-workflow start, so recovery re-attaches to the same activity instead
+        of spawning a twin. ``--a`` is a reserved separator (``ids.ACTIVITY_SEPARATOR``,
+        like ``--r``), so the id can never collide with a user/child/run id.
+        """
+        from dbos import SetWorkflowID
+
+        from . import registry
+
+        # Only reached from _process_commands when task_queue is set and differs
+        # from our own queue.
+        assert exec_state.task_queue is not None
+        seq = exec_state.seq
+        activity_dbos_id = ids.activity_dbos_id(self._workflow_id, seq)
+        meta = {
+            "activity_id": exec_state.activity_id,
+            "activity_type": exec_state.activity_name,
+            "attempt": exec_state.attempt,
+            "heartbeat_timeout": exec_state.heartbeat_timeout,
+            "seq": seq,
+            "workflow_id": ids.parse_run(self._workflow_id)[0],
+            "workflow_run_id": self._workflow_id,
+            "workflow_type": self._defn.name,
+            # Tells the attempt step to poll the cross-process cancel event.
+            "queued": True,
+            # The activity workflow id, so info().task_token addresses this
+            # workflow for raise_complete_async external completion.
+            "queued_activity_dbos_id": activity_dbos_id,
+        }
+        payload = {
+            "activity_name": exec_state.activity_name,
+            "args": exec_state.args,  # already encoded in _process_commands
+            "start_to_close": exec_state.start_to_close,
+            "schedule_to_close": exec_state.schedule_to_close,
+            "schedule_to_start": exec_state.schedule_to_start,
+            # The activity workflow owns the retry loop (Design A); schedule_to_close
+            # gates retries there, not via SetWorkflowTimeout — matching the local
+            # path, where it bounds the retry sequence, not an in-flight attempt.
+            "retry_policy": serialize_retry_policy(exec_state.retry_policy),
+            "meta": meta,
+        }
+        try:
+            dispatch_fn = registry.activity_dispatcher_fn()
+            queue = await DBOS.retrieve_queue_async(exec_state.task_queue)
+            if queue is None:
+                raise RuntimeError(
+                    f"Task queue {exec_state.task_queue!r} is not registered "
+                    "(no worker has declared it)"
+                )
+            with SetWorkflowID(activity_dbos_id):
+                await queue.enqueue_async(dispatch_fn, payload)
+        except Exception as err:  # noqa: BLE001 — surface as an ActivityError
+            self._pending_activities.pop(seq, None)
+            if not exec_state.future.cancelled():
+                error = exceptions.ActivityError(
+                    "Failed to schedule activity on task queue "
+                    f"{exec_state.task_queue!r}",
+                    scheduled_event_id=0,
+                    started_event_id=0,
+                    identity="",
+                    activity_type=exec_state.activity_name,
+                    activity_id=exec_state.activity_id,
+                    retry_state=None,
+                )
+                error.__cause__ = exceptions.ApplicationError(
+                    str(err), type=type(err).__name__
+                )
+                exec_state.future.set_exception(error)
+            return
+        # Record the dispatched id so cancellation can reach the activity on
+        # its own worker (cooperatively — a checkpointed cancel event plus a
+        # completion-topic marker; see _signal_queued_activity_cancel — not a
+        # native DBOS cancel of this workflow).
+        exec_state.queued_dbos_id = activity_dbos_id
+        # Claim the result step's function_id at this deterministic position
+        # (like _launch_attempt); the decode rides outside the recorded step.
+        step_coro = _await_activity_result(activity_dbos_id)
+        self._launch_waiter(
+            "q_activity", seq, self._decode_activity_result(step_coro, exec_state)
+        )
+        if exec_state.cancel_requested:
+            # A WAIT_CANCELLATION_COMPLETED cancel requested before this dispatch
+            # committed: queued_dbos_id was still None when the sweep ran, so the
+            # cross-process signal was deferred to here (now that the activity
+            # workflow exists and its result waiter is in place to confirm the
+            # unwind). TRY_CANCEL doesn't reach here — it cancels the future,
+            # retiring the exec before dispatch (handled in _process_commands).
+            await self._signal_queued_activity_cancel(exec_state)
+
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):
             self._launch_waiter(
@@ -1298,6 +1544,8 @@ class Interpreter(_Runtime):
                 self._deliver_timer(waiter.seq)
             elif waiter.kind == "activity":
                 self._deliver_activity_event(waiter)
+            elif waiter.kind == "q_activity":
+                self._deliver_queued_activity_event(waiter)
             elif waiter.kind == "act_s2c":
                 self._async_parked_timeout(
                     waiter.seq, exceptions.TimeoutType.START_TO_CLOSE
@@ -1392,6 +1640,57 @@ class Interpreter(_Runtime):
         error.__cause__ = deserialize_failure(failure)
         exec_state.future.set_exception(error)
 
+    def _deliver_queued_activity_event(self, waiter: _Waiter) -> None:
+        """Resolve a cross-queue activity from the ``__temporal_activity``
+        workflow's result envelope. The activity workflow owns retries/timeouts
+        on its own worker (Design A), so this is a terminal delivery — no
+        interpreter-side retry on this path, unlike ``_deliver_activity_event``.
+        """
+        exec_state = self._pending_activities.get(waiter.seq)
+        if exec_state is None or exec_state.future.cancelled():
+            # Cancelled between completion and delivery; drop the result.
+            self._pending_activities.pop(waiter.seq, None)
+            return
+        envelope: Dict[str, Any] = waiter.task.result()
+        self._advance_time(envelope.get("ended_at"))
+        del self._pending_activities[waiter.seq]
+        # No async_pending here: raise_complete_async() parks inside the
+        # __temporal_activity workflow on its own worker (Design A), which only
+        # returns once externally completed — so this is always a terminal
+        # ok/failure envelope.
+        if envelope["ok"]:
+            exec_state.future.set_result(envelope["result"])
+            return
+        failure: FailureEnvelope = envelope["failure"]
+        exec_state.last_failure = failure
+        if exec_state.cancel_requested and isinstance(
+            deserialize_failure(failure), exceptions.CancelledError
+        ):
+            # WAIT_CANCELLATION_COMPLETED confirmation: the activity observed the
+            # cancel event, unwound on its worker, and reported cancelled — only
+            # now does the awaiter see the cancellation.
+            exec_state.future.cancel()
+            return
+        # The activity workflow ran the retry loop and stamped the terminal
+        # retry_state into the envelope when it gave up.
+        retry_state_value = envelope.get("retry_state")
+        retry_state = (
+            exceptions.RetryState(retry_state_value)
+            if retry_state_value is not None
+            else None
+        )
+        error = exceptions.ActivityError(
+            "Activity task failed",
+            scheduled_event_id=0,
+            started_event_id=0,
+            identity="",
+            activity_type=exec_state.activity_name,
+            activity_id=exec_state.activity_id,
+            retry_state=retry_state,
+        )
+        error.__cause__ = deserialize_failure(failure)
+        exec_state.future.set_exception(error)
+
     def _deliver_child_event(self, waiter: _Waiter) -> None:
         child = self._pending_children.pop(waiter.seq, None)
         if child is None or child.result_future.cancelled():
@@ -1467,37 +1766,21 @@ class Interpreter(_Runtime):
     def _retry_decision(
         self, exec_state: _ActivityExec, failure: FailureEnvelope
     ) -> Tuple[Optional[float], exceptions.RetryState]:
-        """Returns (backoff delay before next attempt, or None to give up;
-        retry state to report when giving up).
-        """
-        policy = exec_state.retry_policy
-        if failure.get("non_retryable"):
-            return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
-        failure_type = failure.get("type") or failure["cls"]
-        if policy.non_retryable_error_types and failure_type in set(
-            policy.non_retryable_error_types
-        ):
-            return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
-        if policy.maximum_attempts and exec_state.attempt >= policy.maximum_attempts:
-            return None, exceptions.RetryState.MAXIMUM_ATTEMPTS_REACHED
-        override = failure.get("next_retry_delay")
-        if override is not None:
-            delay = float(override)
-        else:
-            delay = policy.initial_interval.total_seconds() * (
-                policy.backoff_coefficient ** (exec_state.attempt - 1)
-            )
-            maximum = (
-                policy.maximum_interval.total_seconds()
-                if policy.maximum_interval
-                else policy.initial_interval.total_seconds() * 100
-            )
-            delay = min(delay, maximum)
-        if exec_state.schedule_to_close is not None:
-            elapsed = self._vloop.time() - exec_state.scheduled_at
-            if elapsed + delay >= exec_state.schedule_to_close:
-                return None, exceptions.RetryState.TIMEOUT
-        return delay, exceptions.RetryState.IN_PROGRESS
+        """The local path's retry decision: elapsed comes from virtual time;
+        the policy logic itself lives in the shared ``activities.retry_decision``
+        (the queued path uses it too)."""
+        elapsed = (
+            self._vloop.time() - exec_state.scheduled_at
+            if exec_state.schedule_to_close is not None
+            else None
+        )
+        return activities_mod.retry_decision(
+            exec_state.retry_policy,
+            exec_state.attempt,
+            failure,
+            elapsed=elapsed,
+            schedule_to_close=exec_state.schedule_to_close,
+        )
 
     # ------------------------------------------------------------------
     # Inbox routing

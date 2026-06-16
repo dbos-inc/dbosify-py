@@ -21,6 +21,11 @@ from typing import Any, Dict, Sequence
 
 INBOX_TOPIC = "__tdb_inbox"
 
+# The topic a queued activity workflow parks on for external completion
+# (raise_complete_async on the cross-queue path, §6.1.2): AsyncActivityHandle
+# sends the completion envelope here, addressed to the activity workflow id.
+ASYNC_COMPLETE_TOPIC = "__tdb_async_complete"
+
 # recv timeout per wait; on (checkpointed, deterministic) timeout the
 # interpreter just re-issues the recv.
 RECV_TIMEOUT_SECONDS = 3600.0
@@ -94,6 +99,14 @@ def async_activity_gone_key(activity_id: str) -> str:
     completion (cancelled, or its run closed): completers poll it so their
     heartbeats/completions can raise instead of going into the void."""
     return f"__tdb_act_{activity_id}_gone"
+
+
+def activity_cancel_key(activity_id: str) -> str:
+    """Event set on the workflow run when a cross-queue activity is cancelled
+    (§6.1.2): the activity's attempt step on the other worker polls it and, when
+    set, delivers cancellation into the running activity. (The local path uses an
+    in-process threading.Event instead — same process, no event needed.)"""
+    return f"__tdb_act_{activity_id}_cancel"
 
 
 def query_envelope(name: str, args: Sequence[Any], request_id: str) -> Envelope:
