@@ -93,8 +93,9 @@ def test_workflow_id_eq() -> None:
 
 
 def test_workflow_id_starts_with() -> None:
+    # A list (not a bare str) so it's uniform across both DBOS calls.
     assert parse_query("WorkflowId STARTS_WITH 'order-'").to_dbos_filters() == {
-        "workflow_id_prefix": "order-"
+        "workflow_id_prefix": ["order-"]
     }
 
 

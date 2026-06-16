@@ -187,7 +187,10 @@ class VisibilityQuery:
         if self.workflow_ids is not None:
             filters["workflow_ids"] = self.workflow_ids
         if self.workflow_id_prefix is not None:
-            filters["workflow_id_prefix"] = self.workflow_id_prefix
+            # A list (not a bare str) so it's uniform across both DBOS calls:
+            # list_workflows_async accepts str|list, but get_workflow_aggregates
+            # iterates the value, so a bare str there would match per-character.
+            filters["workflow_id_prefix"] = [self.workflow_id_prefix]
         if self.statuses is not None:
             dbos_statuses: List[str] = []
             for s in self.statuses:
@@ -253,9 +256,10 @@ class VisibilityQuery:
 
     def aggregate_filter_kwargs(self) -> Dict[str, Any]:
         """The subset of :meth:`to_dbos_filters` that ``get_workflow_aggregates``
-        accepts as filters (it takes ``workflow_id_prefix`` as a list)."""
+        accepts as filters (``workflow_ids`` and ``attributes`` are not
+        expressible there, so eligibility excludes queries that use them)."""
         f = self.to_dbos_filters()
-        kwargs: Dict[str, Any] = {
+        return {
             key: f[key]
             for key in (
                 "name",
@@ -264,12 +268,10 @@ class VisibilityQuery:
                 "end_time",
                 "completed_after",
                 "completed_before",
+                "workflow_id_prefix",
             )
             if key in f
         }
-        if "workflow_id_prefix" in f:
-            kwargs["workflow_id_prefix"] = [f["workflow_id_prefix"]]
-        return kwargs
 
 
 # --- parser -------------------------------------------------------------------
