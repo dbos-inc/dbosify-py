@@ -288,6 +288,19 @@ Deviations from Temporal:
   not implemented (Phase 3 remaining). The attributes are GIN-indexed, so a
   future implementation maps query equality predicates onto JSONB `@>`
   containment. The full query language is not planned.
+- The **deprecated untyped-dict removal idioms** are not honored. In temporalio
+  an empty value list removes a search attribute: `upsert_search_attributes(
+  {"k": []})` deletes the typed `k` (while leaving `k: []` in the legacy untyped
+  view). Our untyped path can't express removal — the empty list is a no-op and
+  `k` keeps its prior value. Use the typed form `key.value_unset()` to remove a
+  search attribute.
+- The **legacy untyped view after a typed unset** differs. `key.value_unset()`
+  removes `k` entirely from `info().search_attributes` /
+  `describe().search_attributes` (the deprecated `Mapping` view), whereas
+  temporalio leaves the key present as an empty list (`info().search_attributes
+  [k] == []`). The typed view (`typed_search_attributes`) is identical in both
+  (the key is gone); only code reading the deprecated untyped view sees the
+  difference.
 
 Similarly, history *byte size* is not tracked:
 `workflow.info().get_current_history_size()` always returns 0 — use

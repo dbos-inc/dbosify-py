@@ -46,6 +46,7 @@ from .common import (
     SearchAttributes,
     SearchAttributeUpdate,
     TypedSearchAttributes,
+    _warn_on_deprecated_search_attributes,
 )
 
 __all__ = [
@@ -766,12 +767,15 @@ def memo_value(
 
     Raises ``KeyError`` if the key is absent and no ``default`` is given.
     """
-    try:
-        return _runtime().runtime_memo_value(key, type_hint=type_hint)
-    except KeyError:
+    # Check presence first, so a KeyError raised while converting the value to
+    # ``type_hint`` propagates instead of being misread as a missing key and
+    # silently swallowed into ``default``.
+    runtime = _runtime()
+    if key not in runtime.runtime_memo():
         if default is _arg_unset:
-            raise
+            raise KeyError(f"Memo does not have a value for key {key}")
         return default
+    return runtime.runtime_memo_value(key, type_hint=type_hint)
 
 
 def upsert_memo(updates: Mapping[str, Any]) -> None:
@@ -790,6 +794,7 @@ def upsert_search_attributes(
             ``value_unset`` on search-attribute keys). The dictionary form is
             DEPRECATED.
     """
+    _warn_on_deprecated_search_attributes(attributes)
     _runtime().runtime_upsert_search_attributes(attributes)
 
 
@@ -1125,6 +1130,7 @@ def continue_as_new(
     }.items():
         if value is not None:
             logger.debug("continue_as_new: ignoring unsupported parameter %r", key)
+    _warn_on_deprecated_search_attributes(search_attributes)
     _runtime()  # must be called from workflow code
     err = ContinueAsNewError("Workflow continued as new")
     err._tdb_args = _resolve_args(arg, args)
@@ -1202,6 +1208,7 @@ async def start_child_workflow(
     }.items():
         if value is not None:
             logger.debug("start_child_workflow: ignoring unsupported option %r", key)
+    _warn_on_deprecated_search_attributes(search_attributes)
     return await _runtime().runtime_start_child_workflow(
         _resolve_workflow_type(workflow),
         _resolve_args(arg, args),

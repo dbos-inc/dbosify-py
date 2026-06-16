@@ -322,12 +322,15 @@ class SearchAttributeKey(ABC, Generic[SearchAttributeValueType]):
                 return SearchAttributeKey.for_keyword_list(name)
         elif isinstance(vals[0], str):
             return SearchAttributeKey.for_keyword(name)
-        elif isinstance(vals[0], bool):
-            return SearchAttributeKey.for_bool(name)
+        # int is checked before bool, verbatim from temporalio: bool is an int
+        # subclass, so an untyped bool value guesses to for_int (the for_bool
+        # branch is effectively dead, but kept to mirror temporalio exactly).
         elif isinstance(vals[0], int):
             return SearchAttributeKey.for_int(name)
         elif isinstance(vals[0], float):
             return SearchAttributeKey.for_float(name)
+        elif isinstance(vals[0], bool):
+            return SearchAttributeKey.for_bool(name)
         elif isinstance(vals[0], datetime):
             return SearchAttributeKey.for_datetime(name)
         return None

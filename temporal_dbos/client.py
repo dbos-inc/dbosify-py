@@ -88,6 +88,7 @@ from .common import (
     TypedSearchAttributes,
     WorkflowIDConflictPolicy,
     WorkflowIDReusePolicy,
+    _warn_on_deprecated_search_attributes,
 )
 from .converter import DataConverter
 from .workflow import _UpdateMethod
@@ -819,7 +820,10 @@ class Client:
 
         # Memo + search attributes ride in the run envelope (for in-workflow
         # info()/memo() and chain propagation) and in the DBOS attributes column
-        # (the durable, queryable copy that describe() reads).
+        # (the durable, queryable copy that describe() reads). execute_workflow
+        # and WithStartWorkflowOperation both funnel through here, so the
+        # deprecated-dict-form warning is emitted once, at this chokepoint.
+        _warn_on_deprecated_search_attributes(search_attributes)
         meta.attributes = await _attributes.encode_attributes(memo, search_attributes)
 
         current = await self._current_run(id)

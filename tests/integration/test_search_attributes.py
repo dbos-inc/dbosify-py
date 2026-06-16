@@ -88,6 +88,14 @@ class UnsetWorkflow:
 
 
 @workflow.defn
+class UpsertDictWorkflow:
+    @workflow.run
+    async def run(self) -> None:
+        # Deprecated untyped-dict upsert form — must emit a DeprecationWarning.
+        workflow.upsert_search_attributes({"CustomKeyword": ["dictform"]})
+
+
+@workflow.defn
 class CANCarryWorkflow:
     @workflow.run
     async def run(self, hop: bool) -> List[str]:
@@ -155,6 +163,7 @@ async def _env(
             HoldWorkflow,
             UpsertWorkflow,
             UnsetWorkflow,
+            UpsertDictWorkflow,
             CANCarryWorkflow,
             CANOverrideWorkflow,
             ChildWorkflow,
@@ -313,3 +322,29 @@ async def test_codec_encrypts_memo_at_rest() -> None:
         assert await desc.memo() == {"secret": "classified"}
         await handle.signal(HoldWorkflow.finish)
         await handle.result()
+
+
+async def test_dict_form_search_attributes_warn_at_start() -> None:
+    # The deprecated untyped-dict form must emit a DeprecationWarning at the
+    # client start path (proves the warning is wired, not just defined).
+    async with _env() as client:
+        with pytest.warns(DeprecationWarning):
+            handle = await client.start_workflow(
+                HoldWorkflow.run,
+                id="sa-warn-start",
+                task_queue=TASK_QUEUE,
+                search_attributes={"CustomKeyword": ["x"]},
+            )
+        await handle.signal(HoldWorkflow.finish)
+        await handle.result()
+
+
+async def test_dict_form_search_attributes_warn_on_inworkflow_upsert() -> None:
+    # ...and at the in-workflow upsert path.
+    async with _env() as client:
+        with pytest.warns(DeprecationWarning):
+            await client.execute_workflow(
+                UpsertDictWorkflow.run,
+                id="sa-warn-upsert",
+                task_queue=TASK_QUEUE,
+            )
