@@ -52,10 +52,12 @@ from typing import (
     Deque,
     Dict,
     List,
+    Mapping,
     Optional,
     Sequence,
     Set,
     Tuple,
+    Union,
 )
 
 from dbos import DBOS
@@ -63,7 +65,12 @@ from dbos._context import get_local_dbos_context  # see docs/phase0.md
 
 from .. import activity as activity_api
 from .. import exceptions
-from ..common import RetryPolicy
+from ..common import (
+    RetryPolicy,
+    SearchAttributes,
+    SearchAttributeUpdate,
+    TypedSearchAttributes,
+)
 from ..workflow import (
     ActivityHandle,
     ChildWorkflowHandle,
@@ -75,6 +82,7 @@ from ..workflow import (
     _Runtime,
 )
 from . import activities as activities_mod
+from . import attributes as _attributes
 from . import conversion, ids, inbox
 from .payloads import (
     FailureEnvelope,
@@ -544,6 +552,10 @@ class _ChildExec:
     cancellation_type: int  # ChildWorkflowCancellationType
     start_future: "asyncio.Future[Any]"  # on the virtual loop
     result_future: "asyncio.Future[Any]"  # on the virtual loop
+    # Raw memo / search attributes for the child (encoded on the real loop in
+    # _start_child); children do NOT inherit the parent's, matching Temporal.
+    memo: Optional[Mapping[str, Any]] = None
+    search_attributes: Optional[Union[TypedSearchAttributes, SearchAttributes]] = None
     started: bool = False
 
 
@@ -600,6 +612,12 @@ class Interpreter(_Runtime):
         self._replay_horizon = 0
         self._can_new_run_id: Optional[str] = None
         self._continued_from: Optional[str] = None
+        # Decoded memo + search attributes for this run: materialized from the
+        # run envelope at start, mutated in place by upsert_*, and the source
+        # for in-workflow info()/memo() (the durable, queryable copy lives in
+        # the DBOS attributes column).
+        self._memo: Dict[str, Any] = {}
+        self._typed_sa: TypedSearchAttributes = TypedSearchAttributes.empty
         self._random = Random(0)
         self._workflow_id = ""
         self._start_time = 0.0
@@ -654,6 +672,11 @@ class Interpreter(_Runtime):
         # Rebuild the typed run arguments from their payloads (deterministic,
         # so re-decoding each run/replay is replay-safe).
         self._args = await conversion.decode_values(self._args, self._defn.arg_types)
+        # Materialize memo + search attributes from the run envelope (a pure
+        # function of the immutable input, so re-decoding each replay is safe).
+        self._memo, self._typed_sa = await _attributes.decode_attributes(
+            self._meta.attributes
+        )
         self._instantiate()
         try:
             while True:
@@ -753,7 +776,7 @@ class Interpreter(_Runtime):
         from contextlib import nullcontext
         from typing import ContextManager
 
-        from dbos import SetWorkflowID, SetWorkflowTimeout
+        from dbos import SetWorkflowAttributes, SetWorkflowID, SetWorkflowTimeout
 
         from . import registry
         from .payloads import serialize_retry_policy
@@ -779,6 +802,23 @@ class Interpreter(_Runtime):
             carried.run_timeout = can._tdb_run_timeout.total_seconds()
         if can._tdb_retry_policy is not None:
             carried.retry_policy = serialize_retry_policy(can._tdb_retry_policy)
+        # Memo + search attributes carry forward at their CURRENT (post-upsert)
+        # values; continue_as_new's own memo/search_attributes override them
+        # for the new run (matching Temporal). Re-encoded only when overridden;
+        # otherwise the current encoded form is reused as-is.
+        if can._tdb_memo is None and can._tdb_search_attributes is None:
+            carried.attributes = await _attributes.encode_attributes(
+                self._memo or None, self._typed_sa
+            )
+        else:
+            carried.attributes = await _attributes.encode_attributes(
+                can._tdb_memo if can._tdb_memo is not None else (self._memo or None),
+                (
+                    can._tdb_search_attributes
+                    if can._tdb_search_attributes is not None
+                    else self._typed_sa
+                ),
+            )
         # The new run's args come from user code, so encode them (the next
         # run's interpreter decodes against its run signature).
         payload = wrap_input(await conversion.encode_values(can._tdb_args), carried)
@@ -789,7 +829,12 @@ class Interpreter(_Runtime):
             if carried.run_timeout is not None
             else nullcontext()
         )
-        with SetWorkflowID(new_run_id), timeout_ctx:
+        attrs_ctx: ContextManager[Any] = (
+            SetWorkflowAttributes(carried.attributes)
+            if carried.attributes is not None
+            else nullcontext()
+        )
+        with SetWorkflowID(new_run_id), timeout_ctx, attrs_ctx:
             if queue is not None:
                 await queue.enqueue_async(dispatch_fn, payload)
             else:
@@ -1177,6 +1222,17 @@ class Interpreter(_Runtime):
                     if not future.cancelled():
                         future.set_result(None)
                 progressed = True
+            elif kind == "attributes":
+                # An upsert_memo / upsert_search_attributes durably wrote the
+                # current attribute state. Encoding (codec) happens here on the
+                # real loop, not in the user's sync upsert call. The write is a
+                # checkpointed DBOS step claimed at a deterministic position
+                # (command order), so it runs once and replays from its
+                # recorded result — same model as the "send" branch above.
+                encoded = await _attributes.encode_attributes(
+                    self._memo or None, self._typed_sa
+                )
+                await DBOS.update_workflow_attributes_async(self._workflow_id, encoded)
         return progressed
 
     async def _start_child(self, child: _ChildExec) -> None:
@@ -1185,7 +1241,9 @@ class Interpreter(_Runtime):
         (and SetWorkflowID re-attaches idempotently), so replay re-attaches
         to the same child instead of spawning a twin.
         """
-        from dbos import SetWorkflowID
+        from contextlib import nullcontext
+
+        from dbos import SetWorkflowAttributes, SetWorkflowID
 
         from . import registry
 
@@ -1223,8 +1281,22 @@ class Interpreter(_Runtime):
             )
             # Encode the child's run args (its interpreter decodes against the
             # child run signature), like a client start.
-            child_payload = await conversion.encode_values(child.args)
-            with SetWorkflowID(child.child_id):
+            child_args = await conversion.encode_values(child.args)
+            # Memo + search attributes for the child: into the DBOS attributes
+            # column (describe()) and the child's run envelope (its info()).
+            child_attrs = await _attributes.encode_attributes(
+                child.memo, child.search_attributes
+            )
+            child_payload = wrap_input(
+                child_args,
+                RunMeta(attributes=child_attrs) if child_attrs is not None else None,
+            )
+            attrs_ctx = (
+                SetWorkflowAttributes(child_attrs)
+                if child_attrs is not None
+                else nullcontext()
+            )
+            with SetWorkflowID(child.child_id), attrs_ctx:
                 if child_queue is not None:
                     await child_queue.enqueue_async(dispatch_fn, child_payload)
                 else:
@@ -2239,8 +2311,10 @@ class Interpreter(_Runtime):
                 if self._meta.run_timeout is not None
                 else None
             ),
+            search_attributes=_attributes.typed_to_untyped(self._typed_sa),
             start_time=datetime.fromtimestamp(self._start_time),
             task_queue="default",
+            typed_search_attributes=self._typed_sa,
             workflow_id=self._workflow_id,
             workflow_type=self._defn.name,
         )
@@ -2258,6 +2332,47 @@ class Interpreter(_Runtime):
         env = self._meta.last_failure
         return deserialize_failure(env) if env is not None else None
 
+    def runtime_memo(self) -> Mapping[str, Any]:
+        return dict(self._memo)
+
+    def runtime_memo_value(self, key: str, *, type_hint: Optional[type] = None) -> Any:
+        if key not in self._memo:
+            raise KeyError(f"Memo does not have a value for key {key}")
+        value = self._memo[key]
+        if type_hint is None:
+            return value
+        # The value is already converted (codec-decoded at run start); round-trip
+        # it through the sync converter to rebuild it as ``type_hint``.
+        return conversion.decode_value_sync(
+            conversion.encode_value_sync(value), type_hint
+        )
+
+    def runtime_upsert_memo(self, updates: Mapping[str, Any]) -> None:
+        self._assert_not_read_only("upsert memo")
+        for name, value in updates.items():
+            if value is None:
+                self._memo.pop(name, None)
+            else:
+                self._memo[name] = value
+        self._commands.append(("attributes", 0))
+
+    def runtime_upsert_search_attributes(
+        self,
+        attributes: Union[SearchAttributes, Sequence[SearchAttributeUpdate[Any]]],
+    ) -> None:
+        self._assert_not_read_only("upsert search attributes")
+        new_sa = _attributes.apply_sa_updates(self._typed_sa, attributes)
+        # Validate eagerly (SA encoding is sync, no codec) so a bad value — e.g.
+        # a tz-naive datetime — raises HERE, synchronously at the user's upsert
+        # call where their try/except can catch it. Deferring to the
+        # "attributes" command flush would surface it as a raw exception that
+        # escapes the dispatcher uncatchably and re-raises on every replay.
+        # Validating before committing self._typed_sa also leaves state
+        # unchanged on failure.
+        _attributes.encode_search_attributes(new_sa)
+        self._typed_sa = new_sa
+        self._commands.append(("attributes", 0))
+
     def runtime_now(self) -> float:
         return self._vloop.time()
 
@@ -2273,6 +2388,10 @@ class Interpreter(_Runtime):
         task_queue: Optional[str],
         parent_close_policy: int,
         cancellation_type: int,
+        memo: Optional[Mapping[str, Any]] = None,
+        search_attributes: Optional[
+            Union[TypedSearchAttributes, SearchAttributes]
+        ] = None,
     ) -> "ChildWorkflowHandle":
         self._assert_not_read_only("start a child workflow")
         seq = self._next_seq("child")
@@ -2292,6 +2411,8 @@ class Interpreter(_Runtime):
             cancellation_type=cancellation_type,
             start_future=self._vloop.create_future(),
             result_future=self._vloop.create_future(),
+            memo=memo,
+            search_attributes=search_attributes,
         )
         self._pending_children[seq] = child
         self._commands.append(("child", seq))

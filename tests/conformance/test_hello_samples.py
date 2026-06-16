@@ -41,6 +41,9 @@ class Expectation:
     # so slow CI boot can't eat the verification window.
     runs_forever: bool = False
     ready_line: Optional[str] = None
+    # Opt this sample's worker into near-immediate queue dispatch (runner.py).
+    # Only for samples whose pass/fail hinges on wall-clock dispatch latency.
+    fast_queue: bool = False
 
 
 # Boot budget for runs-forever samples: subprocess start + DBOS init + schema
@@ -105,8 +108,17 @@ EXPECTATIONS = {
         timeout=10,
     ),
     "hello_search_attributes": Expectation(
-        xfail="search-attribute storage + describe() exposure is Phase 3",
-        timeout=10,
+        # Starts with an (untyped) search attribute, upserts it from inside the
+        # workflow, and reads both values back via describe(). The workflow
+        # upserts 2s in and the client describes 3s later — a 1s margin that
+        # DBOS's default ~1s queue-dispatch latency would race, so this sample
+        # opts its worker into near-immediate dispatch (fast_queue, scoped to
+        # this sample only — see runner.py). Storage itself is independently
+        # covered by tests/unit/test_attributes.py and
+        # tests/integration/test_search_attributes*.py (incl. SIGKILL recovery).
+        expect_output="Second search attribute values:  ['new-value']",
+        fast_queue=True,
+        timeout=30,
     ),
     "hello_signal": Expectation(expect_output="Result:"),
     "hello_update": Expectation(expect_output="Workflow Result:"),
@@ -253,15 +265,18 @@ def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
         finally:
             process.terminate_and_wait()
         return
+    env = {
+        **__import__("os").environ,
+        "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
+    }
+    if expectation.fast_queue:
+        env["TDB_CONFORMANCE_FAST_QUEUE"] = "1"
     result = subprocess.run(
         [sys.executable, str(RUNNER), str(rewritten_samples / f"{sample_name}.py")],
         capture_output=True,
         text=True,
         timeout=expectation.timeout,
-        env={
-            **__import__("os").environ,
-            "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
-        },
+        env=env,
     )
     assert result.returncode == 0, (
         f"sample exited {result.returncode}\n"
