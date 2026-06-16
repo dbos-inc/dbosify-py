@@ -49,6 +49,15 @@ MODULE_PAIRS = {
 }
 
 # Names/methods whose shape deliberately differs. qualname -> reason.
+#
+# Worker.__init__ / Client.__init__ / Client.connect are whole-callable
+# exemptions: their leading parameter fundamentally diverges (a DBOSConfig /
+# DBOSClient, not target_host), and a ``**unsupported`` catch-all deliberately
+# absorbs temporalio's many gRPC-era parameters. The catch-all is also the
+# blind spot that hid the missing ``interceptors=`` — a supported parameter
+# could be silently swallowed instead of explicitly accepted — so the
+# parameters we *do* honor are guarded positively by
+# ``test_supported_params_explicitly_accepted`` (EXPLICITLY_ACCEPTED_PARAMS).
 DELIBERATE_DEVIATIONS: Dict[str, str] = {
     "client.Client.__init__": "wraps a dbos.DBOSClient (DESIGN §5, revised)",
     "client.Client.connect": "takes dbos.DBOSClient instead of target_host",
@@ -184,6 +193,37 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "typed_search_attributes",
     },
 }
+
+
+# Parameters that must be accepted *explicitly* (named in the signature, not
+# merely swallowed by a ``**unsupported`` catch-all) on the whole-callable
+# DELIBERATE_DEVIATIONS above. This is the positive guard the catch-all design
+# needs: it is what would have caught the absent ``interceptors=``. qualname ->
+# required keyword parameter names. Every name here must also exist on the
+# temporalio counterpart (asserted by the test), so this can't drift into
+# inventing API.
+EXPLICITLY_ACCEPTED_PARAMS: Dict[str, Set[str]] = {
+    # (Worker's ``data_converter`` is a deliberate temporal_dbos extension — it
+    # has no temporalio Worker counterpart — so it isn't listed here; every
+    # name below must exist on temporalio's Worker.)
+    "worker.Worker.__init__": {
+        "task_queue",
+        "workflows",
+        "activities",
+        "workflow_failure_exception_types",
+        "interceptors",
+    },
+    "client.Client.__init__": {"data_converter", "interceptors"},
+    "client.Client.connect": {"data_converter", "interceptors"},
+}
+
+
+def _resolve_callable(qualname: str) -> Any:
+    module_key, _, attr_path = qualname.partition(".")
+    obj: Any = MODULE_PAIRS[module_key][0]
+    for part in attr_path.split("."):
+        obj = getattr(obj, part)
+    return obj
 
 
 def _public_names(module: Any) -> List[str]:
@@ -398,4 +438,37 @@ def test_signature_parity(module_key: str) -> None:
         f"signature drift vs temporalio in {module_key!r}:\n{_format(problems)}\n"
         "Fix the signature, or record the change in KNOWN_MISSING_PARAMS / "
         "DELIBERATE_DEVIATIONS with a reason."
+    )
+
+
+@pytest.mark.parametrize("qualname", sorted(EXPLICITLY_ACCEPTED_PARAMS))
+def test_supported_params_explicitly_accepted(qualname: str) -> None:
+    """Guards the ``**unsupported`` blind spot on whole-exempt callables: each
+    parameter we honor must be a named parameter (not silently absorbed by the
+    catch-all), and must exist on the temporalio counterpart (no invented API).
+    Dropping ``interceptors=`` from Worker/Client now fails here."""
+    module_key, _, attr_path = qualname.partition(".")
+    ours = _resolve_callable(qualname)
+    their_obj: Any = MODULE_PAIRS[module_key][1]
+    for part in attr_path.split("."):
+        their_obj = getattr(their_obj, part)
+
+    accepted = {
+        p.name
+        for p in _params_of(ours)
+        if p.kind
+        not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+    }
+    their_names = {p.name for p in _params_of(their_obj)}
+
+    required = EXPLICITLY_ACCEPTED_PARAMS[qualname]
+    not_accepted = sorted(required - accepted)
+    assert not not_accepted, (
+        f"{qualname}: supported parameters not accepted explicitly (only via "
+        f"**unsupported, or missing): {not_accepted}"
+    )
+    not_in_temporalio = sorted(required - their_names)
+    assert not not_in_temporalio, (
+        f"{qualname}: EXPLICITLY_ACCEPTED_PARAMS lists names absent from "
+        f"temporalio (invented API): {not_in_temporalio}"
     )

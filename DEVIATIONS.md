@@ -495,3 +495,39 @@ Operational requirement and current scope:
   surfacing live details to the workflow (rare) is absent — a `heartbeat` to an
   async-parked activity is accepted but its details are dropped. Documented rather
   than silently ignored.
+
+### D24. Interceptors cover client and activity, not yet workflow
+
+Client and activity interceptors are supported (DESIGN §6.8): pass
+`Worker(interceptors=[...])` (worker `Interceptor` → `ActivityInbound/Outbound`)
+and `Client(interceptors=[...])` (client `Interceptor` → `OutboundInterceptor`).
+The chains are built exactly as temporalio builds them, and the `*Input`
+dataclasses are copied field-for-field from the SDK so signatures match. Scope
+and edges:
+
+- **Workflow inbound/outbound interception is Phase 4.** `execute_workflow`,
+  `handle_signal/query/update`, and the workflow-side outbound (`start_activity`,
+  `start_child_workflow`, `continue_as_new`, …) are not intercepted yet, and the
+  worker `Interceptor` therefore omits `workflow_interceptor_class`. Nexus
+  interception is unsupported (corollary of D1).
+- **No header propagation.** temporal_dbos has no header channel through the
+  workflow, so `ExecuteActivityInput.headers` and every client `*Input.headers`
+  field are present (for parity) but always empty, and an interceptor that sets
+  them changes nothing downstream — header-based context propagation (tracing,
+  baggage) lands with workflow interceptors in Phase 4. Likewise
+  `ExecuteActivityInput.executor` is always `None` (sync activities run via
+  `asyncio.to_thread`, not a user executor). Other copied-but-inert `*Input`
+  fields: `callbacks`, `links`, `request_id`, `versioning_override`, `priority`,
+  `rpc_metadata`/`rpc_timeout`, and `data_converter_override`.
+- **Worker interceptors come only from `Worker(interceptors=)`.** temporalio also
+  pulls in client interceptors that subclass the worker `Interceptor`; a
+  temporal_dbos Worker takes a `DBOSConfig`, not a client, so there is no client
+  to harvest interceptors from (a corollary of D2 / one-worker-per-process).
+- **`OutboundInterceptor` exposes only the verbs we route.** Workflow lifecycle
+  (`start_workflow`, `signal`/`query`/`cancel`/`terminate`/`describe_workflow`,
+  `start_workflow_update`), async-activity completion, and the schedule verbs are
+  intercepted; Nexus, worker build-id, and workflow history-event fetching are
+  absent (rather than present as silent no-ops). `update_with_start` is
+  intercepted via its constituent `start_workflow` + `start_workflow_update`
+  calls, not as its own outbound verb. `list_schedules` is an `async` outbound
+  (our `Client.list_schedules` is async), where temporalio's is synchronous.

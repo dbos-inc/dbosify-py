@@ -118,6 +118,11 @@ class _Context:
     last_heartbeat_at: float = field(default_factory=time_mod.monotonic)
     # (workflow_run_id, seq) for real runs; None in ActivityEnvironment.
     attempt_key: Optional[Tuple[str, int]] = None
+    # Head of the activity *outbound* interceptor chain (an
+    # ActivityOutboundInterceptor), installed per attempt by the worker
+    # (DESIGN §6.8). ``info()``/``heartbeat()`` route through it. Left None by
+    # ActivityEnvironment, where the functions use the root behavior directly.
+    outbound: Optional[Any] = None
 
 
 # Worker-process state for in-flight activity attempts, keyed by
@@ -195,7 +200,11 @@ def in_activity() -> bool:
 
 def info() -> Info:
     """Current activity's info."""
-    return _context().info
+    ctx = _context()
+    if ctx.outbound is not None:
+        info_value: Info = ctx.outbound.info()
+        return info_value
+    return ctx.info
 
 
 def heartbeat(*details: Any) -> None:
@@ -206,6 +215,17 @@ def heartbeat(*details: Any) -> None:
     how (especially sync) activities observe cancellation, as in Temporal.
     """
     ctx = _context()
+    if ctx.outbound is not None:
+        ctx.outbound.heartbeat(*details)
+        return
+    _root_heartbeat(ctx, *details)
+
+
+def _root_heartbeat(ctx: _Context, *details: Any) -> None:
+    """The un-intercepted heartbeat behavior — the root of the activity
+    outbound chain. ``heartbeat()`` calls this directly when no interceptor
+    outbound is installed (e.g. ActivityEnvironment); otherwise the chain's
+    root outbound calls it."""
     ctx.last_heartbeat = details
     ctx.last_heartbeat_at = time_mod.monotonic()
     if ctx.cancelled.is_set():
