@@ -294,15 +294,15 @@ Deviations from Temporal:
   raises with a message listing what is supported. Specific gaps:
   - **Time bounds are inclusive.** `>`/`>=` (and `<`/`<=`) both translate to
     DBOS's inclusive bound, so a strict `>` may include an exact-timestamp match.
-  - **`count_workflows` uses the server-side aggregate** (DBOS's
-    `get_workflow_aggregates`: `COUNT` + `GROUP BY`) when the query's filters are
-    expressible there. It falls back to an O(matches) row scan when the query
-    filters by exact `WorkflowId`, a search attribute, or an ERROR-family
-    `ExecutionStatus` (Failed/Canceled/TimedOut/ContinuedAsNew — all stored as
-    DBOS `ERROR`). `GROUP BY ExecutionStatus` splits that lumped `ERROR` bucket
-    back into the four Temporal statuses with a targeted scan of just the error
-    rows; group-by on any field other than `ExecutionStatus`/`WorkflowType` is
-    rejected.
+  - **`count_workflows` is aggregate-only.** It runs entirely through DBOS's
+    server-side `get_workflow_aggregates` (`COUNT` + `GROUP BY`) and **rejects**
+    (rather than scans) any query that operator can't express: filters on exact
+    `WorkflowId`, a search attribute, `WorkflowType !=`, or an ERROR-family
+    `ExecutionStatus` (Failed/Canceled/TimedOut/ContinuedAsNew — all stored as a
+    single DBOS `ERROR` status), and `GROUP BY ExecutionStatus` (telling those
+    error states apart needs each workflow's recorded outcome). The only
+    supported grouping is `GROUP BY WorkflowType`. Use `list_workflows` to
+    enumerate the rejected cases.
   - **Each run-chain link is its own row**, keyed by run id (continue-as-new /
     workflow-retry / cron hops), since `run_id` is the DBOS workflow id.
   - **Search-attribute filtering is equality-only** (the containment subset);

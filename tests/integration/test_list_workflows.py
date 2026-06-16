@@ -16,6 +16,7 @@ import pytest
 from dbos import DBOSClient
 
 from temporal_dbos import workflow
+from temporal_dbos._internal.visibility import VisibilityQueryError
 from temporal_dbos.client import (
     Client,
     WorkflowExecution,
@@ -248,10 +249,13 @@ async def test_count_workflows() -> None:
 
         assert (await client.count_workflows("WorkflowType = 'Completer'")).count == 3
         assert (await client.count_workflows("WorkflowType = 'Holder'")).count == 1
-        # Post-filter path: only the running holder is RUNNING.
+        # Clean (non-error) status counts go through the aggregate operator.
         running = await client.count_workflows("ExecutionStatus = 'Running'")
         assert running.count >= 1
         assert running.groups == []
+        assert (
+            await client.count_workflows("ExecutionStatus = 'Completed'")
+        ).count == 3
 
         await holder.signal(Holder.finish)
         await holder.result()
@@ -261,37 +265,36 @@ def _groups(count: WorkflowExecutionCount) -> Dict[Any, Optional[int]]:
     return {g.group_values[0]: g.count for g in count.groups}
 
 
-async def test_count_group_by_execution_status_splits_error_bucket() -> None:
-    # The server-side aggregate groups by DBOS status, which lumps Failed/
-    # Canceled/TimedOut/ContinuedAsNew under "ERROR"; count_workflows splits
-    # that bucket by the recorded marker, so Failed and Canceled appear apart.
+async def test_count_group_by_execution_status_rejected() -> None:
+    # DBOS lumps Failed/Canceled/TimedOut/ContinuedAsNew under one ERROR status,
+    # so a faithful GROUP BY ExecutionStatus can't be computed by the aggregate
+    # operator alone — count_workflows fails it rather than scanning rows.
     async with _env() as client:
-        for i in range(3):
-            await client.execute_workflow(
-                Completer.run, str(i), id=f"c{i}", task_queue=TASK_QUEUE
-            )
-        with pytest.raises(WorkflowFailureError):
-            await client.execute_workflow(Failer.run, id="f1", task_queue=TASK_QUEUE)
-        cancelled = await client.start_workflow(
-            Holder.run, id="x1", task_queue=TASK_QUEUE
+        await client.execute_workflow(
+            Completer.run, "a", id="c1", task_queue=TASK_QUEUE
         )
-        await cancelled.cancel()
-        with pytest.raises(WorkflowFailureError):
-            await cancelled.result()
-        running = await client.start_workflow(
-            Holder.run, id="h1", task_queue=TASK_QUEUE
+        with pytest.raises(VisibilityQueryError):
+            await client.count_workflows("GROUP BY ExecutionStatus")
+
+
+async def test_count_rejects_unaggregatable_filters() -> None:
+    # Filters DBOS's aggregate operator can't express are rejected, not scanned.
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run,
+            "a",
+            id="c1",
+            task_queue=TASK_QUEUE,
+            search_attributes=_sa("vip"),
         )
-
-        count = await client.count_workflows("GROUP BY ExecutionStatus")
-        groups = _groups(count)
-        assert groups.get("Completed") == 3
-        assert groups.get("Failed") == 1
-        assert groups.get("Canceled") == 1
-        assert groups.get("Running") == 1
-        assert count.count == 6
-
-        await running.signal(Holder.finish)
-        await running.result()
+        with pytest.raises(VisibilityQueryError):
+            await client.count_workflows("CustomKeyword = 'vip'")  # search attribute
+        with pytest.raises(VisibilityQueryError):
+            await client.count_workflows("WorkflowId = 'c1'")  # exact id
+        with pytest.raises(VisibilityQueryError):
+            await client.count_workflows("WorkflowType != 'Completer'")  # negation
+        with pytest.raises(VisibilityQueryError):
+            await client.count_workflows("ExecutionStatus = 'Failed'")  # error-family
 
 
 async def test_count_group_by_workflow_type() -> None:
@@ -310,34 +313,6 @@ async def test_count_group_by_workflow_type() -> None:
 
         await holder.signal(Holder.finish)
         await holder.result()
-
-
-async def test_count_search_attribute_scan_fallback() -> None:
-    # A search-attribute filter can't go through the aggregate operator, so this
-    # exercises the scan fallback path.
-    async with _env() as client:
-        await client.execute_workflow(
-            Completer.run,
-            "a",
-            id="c1",
-            task_queue=TASK_QUEUE,
-            search_attributes=_sa("vip"),
-        )
-        await client.execute_workflow(
-            Completer.run,
-            "b",
-            id="c2",
-            task_queue=TASK_QUEUE,
-            search_attributes=_sa("vip"),
-        )
-        await client.execute_workflow(
-            Completer.run,
-            "c",
-            id="c3",
-            task_queue=TASK_QUEUE,
-            search_attributes=_sa("no"),
-        )
-        assert (await client.count_workflows("CustomKeyword = 'vip'")).count == 2
 
 
 async def test_limit() -> None:
