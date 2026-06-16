@@ -96,6 +96,22 @@ class UpsertDictWorkflow:
 
 
 @workflow.defn
+class UpsertBadDatetimeWorkflow:
+    @workflow.run
+    async def run(self) -> str:
+        # A tz-naive datetime is invalid. The error must surface synchronously
+        # at the upsert call (catchable), not later in the deferred attribute
+        # write where it would escape the dispatcher uncatchably.
+        try:
+            workflow.upsert_search_attributes([WHEN.value_set(datetime(2026, 6, 16))])
+        except ValueError:
+            # State must be unchanged — the bad value was rejected before commit.
+            assert len(workflow.info().typed_search_attributes) == 0
+            return "rejected"
+        return "accepted"
+
+
+@workflow.defn
 class CANCarryWorkflow:
     @workflow.run
     async def run(self, hop: bool) -> List[str]:
@@ -164,6 +180,7 @@ async def _env(
             UpsertWorkflow,
             UnsetWorkflow,
             UpsertDictWorkflow,
+            UpsertBadDatetimeWorkflow,
             CANCarryWorkflow,
             CANOverrideWorkflow,
             ChildWorkflow,
@@ -348,3 +365,18 @@ async def test_dict_form_search_attributes_warn_on_inworkflow_upsert() -> None:
                 id="sa-warn-upsert",
                 task_queue=TASK_QUEUE,
             )
+
+
+async def test_inworkflow_upsert_invalid_value_is_catchable() -> None:
+    # An invalid search-attribute value (tz-naive datetime) upserted from inside
+    # a workflow must raise synchronously at the upsert call — catchable by the
+    # workflow, leaving state unchanged — not escape uncatchably via the
+    # deferred attribute write (which would terminally fail the run and re-fail
+    # on every recovery). The workflow catches it and returns normally.
+    async with _env() as client:
+        result = await client.execute_workflow(
+            UpsertBadDatetimeWorkflow.run,
+            id="sa-bad-datetime",
+            task_queue=TASK_QUEUE,
+        )
+        assert result == "rejected"

@@ -2361,7 +2361,16 @@ class Interpreter(_Runtime):
         attributes: Union[SearchAttributes, Sequence[SearchAttributeUpdate[Any]]],
     ) -> None:
         self._assert_not_read_only("upsert search attributes")
-        self._typed_sa = _attributes.apply_sa_updates(self._typed_sa, attributes)
+        new_sa = _attributes.apply_sa_updates(self._typed_sa, attributes)
+        # Validate eagerly (SA encoding is sync, no codec) so a bad value — e.g.
+        # a tz-naive datetime — raises HERE, synchronously at the user's upsert
+        # call where their try/except can catch it. Deferring to the
+        # "attributes" command flush would surface it as a raw exception that
+        # escapes the dispatcher uncatchably and re-raises on every replay.
+        # Validating before committing self._typed_sa also leaves state
+        # unchanged on failure.
+        _attributes.encode_search_attributes(new_sa)
+        self._typed_sa = new_sa
         self._commands.append(("attributes", 0))
 
     def runtime_now(self) -> float:
