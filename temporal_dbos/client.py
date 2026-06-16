@@ -1597,10 +1597,14 @@ class WorkflowHandle:
         condition = (
             input.reject_condition or self._client._default_query_reject_condition
         )
+        target = await self._target()
         if condition is not None and condition != QueryRejectCondition.NONE:
             # Client-side check (no server arbiter — DEVIATIONS D7 family):
-            # the status read and the query send are not atomic.
-            status = (await self.describe()).status
+            # the status read and the query send are not atomic. Read status
+            # directly rather than via describe() so a describe_workflow
+            # interceptor is not invoked as a side effect of a query.
+            raw = await self._client._status_of(target)
+            status = _status.to_execution_status(raw.status, error=raw.error)
             rejected = (
                 status != WorkflowExecutionStatus.RUNNING
                 if condition == QueryRejectCondition.NOT_OPEN
@@ -1610,7 +1614,6 @@ class WorkflowHandle:
                 raise WorkflowQueryRejectedError(status)
         request_id = str(uuid_mod.uuid4())
         client = self._client._dbos_client
-        target = await self._target()
         timeout = input.rpc_timeout.total_seconds() if input.rpc_timeout else 60.0
         await client.send_async(
             target,

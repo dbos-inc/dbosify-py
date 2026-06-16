@@ -470,7 +470,13 @@ class ScheduleHandle:
         )
 
     async def _update_impl(self, input: UpdateScheduleInput) -> None:
-        desc = await self.describe()
+        # Read the row directly rather than via describe() so a
+        # describe_schedule interceptor is not invoked as a side effect of an
+        # update.
+        row = await self._client._dbos_client.get_schedule_async(self.id)
+        if row is None:
+            raise RuntimeError(f"Schedule {self.id!r} not found")
+        desc = _description_from_row(row)
         outcome = input.updater(ScheduleUpdateInput(description=desc))
         if inspect.isawaitable(outcome):
             outcome = await outcome

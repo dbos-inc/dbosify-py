@@ -25,6 +25,7 @@ from temporal_dbos.client import (
     ScheduleSpec,
 )
 from temporal_dbos.common import (
+    QueryRejectCondition,
     RetryPolicy,
     SearchAttributeKey,
     SearchAttributePair,
@@ -142,6 +143,10 @@ class _RecordingOutbound(OutboundInterceptor):
         self._events.append(("query_workflow", input.query))
         return await super().query_workflow(input)
 
+    async def describe_workflow(self, input: Any) -> Any:
+        self._events.append(("describe_workflow", input.id))
+        return await super().describe_workflow(input)
+
     async def create_schedule(self, input: Any) -> Any:
         self._events.append(("create_schedule", input.id))
         return await super().create_schedule(input)
@@ -157,6 +162,10 @@ class _RecordingOutbound(OutboundInterceptor):
     async def delete_schedule(self, input: Any) -> None:
         self._events.append(("delete_schedule", input.id))
         await super().delete_schedule(input)
+
+    async def update_schedule(self, input: Any) -> None:
+        self._events.append(("update_schedule", input.id))
+        await super().update_schedule(input)
 
     async def heartbeat_async_activity(self, input: Any) -> None:
         self._events.append(("heartbeat_async_activity", input.details))
@@ -594,3 +603,76 @@ async def test_client_interceptor_injects_search_attributes_and_memo() -> None:
             assert await desc.memo() == {"injected_memo": "from-interceptor"}
         finally:
             dbos_client.destroy()
+
+
+# --- Internal reads must not re-enter the interceptor chain (F1 regression) -
+
+
+async def test_query_reject_condition_does_not_invoke_describe_interceptor() -> None:
+    """A reject-condition query reads workflow status internally; it must not
+    fire a describe_workflow interceptor (regression: the relocated _query_impl
+    once called the public describe(), which re-entered the chain)."""
+    events: List[Event] = []
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[InterceptedWorkflow],
+        activities=[echo],
+    )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(
+                dbos_client, interceptors=[_RecordingClientInterceptor(events)]
+            )
+            handle = await client.start_workflow(
+                InterceptedWorkflow.run, "hi", id="ic-reject", task_queue=TASK_QUEUE
+            )
+            # RUNNING workflow: NOT_OPEN passes, the query runs.
+            assert (
+                await handle.query(
+                    InterceptedWorkflow.current,
+                    reject_condition=QueryRejectCondition.NOT_OPEN,
+                )
+                == 0
+            )
+            # An explicit describe() DOES go through the interceptor.
+            await handle.describe()
+            await handle.signal(InterceptedWorkflow.finish)
+            await handle.result()
+        finally:
+            dbos_client.destroy()
+
+    verbs = [e[0] for e in events]
+    assert "query_workflow" in verbs
+    # Exactly one describe_workflow event — the explicit describe() — not a
+    # second one from the query's internal status read.
+    assert verbs.count("describe_workflow") == 1
+
+
+async def test_schedule_update_does_not_invoke_describe_schedule_interceptor() -> None:
+    """ScheduleHandle.update reads the schedule internally; it must not fire a
+    describe_schedule interceptor (same F1 regression on the schedule side)."""
+    events: List[Event] = []
+    worker = Worker(default_config(), task_queue=TASK_QUEUE, workflows=[QuickGreeter])
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(
+                dbos_client, interceptors=[_RecordingClientInterceptor(events)]
+            )
+            handle = await client.create_schedule(
+                "ic-upd", _schedule_for("ic-upd-action")
+            )
+
+            def _updater(_: Any) -> None:
+                return None  # a no-op update still performs the internal read
+
+            await handle.update(_updater)
+            await handle.delete()
+        finally:
+            dbos_client.destroy()
+
+    verbs = [e[0] for e in events]
+    assert "update_schedule" in verbs
+    assert "describe_schedule" not in verbs
