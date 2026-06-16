@@ -10,6 +10,7 @@ no kill-and-recover test is warranted here (cf. CLAUDE.md).
 """
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pytest
@@ -38,6 +39,11 @@ pytestmark = pytest.mark.usefixtures("tdb_env")
 
 TASK_QUEUE = "list-wf-tq"
 KW = SearchAttributeKey.for_keyword("CustomKeyword")
+NUM = SearchAttributeKey.for_int("CustomInt")
+FLAG = SearchAttributeKey.for_bool("CustomBool")
+WHEN = SearchAttributeKey.for_datetime("CustomDatetime")
+TAGS = SearchAttributeKey.for_keyword_list("CustomTags")
+WHEN_VAL = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
 
 
 @workflow.defn
@@ -68,12 +74,32 @@ class Holder:
         await workflow.wait_condition(lambda: self.done)
 
 
+@workflow.defn
+class Parent:
+    @workflow.run
+    async def run(self) -> str:
+        base = workflow.info().workflow_id
+        child: str = await workflow.execute_child_workflow(
+            Completer.run, "kid", id=f"{base}_child", task_queue=TASK_QUEUE
+        )
+        return child
+
+
+@workflow.defn
+class CanOnce:
+    @workflow.run
+    async def run(self, hop: bool) -> str:
+        if hop:
+            workflow.continue_as_new(args=[False])
+        return "done"
+
+
 @asynccontextmanager
 async def _env() -> AsyncIterator[Client]:
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[Completer, Failer, Holder],
+        workflows=[Completer, Failer, Holder, Parent, CanOnce],
         activities=[],
     )
     async with worker:
@@ -365,3 +391,305 @@ async def test_bad_query_raises_on_first_iteration() -> None:
         it = client.list_workflows("WorkflowType = 'A' OR WorkflowType = 'B'")
         with pytest.raises(ValueError):
             await _collect(it)
+
+
+# --- list: query-less, ordering, empty, negation ------------------------------
+
+
+async def test_list_no_query_returns_everything() -> None:
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run, "a", id="c1", task_queue=TASK_QUEUE
+        )
+        await client.execute_workflow(
+            Completer.run, "b", id="c2", task_queue=TASK_QUEUE
+        )
+        holder = await client.start_workflow(Holder.run, id="h1", task_queue=TASK_QUEUE)
+
+        rows = await _collect(client.list_workflows())
+        assert {r.id for r in rows} == {"c1", "c2", "h1"}
+
+        await holder.signal(Holder.finish)
+        await holder.result()
+
+
+async def test_list_ordering_is_newest_first() -> None:
+    async with _env() as client:
+        # execute_workflow serializes, so created_at strictly increases c0<c1<c2.
+        for i in range(3):
+            await client.execute_workflow(
+                Completer.run, str(i), id=f"c{i}", task_queue=TASK_QUEUE
+            )
+        rows = await _collect(client.list_workflows("WorkflowType = 'Completer'"))
+        assert [r.id for r in rows] == ["c2", "c1", "c0"]
+
+
+async def test_list_empty_result() -> None:
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run, "a", id="c1", task_queue=TASK_QUEUE
+        )
+        assert await _collect(client.list_workflows("WorkflowType = 'Nope'")) == []
+
+
+async def test_list_workflow_type_negation() -> None:
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run, "a", id="c1", task_queue=TASK_QUEUE
+        )
+        holder = await client.start_workflow(Holder.run, id="h1", task_queue=TASK_QUEUE)
+
+        rows = await _collect(client.list_workflows("WorkflowType != 'Holder'"))
+        assert {r.id for r in rows} == {"c1"}
+
+        await holder.signal(Holder.finish)
+        await holder.result()
+
+
+# --- list: terminal-status mappings -------------------------------------------
+
+
+async def test_list_status_terminated() -> None:
+    async with _env() as client:
+        holder = await client.start_workflow(Holder.run, id="h1", task_queue=TASK_QUEUE)
+        await holder.terminate()
+        rows = await _collect(client.list_workflows("ExecutionStatus = 'Terminated'"))
+        assert {r.id for r in rows} == {"h1"}
+        assert rows[0].status == WorkflowExecutionStatus.TERMINATED
+
+
+async def test_list_canceled_distinct_from_failed() -> None:
+    # Both Canceled and Failed are stored as DBOS ERROR; the post-filter must
+    # tell them apart by the recorded marker.
+    async with _env() as client:
+        with pytest.raises(WorkflowFailureError):
+            await client.execute_workflow(Failer.run, id="f1", task_queue=TASK_QUEUE)
+        holder = await client.start_workflow(Holder.run, id="x1", task_queue=TASK_QUEUE)
+        await holder.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await holder.result()
+
+        canceled = await _collect(client.list_workflows("ExecutionStatus = 'Canceled'"))
+        assert {r.id for r in canceled} == {"x1"}
+        failed = await _collect(client.list_workflows("ExecutionStatus = 'Failed'"))
+        assert {r.id for r in failed} == {"f1"}
+
+
+# --- list: full field population, parent links, run chains --------------------
+
+
+async def test_list_populates_all_execution_fields() -> None:
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run,
+            "hi",
+            id="c1",
+            task_queue=TASK_QUEUE,
+            memo={"owner": "ada"},
+            search_attributes=TypedSearchAttributes(
+                [SearchAttributePair(KW, "vip"), SearchAttributePair(NUM, 7)]
+            ),
+        )
+        rows = await _collect(client.list_workflows("WorkflowId = 'c1'"))
+        assert len(rows) == 1
+        e = rows[0]
+        assert e.id == "c1"
+        assert e.run_id == "c1"  # base run: DBOS id == Temporal id
+        assert e.workflow_type == "Completer"
+        assert e.task_queue == TASK_QUEUE
+        assert e.status == WorkflowExecutionStatus.COMPLETED
+        assert e.start_time is not None and e.close_time is not None
+        assert e.close_time >= e.start_time
+        assert e.parent_id is None
+        assert e.typed_search_attributes[KW] == "vip"
+        assert e.typed_search_attributes[NUM] == 7
+        assert e.search_attributes["CustomKeyword"] == ["vip"]  # legacy untyped view
+        assert await e.memo() == {"owner": "ada"}
+
+
+async def test_list_child_workflow_has_parent_id() -> None:
+    async with _env() as client:
+        assert (
+            await client.execute_workflow(Parent.run, id="par1", task_queue=TASK_QUEUE)
+            == "kid"
+        )
+        children = await _collect(client.list_workflows("WorkflowType = 'Completer'"))
+        assert len(children) == 1
+        assert children[0].id == "par1_child"
+        assert children[0].parent_id == "par1"  # cross-chain parent link
+        parents = await _collect(client.list_workflows("WorkflowType = 'Parent'"))
+        assert parents[0].parent_id is None
+
+
+async def test_list_continue_as_new_chain_rows() -> None:
+    # Each run-chain link is its own row (run_id = DBOS id); same-chain links are
+    # continuations, not parents, so parent_id stays None.
+    async with _env() as client:
+        assert (
+            await client.execute_workflow(
+                CanOnce.run, True, id="can1", task_queue=TASK_QUEUE
+            )
+            == "done"
+        )
+        rows = await _collect(client.list_workflows("WorkflowType = 'CanOnce'"))
+        by_run = {r.run_id: r for r in rows}
+        assert set(by_run) == {"can1", "can1--r1"}
+        assert all(r.id == "can1" for r in rows)
+        assert all(r.parent_id is None for r in rows)
+        assert by_run["can1"].status == WorkflowExecutionStatus.CONTINUED_AS_NEW
+        assert by_run["can1--r1"].status == WorkflowExecutionStatus.COMPLETED
+
+
+# --- list: pagination correctness under post-filtering ------------------------
+
+
+async def test_list_pagination_post_filter_no_skip_or_dup() -> None:
+    # Interleave completers and failers, then page Failed with a tiny page so
+    # most rows in each raw page are dropped. The iterator must advance by the
+    # raw rows scanned, not by survivors — otherwise it skips or duplicates.
+    async with _env() as client:
+        for i in range(3):
+            await client.execute_workflow(
+                Completer.run, "ok", id=f"c{i}", task_queue=TASK_QUEUE
+            )
+            with pytest.raises(WorkflowFailureError):
+                await client.execute_workflow(
+                    Failer.run, id=f"f{i}", task_queue=TASK_QUEUE
+                )
+
+        failed = await _collect(
+            client.list_workflows("ExecutionStatus = 'Failed'", page_size=2)
+        )
+        ids = [r.id for r in failed]
+        assert sorted(ids) == ["f0", "f1", "f2"]
+        assert len(ids) == len(set(ids))  # no duplicates
+
+
+# --- list: search-attribute value types ---------------------------------------
+
+
+async def test_list_search_attribute_value_types() -> None:
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run,
+            "x",
+            id="typed",
+            task_queue=TASK_QUEUE,
+            search_attributes=TypedSearchAttributes(
+                [
+                    SearchAttributePair(NUM, 5),
+                    SearchAttributePair(FLAG, True),
+                    SearchAttributePair(WHEN, WHEN_VAL),
+                    SearchAttributePair(TAGS, ["red", "blue"]),
+                ]
+            ),
+        )
+        await client.execute_workflow(
+            Completer.run, "y", id="other", task_queue=TASK_QUEUE
+        )
+
+        async def ids(query: str) -> set[str]:
+            return {r.id for r in await _collect(client.list_workflows(query))}
+
+        assert await ids("CustomInt = 5") == {"typed"}
+        assert await ids("CustomBool = true") == {"typed"}
+        assert await ids(f"CustomDatetime = '{WHEN_VAL.isoformat()}'") == {"typed"}
+        # a non-matching value finds nothing.
+        assert await ids("CustomInt = 999") == set()
+        # DEVIATION (D15): keyword-LIST attributes are not filterable. The value
+        # is stored as a JSON array (["red", "blue"]) and our containment filter
+        # is scalar-shaped ({"v": "red"}); with no cluster type registry the
+        # query can't know to wrap the value as an array, so it never matches.
+        assert await ids("CustomTags = 'red'") == set()
+
+
+# --- list: time ranges + limit edge ------------------------------------------
+
+
+async def test_list_time_range_filter() -> None:
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run, "x", id="c1", task_queue=TASK_QUEUE
+        )
+        past = "2000-01-01T00:00:00+00:00"
+        future = "2100-01-01T00:00:00+00:00"
+
+        assert {
+            r.id
+            for r in await _collect(client.list_workflows(f"StartTime >= '{past}'"))
+        } == {"c1"}
+        assert await _collect(client.list_workflows(f"StartTime >= '{future}'")) == []
+        # CloseTime bound on the now-completed workflow.
+        assert {
+            r.id
+            for r in await _collect(client.list_workflows(f"CloseTime >= '{past}'"))
+        } == {"c1"}
+
+
+async def test_list_limit_exceeds_available() -> None:
+    async with _env() as client:
+        for i in range(3):
+            await client.execute_workflow(
+                Completer.run, str(i), id=f"c{i}", task_queue=TASK_QUEUE
+            )
+        rows = await _collect(
+            client.list_workflows("WorkflowType = 'Completer'", limit=100)
+        )
+        assert len(rows) == 3
+
+
+# --- count: query-less, clean filters, zero, grouped-with-filter --------------
+
+
+async def test_count_no_query_and_clean_filters() -> None:
+    async with _env() as client:
+        for i in range(3):
+            await client.execute_workflow(
+                Completer.run, "x", id=f"order-{i}", task_queue=TASK_QUEUE
+            )
+        past = "2000-01-01T00:00:00+00:00"
+
+        assert (await client.count_workflows()).count == 3
+        # STARTS_WITH exercises the prefix->list wrapping for the aggregate.
+        assert (
+            await client.count_workflows("WorkflowId STARTS_WITH 'order-'")
+        ).count == 3
+        assert (
+            await client.count_workflows(
+                "WorkflowType = 'Completer' AND ExecutionStatus = 'Completed'"
+            )
+        ).count == 3
+        assert (await client.count_workflows(f"StartTime >= '{past}'")).count == 3
+
+
+async def test_count_terminated_and_zero() -> None:
+    async with _env() as client:
+        holder = await client.start_workflow(Holder.run, id="h1", task_queue=TASK_QUEUE)
+        await holder.terminate()
+        assert (await holder.describe()).status == WorkflowExecutionStatus.TERMINATED
+        # Terminated maps to DBOS CANCELLED (clean) — aggregate-countable.
+        assert (
+            await client.count_workflows("ExecutionStatus = 'Terminated'")
+        ).count == 1
+        assert (await client.count_workflows("WorkflowType = 'Nope'")).count == 0
+
+
+async def test_count_group_by_workflow_type_with_filter() -> None:
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run, "a", id="c1", task_queue=TASK_QUEUE
+        )
+        await client.execute_workflow(
+            Completer.run, "b", id="c2", task_queue=TASK_QUEUE
+        )
+        holder = await client.start_workflow(Holder.run, id="h1", task_queue=TASK_QUEUE)
+
+        # Filter to Completed first, then group — the running Holder drops out.
+        count = await client.count_workflows(
+            "ExecutionStatus = 'Completed' GROUP BY WorkflowType"
+        )
+        assert _groups(count) == {"Completer": 2}
+        assert count.count == 2
+
+        await holder.signal(Holder.finish)
+        await holder.result()

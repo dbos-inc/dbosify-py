@@ -305,8 +305,12 @@ Deviations from Temporal:
     enumerate the rejected cases.
   - **Each run-chain link is its own row**, keyed by run id (continue-as-new /
     workflow-retry / cron hops), since `run_id` is the DBOS workflow id.
-  - **Search-attribute filtering is equality-only** (the containment subset);
-    ranges/`IN` on a search attribute are rejected.
+  - **Search-attribute filtering is scalar-equality only** (the containment
+    subset); ranges/`IN` on a search attribute are rejected, and **keyword-list
+    attributes are not filterable** — the value is stored as a JSON array and,
+    with no cluster type registry, the query can't know to match it as a member
+    rather than a scalar (`@>` containment of a scalar against a stored array
+    never matches).
 - The **deprecated untyped-dict removal idioms** are not honored. In temporalio
   an empty value list removes a search attribute: `upsert_search_attributes(
   {"k": []})` deletes the typed `k` (while leaving `k: []` in the legacy untyped
