@@ -11,11 +11,11 @@ The workflow id is the deterministic ``{parent_dbos_id}-a{seq}`` chosen by the
 interpreter; the interpreter awaits this workflow's result envelope exactly as
 it awaits a child workflow's (``interpreter._await_activity_result``).
 
-Phase 1 runs a **single attempt** and returns its envelope. The retry loop,
-per-attempt/schedule timeouts, heartbeat ownership, and async-completion park
-(the rest of §6.1.2 for the queued path) are layered on in later phases — they
-live here because, by design (Design A), the activity workflow owns the full
-activity lifecycle on its own worker.
+By design (Design A) the activity workflow owns the full activity lifecycle on
+its own worker: the retry loop with durable backoff, schedule-to-close /
+schedule-to-start enforcement, the heartbeat-timeout watchdog and cross-process
+cancellation poll (both inside the attempt step), and the raise_complete_async
+park for external completion.
 """
 
 import logging
@@ -24,10 +24,11 @@ from typing import Any, Callable, Dict, Optional
 
 from dbos import DBOS
 
+from .. import exceptions
 from ..common import RetryPolicy
 from . import activities as activities_mod
-from . import registry
-from .payloads import deserialize_retry_policy
+from . import inbox, registry
+from .payloads import deserialize_retry_policy, serialize_failure
 
 logger = logging.getLogger("temporal_dbos.activity_workflow")
 
@@ -35,6 +36,7 @@ ACTIVITY_DISPATCH_NAME = "__temporal_activity"
 
 _activity_dispatcher_registered = False
 _started_at_step: Optional[Callable[[], Any]] = None
+_created_at_step: Optional[Callable[[str], Any]] = None
 
 
 def _activity_started_at() -> Any:
@@ -50,6 +52,23 @@ def _activity_started_at() -> Any:
 
         _started_at_step = started_at
     return _started_at_step()
+
+
+def _activity_created_at(workflow_id: str) -> Any:
+    """A step reading this activity workflow's enqueue time (``created_at``, ms)
+    for the schedule-to-start check. Checkpointed, so it replays identically."""
+    global _created_at_step
+    if _created_at_step is None:
+
+        @DBOS.step(name="__tdb_activity_created_at")
+        async def created_at(workflow_id: str) -> Optional[float]:
+            status = await DBOS.get_workflow_status_async(workflow_id)
+            if status is None or status.created_at is None:
+                return None
+            return float(status.created_at) / 1000.0  # ms -> s
+
+        _created_at_step = created_at
+    return _created_at_step(workflow_id)
 
 
 async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -80,11 +99,49 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
     # pointed at a worker that doesn't host the activity.
     step_fn = activities_mod.attempt_step_for(activity_name)
     started_at = await _activity_started_at()
+
+    # schedule_to_start: if the activity sat in the queue past the budget, fail
+    # before running any attempt (terminal — the activity never started).
+    schedule_to_start = payload.get("schedule_to_start")
+    if schedule_to_start is not None:
+        from dbos._context import get_local_dbos_context
+
+        ctx = get_local_dbos_context()
+        if ctx is not None:
+            created_at = await _activity_created_at(ctx.workflow_id)
+            if created_at is not None and (started_at - created_at) > schedule_to_start:
+                timed_out = exceptions.TimeoutError(
+                    "activity Schedule-To-Start timeout",
+                    type=exceptions.TimeoutType.SCHEDULE_TO_START,
+                    last_heartbeat_details=[],
+                )
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(timed_out),
+                    "ended_at": started_at,
+                    "retry_state": int(exceptions.RetryState.TIMEOUT),
+                }
+
     attempt = int(meta.get("attempt", 1))
     while True:
         meta["attempt"] = attempt
         envelope: Dict[str, Any] = await step_fn(args, start_to_close, meta)
-        if envelope.get("ok") or envelope.get("async_pending"):
+        if envelope.get("async_pending"):
+            # raise_complete_async(): park for external completion via
+            # AsyncActivityHandle (which sends to this workflow's recv topic).
+            # A fail re-runs the activity per policy (fall through); complete /
+            # cancelled / timeout are handled inside.
+            timeout = (
+                start_to_close
+                if start_to_close is not None
+                else (
+                    schedule_to_close
+                    if schedule_to_close is not None
+                    else inbox.RECV_TIMEOUT_SECONDS
+                )
+            )
+            envelope = await _await_async_completion(envelope, timeout)
+        if envelope.get("ok"):
             return envelope
         failure = envelope["failure"]
         if failure.get("cls") == "CancelledError":
@@ -104,6 +161,43 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {**envelope, "retry_state": int(retry_state)}
         await DBOS.sleep_async(delay)
         attempt += 1
+
+
+async def _await_async_completion(
+    pending_env: Dict[str, Any], timeout: float
+) -> Dict[str, Any]:
+    """Park the activity workflow for external completion (raise_complete_async
+    on the queued path). Returns a normal attempt envelope: complete -> ok,
+    fail -> a retryable failure (the caller re-runs per policy), report_cancellation
+    -> a terminal CancelledError, and a recv timeout -> a START_TO_CLOSE timeout.
+
+    Timestamps come from recorded values (the completer's ``sent_at`` or the
+    parked attempt's ``ended_at``), never a live clock read in the workflow body.
+    """
+    completion = await DBOS.recv_async(inbox.ASYNC_COMPLETE_TOPIC, timeout)
+    ended_at = float(pending_env.get("ended_at", 0.0))
+    if completion is None:
+        timed_out = exceptions.TimeoutError(
+            "activity Start-To-Close timeout",
+            type=exceptions.TimeoutType.START_TO_CLOSE,
+            last_heartbeat_details=[],
+        )
+        return {
+            "ok": False,
+            "failure": serialize_failure(timed_out),
+            "ended_at": ended_at,
+        }
+    ended_at = float(completion.get("sent_at", ended_at))
+    if completion.get("cancelled"):
+        cancelled = exceptions.CancelledError("Activity cancelled")
+        return {
+            "ok": False,
+            "failure": serialize_failure(cancelled),
+            "ended_at": ended_at,
+        }
+    if completion.get("ok"):
+        return {"ok": True, "result": completion.get("result"), "ended_at": ended_at}
+    return {"ok": False, "failure": completion["failure"], "ended_at": ended_at}
 
 
 def register_activity_dispatcher() -> None:

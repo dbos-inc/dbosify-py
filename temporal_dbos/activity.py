@@ -248,10 +248,18 @@ def _make_info(meta: dict[str, Any]) -> Info:
     if seq is not None:
         heartbeat_details = tuple(_heartbeat_store.get((run_id, int(seq)), ()))
         # An opaque structured token (workflow ids and activity ids may
-        # contain almost anything, so no string separator is safe).
-        task_token = json.dumps(
-            {"run": run_id, "aid": str(meta.get("activity_id", ""))}
-        ).encode()
+        # contain almost anything, so no string separator is safe). On the
+        # queued path it also carries the activity workflow id ("qwf"), so an
+        # AsyncActivityHandle delivers completion to that workflow's recv rather
+        # than the parent run's inbox (§6.1.2).
+        token: dict[str, Any] = {
+            "run": run_id,
+            "aid": str(meta.get("activity_id", "")),
+        }
+        queued_wf = meta.get("queued_activity_dbos_id")
+        if queued_wf:
+            token["qwf"] = str(queued_wf)
+        task_token = json.dumps(token).encode()
     return Info(
         activity_id=str(meta.get("activity_id", "")),
         activity_type=str(meta.get("activity_type", "")),

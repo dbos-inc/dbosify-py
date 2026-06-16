@@ -86,6 +86,7 @@ def _reset_for_tests() -> None:
     _schedule_dispatcher_registered = False
     activity_workflow._activity_dispatcher_registered = False
     activity_workflow._started_at_step = None
+    activity_workflow._created_at_step = None
     registry._dbos_workflows.clear()
     registry._activity_dispatcher = None
     registry._workflows.clear()

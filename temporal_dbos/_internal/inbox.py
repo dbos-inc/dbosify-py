@@ -21,6 +21,11 @@ from typing import Any, Dict, Sequence
 
 INBOX_TOPIC = "__tdb_inbox"
 
+# The topic a queued activity workflow parks on for external completion
+# (raise_complete_async on the cross-queue path, §6.1.2): AsyncActivityHandle
+# sends the completion envelope here, addressed to the activity workflow id.
+ASYNC_COMPLETE_TOPIC = "__tdb_async_complete"
+
 # recv timeout per wait; on (checkpointed, deterministic) timeout the
 # interpreter just re-issues the recv.
 RECV_TIMEOUT_SECONDS = 3600.0

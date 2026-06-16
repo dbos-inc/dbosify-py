@@ -523,6 +523,9 @@ class _ActivityExec:
     # The ``__temporal_activity`` workflow id once dispatched on the queued path
     # (None on the local path); cancellation natively cancels this workflow.
     queued_dbos_id: Optional[str] = None
+    # schedule_to_start_timeout in seconds; only meaningful on the queued path
+    # (the local path has no queue wait), where it bounds the queue dwell.
+    schedule_to_start: Optional[float] = None
 
 
 @dataclass
@@ -990,6 +993,7 @@ class Interpreter(_Runtime):
         heartbeat_timeout: Optional[timedelta] = None,
         result_type: Optional[type] = None,
         task_queue: Optional[str] = None,
+        schedule_to_start_timeout: Optional[timedelta] = None,
     ) -> ActivityHandle:
         self._assert_not_read_only("start an activity")
         if task_queue is None:
@@ -1036,6 +1040,11 @@ class Interpreter(_Runtime):
             ),
             result_type=result_type,
             task_queue=task_queue,
+            schedule_to_start=(
+                schedule_to_start_timeout.total_seconds()
+                if schedule_to_start_timeout
+                else None
+            ),
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
@@ -1402,12 +1411,16 @@ class Interpreter(_Runtime):
             "workflow_type": self._defn.name,
             # Tells the attempt step to poll the cross-process cancel event.
             "queued": True,
+            # The activity workflow id, so info().task_token addresses this
+            # workflow for raise_complete_async external completion.
+            "queued_activity_dbos_id": activity_dbos_id,
         }
         payload = {
             "activity_name": exec_state.activity_name,
             "args": exec_state.args,  # already encoded in _process_commands
             "start_to_close": exec_state.start_to_close,
             "schedule_to_close": exec_state.schedule_to_close,
+            "schedule_to_start": exec_state.schedule_to_start,
             # The activity workflow owns the retry loop (Design A); schedule_to_close
             # gates retries there, not via SetWorkflowTimeout — matching the local
             # path, where it bounds the retry sequence, not an in-flight attempt.
@@ -1602,26 +1615,10 @@ class Interpreter(_Runtime):
         envelope: Dict[str, Any] = waiter.task.result()
         self._advance_time(envelope.get("ended_at"))
         del self._pending_activities[waiter.seq]
-        if envelope.get("async_pending"):
-            # raise_complete_async() on the queued path parks the activity for
-            # external completion — implemented in a later phase (§6.1.2). Until
-            # then, surface a clear failure rather than hanging.
-            error = exceptions.ActivityError(
-                "raise_complete_async() is not yet supported on the cross-queue "
-                "activity path",
-                scheduled_event_id=0,
-                started_event_id=0,
-                identity="",
-                activity_type=exec_state.activity_name,
-                activity_id=exec_state.activity_id,
-                retry_state=None,
-            )
-            error.__cause__ = exceptions.ApplicationError(
-                "queued async activity completion unimplemented",
-                type="NotImplementedError",
-            )
-            exec_state.future.set_exception(error)
-            return
+        # No async_pending here: raise_complete_async() parks inside the
+        # __temporal_activity workflow on its own worker (Design A), which only
+        # returns once externally completed — so this is always a terminal
+        # ok/failure envelope.
         if envelope["ok"]:
             exec_state.future.set_result(envelope["result"])
             return

@@ -283,10 +283,14 @@ class AsyncActivityHandle:
         self._client = client
         self._workflow_id: Optional[str] = None
         self._run_id: Optional[str] = None
+        # On the queued path (§6.1.2) the completion goes to the activity
+        # workflow's recv topic, not the parent run's inbox.
+        self._queued_wf: Optional[str] = None
         if isinstance(id_or_token, bytes):
             token = json.loads(id_or_token.decode())
             self._run_id = token["run"]
             self._activity_id: str = token["aid"]
+            self._queued_wf = token.get("qwf")
         else:
             workflow_id, run_id, activity_id = id_or_token
             if not workflow_id or not activity_id:
@@ -298,6 +302,8 @@ class AsyncActivityHandle:
             self._activity_id = activity_id
 
     async def _target(self) -> str:
+        if self._queued_wf is not None:
+            return self._queued_wf
         if self._run_id is not None:
             return self._run_id
         assert self._workflow_id is not None
@@ -319,7 +325,14 @@ class AsyncActivityHandle:
         )
         if gone:
             raise AsyncActivityCancelledError()
-        await self._client._dbos_client.send_async(target, envelope, inbox.INBOX_TOPIC)
+        # Queued activities park on a dedicated completion topic; local ones
+        # consume from the shared inbox.
+        topic = (
+            inbox.ASYNC_COMPLETE_TOPIC
+            if self._queued_wf is not None
+            else inbox.INBOX_TOPIC
+        )
+        await self._client._dbos_client.send_async(target, envelope, topic)
 
     async def complete(
         self,
@@ -383,10 +396,15 @@ class AsyncActivityHandle:
         _ignore_rpc_options(
             "async activity report_cancellation", rpc_metadata, rpc_timeout
         )
+        topic = (
+            inbox.ASYNC_COMPLETE_TOPIC
+            if self._queued_wf is not None
+            else inbox.INBOX_TOPIC
+        )
         await self._client._dbos_client.send_async(
             await self._target(),
             inbox.activity_result_envelope(self._activity_id, cancelled=True),
-            inbox.INBOX_TOPIC,
+            topic,
         )
 
 

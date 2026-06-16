@@ -404,11 +404,18 @@ Operational requirement and current scope:
   activity is cancelled at its next await (more eagerly than Temporal, which
   delivers only at `heartbeat()`); a sync activity observes it at its next
   `heartbeat()`.
-- **Not yet honored on the queued path** (all work on the local/same-queue
-  path): cross-process heartbeat-*detail* delivery to the workflow (the
-  in-activity heartbeat-timeout watchdog and cross-attempt
-  `info().heartbeat_details` still work on the activity worker — only forwarding
-  details to the workflow side is absent), `schedule_to_start_timeout`, and
-  `raise_complete_async` (raises a clear `ActivityError` rather than parking).
-  These are staged follow-on work; until then they are documented here rather
-  than silently ignored.
+- **`schedule_to_start_timeout` bounds the queue dwell.** The activity workflow
+  compares its enqueue time (`created_at`) to its start time on the worker and,
+  if the budget was exceeded, fails with `TimeoutType.SCHEDULE_TO_START` before
+  running any attempt. (On the local path it is a no-op — there is no queue
+  wait — as in Temporal.)
+- **`raise_complete_async` parks on the queued path.** The activity workflow
+  waits on a dedicated completion topic; the task token carries the activity
+  workflow id so an `AsyncActivityHandle` (`complete`/`fail`/`report_cancellation`)
+  delivers there. A fail re-runs the activity per the retry policy; the recv
+  times out against the start-to-close budget.
+- **Remaining gap on the queued path:** cross-process heartbeat-*detail*
+  forwarding to the workflow side. The in-activity heartbeat-timeout watchdog and
+  cross-attempt `info().heartbeat_details` work on the activity worker; only
+  surfacing live details to the workflow (rare) is absent. Documented rather than
+  silently ignored.
