@@ -21,7 +21,6 @@ from typing import (
     Generic,
     Iterator,
     Mapping,
-    NamedTuple,
     Optional,
     Sequence,
     TypeVar,
@@ -30,6 +29,12 @@ from typing import (
     get_origin,
     overload,
 )
+
+# typing.NamedTuple cannot be combined with Generic before Python 3.11
+# ("Multiple inheritance with NamedTuple is not supported"). typing_extensions
+# backports the 3.11 generic NamedTuple to our 3.10 floor — same approach as
+# temporalio, which imports NamedTuple from typing_extensions for this reason.
+from typing_extensions import NamedTuple
 
 if TYPE_CHECKING:
     from .converter import Payload

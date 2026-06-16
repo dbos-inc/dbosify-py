@@ -1384,6 +1384,7 @@ source = { editable = "." }
 dependencies = [
     { name = "dbos" },
     { name = "python-dateutil", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
 ]
 
 [package.dev-dependencies]
@@ -1404,6 +1405,7 @@ dev = [
 requires-dist = [
     { name = "dbos", specifier = "==2.25.0a3" },
     { name = "python-dateutil", marker = "python_full_version < '3.11'", specifier = ">=2.8.2,<3" },
+    { name = "typing-extensions", specifier = ">=4.7.0" },
 ]
 
 [package.metadata.requires-dev]
