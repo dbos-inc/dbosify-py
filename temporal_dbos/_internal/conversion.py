@@ -150,27 +150,40 @@ def decode_value_sync(value: Any, type_hint: Optional[type] = None) -> Any:
 # temporalio — the user encodes/decodes it with ``workflow.payload_converter``/
 # ``activity.payload_converter``). On the wire (run meta, inbox envelopes,
 # activity step meta) it is the same small payload dict every other value uses,
-# so it checkpoints as JSON. No codec runs on header bytes: the user already
-# produced the Payload, so these are pure (sync) shape conversions.
+# so it checkpoints as JSON. A configured ``PayloadCodec`` runs on header bytes
+# too (like args), so an encrypting codec protects header values; both are async
+# and called only on the real loop, at the same boundaries args are encoded.
 # ---------------------------------------------------------------------------
 
 
-def encode_headers(headers: Optional[Mapping[str, Payload]]) -> Dict[str, Any]:
+async def encode_headers(headers: Optional[Mapping[str, Payload]]) -> Dict[str, Any]:
     """Convert boundary headers (str -> Payload) to wire form (str -> payload
-    dict). Empty/None maps to ``{}``."""
+    dict), codec-encoding the bytes when a codec is configured. Empty/None maps
+    to ``{}``."""
     if not headers:
         return {}
+    keys = list(headers.keys())
+    payloads: Sequence[Payload] = list(headers.values())
+    inline = _active_converter.payload_codec is None
+    if _active_converter.payload_codec is not None:
+        payloads = await _active_converter.payload_codec.encode(list(payloads))
     return {
-        key: _payload_to_dict(value, inline_json=True) for key, value in headers.items()
+        key: _payload_to_dict(payload, inline_json=inline)
+        for key, payload in zip(keys, payloads)
     }
 
 
-def decode_headers(wire: Optional[Mapping[str, Any]]) -> Dict[str, Payload]:
+async def decode_headers(wire: Optional[Mapping[str, Any]]) -> Dict[str, Payload]:
     """Convert wire-form headers (str -> payload dict) back to boundary headers
-    (str -> Payload). Empty/None maps to ``{}``."""
+    (str -> Payload), codec-decoding the bytes when a codec is configured.
+    Empty/None maps to ``{}``."""
     if not wire:
         return {}
-    return {key: _payload_from_dict(value) for key, value in wire.items()}
+    keys = list(wire.keys())
+    payloads: Sequence[Payload] = [_payload_from_dict(value) for value in wire.values()]
+    if _active_converter.payload_codec is not None:
+        payloads = await _active_converter.payload_codec.decode(list(payloads))
+    return dict(zip(keys, payloads))
 
 
 def type_hints_from_func(

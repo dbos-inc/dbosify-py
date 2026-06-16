@@ -5,7 +5,7 @@ tests/integration/test_interceptors.py.
 """
 
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 from temporal_dbos._internal import conversion
 from temporal_dbos._internal import workflow_interceptor as wfi
@@ -19,11 +19,11 @@ def _payloads(*values: object) -> Dict[str, Any]:
 
 def test_encode_decode_headers_round_trip() -> None:
     headers = _payloads("hello", 42, {"nested": [1, 2]})
-    wire = conversion.encode_headers(headers)
+    wire = asyncio.run(conversion.encode_headers(headers))
     # Wire form is JSON-safe payload dicts (no raw Payload / bytes).
     assert all(isinstance(v, dict) for v in wire.values())
 
-    decoded = conversion.decode_headers(wire)
+    decoded = asyncio.run(conversion.decode_headers(wire))
     assert set(decoded) == set(headers)
     assert all(isinstance(v, Payload) for v in decoded.values())
     pc = conversion.get_converter().payload_converter
@@ -33,10 +33,47 @@ def test_encode_decode_headers_round_trip() -> None:
 
 
 def test_encode_decode_headers_empty() -> None:
-    assert conversion.encode_headers(None) == {}
-    assert conversion.encode_headers({}) == {}
-    assert conversion.decode_headers(None) == {}
-    assert conversion.decode_headers({}) == {}
+    assert asyncio.run(conversion.encode_headers(None)) == {}
+    assert asyncio.run(conversion.encode_headers({})) == {}
+    assert asyncio.run(conversion.decode_headers(None)) == {}
+    assert asyncio.run(conversion.decode_headers({})) == {}
+
+
+def test_encode_headers_applies_codec() -> None:
+    """A configured PayloadCodec transforms header bytes at rest and the
+    round-trip restores them (the codec-protection fix)."""
+    from temporal_dbos.converter import DataConverter, PayloadCodec
+
+    class _XorCodec(PayloadCodec):
+        async def encode(self, payloads: Sequence[Payload]) -> List[Payload]:
+            return [
+                Payload(
+                    metadata={**p.metadata, "codec": b"xor"},
+                    data=bytes(b ^ 0x5A for b in p.data),
+                )
+                for p in payloads
+            ]
+
+        async def decode(self, payloads: Sequence[Payload]) -> List[Payload]:
+            return [
+                Payload(
+                    metadata={k: v for k, v in p.metadata.items() if k != "codec"},
+                    data=bytes(b ^ 0x5A for b in p.data),
+                )
+                for p in payloads
+            ]
+
+    conversion.set_converter(DataConverter(payload_codec=_XorCodec()))
+    try:
+        headers = _payloads("secret")
+        plaintext = headers["k0"].data
+        wire = asyncio.run(conversion.encode_headers(headers))
+        # At rest the bytes are codec-transformed (not the plaintext payload).
+        assert "json" not in wire["k0"], "codec'd headers must not inline plaintext"
+        restored = asyncio.run(conversion.decode_headers(wire))
+        assert restored["k0"].data == plaintext
+    finally:
+        conversion.reset_converter()
 
 
 async def _noop_run(*args: Any) -> str:

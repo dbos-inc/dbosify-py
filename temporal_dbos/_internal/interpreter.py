@@ -639,17 +639,21 @@ class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
         err._tdb_retry_policy = input.retry_policy
         err._tdb_memo = input.memo
         err._tdb_search_attributes = input.search_attributes
-        err._tdb_headers = conversion.encode_headers(input.headers)
+        # Raw Payloads; codec-encoded on the real loop in _begin_continue_as_new
+        # (this runs on the virtual loop, which can't await the async codec).
+        err._tdb_headers = dict(input.headers)
         raise err
 
     def info(self) -> Info:
         return self._interp.runtime_info()
 
     async def signal_child_workflow(self, input: _wfi.SignalChildWorkflowInput) -> None:
+        # Raw-Payload headers ride in the envelope; the send command encodes them
+        # (with args) on the real loop in _process_commands.
         envelope = inbox.signal_envelope(
             input.signal,
             list(input.args),
-            headers=conversion.encode_headers(input.headers),
+            headers=dict(input.headers),
         )
         # The child may have continued as new; resolve to its current run.
         await self._interp.runtime_send_to_workflow(
@@ -662,7 +666,7 @@ class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
         envelope = inbox.signal_envelope(
             input.signal,
             list(input.args),
-            headers=conversion.encode_headers(input.headers),
+            headers=dict(input.headers),
         )
         await self._interp.runtime_send_to_workflow(
             input.workflow_run_id or input.workflow_id,
@@ -683,7 +687,8 @@ class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
             result_type=input.ret_type,
             task_queue=input.task_queue,
             schedule_to_start_timeout=input.schedule_to_start_timeout,
-            headers=conversion.encode_headers(input.headers),
+            # Raw Payloads; codec-encoded on the real loop in _process_commands.
+            headers=input.headers,
         )
 
     def start_local_activity(
@@ -698,7 +703,7 @@ class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
             activity_id=input.activity_id,
             cancellation_type=int(input.cancellation_type),
             result_type=input.ret_type,
-            headers=conversion.encode_headers(input.headers),
+            headers=input.headers,
         )
 
     async def start_child_workflow(
@@ -715,7 +720,8 @@ class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
             cancellation_type=int(input.cancellation_type),
             memo=input.memo,
             search_attributes=input.search_attributes,
-            headers=conversion.encode_headers(input.headers),
+            # Raw Payloads; codec-encoded on the real loop in _start_child.
+            headers=input.headers,
         )
 
 
@@ -865,7 +871,7 @@ class Interpreter(_Runtime):
         )
         # Decode the run's headers to Payloads (ExecuteWorkflowInput.headers) and
         # build the interceptor chains before any workflow code runs.
-        self._headers = conversion.decode_headers(self._meta.headers)
+        self._headers = await conversion.decode_headers(self._meta.headers)
         self._build_interceptor_chains()
         self._instantiate()
         try:
@@ -990,8 +996,11 @@ class Interpreter(_Runtime):
         carried = self._meta.carried_forward()
         # Headers do NOT auto-carry across continue-as-new (Temporal semantics):
         # the outbound chain sets them explicitly (an interceptor re-injects
-        # context). _tdb_headers is already wire-form (encoded by the root).
-        carried.headers = getattr(can, "_tdb_headers", None) or None
+        # context). _tdb_headers holds raw Payloads; codec-encode here (real
+        # loop) into wire form for the next run.
+        carried.headers = (
+            await conversion.encode_headers(getattr(can, "_tdb_headers", None)) or None
+        )
         if can._tdb_run_timeout is not None:
             carried.run_timeout = can._tdb_run_timeout.total_seconds()
         if can._tdb_retry_policy is not None:
@@ -1374,9 +1383,12 @@ class Interpreter(_Runtime):
                     # saw CancelledError) and nothing was dispatched on either
                     # path — so there is nothing to launch or cancel.
                     continue
-                # Encode the args once (reused across retries); the step
-                # decodes them against the activity's signature.
+                # Encode the args + headers once (reused across retries); the
+                # step decodes them. Done here on the real loop so a codec's
+                # async work stays off the virtual loop (headers held raw Payloads
+                # from the sync outbound root until now).
                 exec_state.args = await conversion.encode_values(exec_state.args)
+                exec_state.headers = await conversion.encode_headers(exec_state.headers)
                 # Resolve our own queue only when a task_queue was requested,
                 # so workflows that never use cross-queue dispatch keep their
                 # exact checkpoint shape (no extra status read).
@@ -1397,12 +1409,16 @@ class Interpreter(_Runtime):
             elif kind == "send":
                 target, envelope, future, resolve_chain = self._pending_sends.pop(seq)
                 if isinstance(envelope, dict) and envelope.get("kind") == "signal":
-                    # Encode the signal args here (real loop), not in workflow
-                    # code, so a codec's async work stays off the virtual loop.
+                    # Encode the signal args + headers here (real loop), not in
+                    # workflow code, so a codec's async work stays off the
+                    # virtual loop (the outbound root left both raw).
                     envelope = {
                         **envelope,
                         "args": await conversion.encode_values(
                             envelope.get("args", [])
+                        ),
+                        "headers": await conversion.encode_headers(
+                            envelope.get("headers")
                         ),
                     }
                 # send_async is checkpointed; awaited inline so its
@@ -1490,9 +1506,12 @@ class Interpreter(_Runtime):
             child_attrs = await _attributes.encode_attributes(
                 child.memo, child.search_attributes
             )
+            # Encode headers here (real loop) — child.headers held raw Payloads
+            # from the sync outbound root, and a codec is async.
+            child_headers = await conversion.encode_headers(child.headers)
             child_meta = (
-                RunMeta(attributes=child_attrs, headers=child.headers or None)
-                if child_attrs is not None or child.headers
+                RunMeta(attributes=child_attrs, headers=child_headers or None)
+                if child_attrs is not None or child_headers
                 else None
             )
             child_payload = wrap_input(child_args, child_meta)
@@ -2276,26 +2295,23 @@ class Interpreter(_Runtime):
             )
             return
         decoded = await self._decode_message_args(envelope)
+        # Decode headers here (real loop) so the codec runs off the virtual loop;
+        # the handler task gets ready Payloads.
+        headers = await conversion.decode_headers(envelope.get("headers"))
         self._spawn_handler(
-            self._run_signal_handler(
-                defn.name, decoded["args"], envelope.get("headers")
-            ),
+            self._run_signal_handler(defn.name, decoded["args"], headers),
             kind="signal",
             name=defn.name,
             policy=defn.unfinished_policy,
         )
 
     async def _run_signal_handler(
-        self, name: str, args: Sequence[Any], headers: Optional[Mapping[str, Any]]
+        self, name: str, args: Sequence[Any], headers: Mapping[str, Any]
     ) -> None:
         try:
             assert self._inbound is not None
             await self._inbound.handle_signal(
-                _wfi.HandleSignalInput(
-                    signal=name,
-                    args=args,
-                    headers=conversion.decode_headers(headers),
-                )
+                _wfi.HandleSignalInput(signal=name, args=args, headers=headers)
             )
         except ContinueAsNewError as can:
             # Handlers may initiate continue-as-new (as in Temporal).
@@ -2405,8 +2421,10 @@ class Interpreter(_Runtime):
             self._reply(acceptance_key, status="rejected", failure=failure)
             self._reply(reply_key, status="rejected", failure=failure)
             return
+        # Decode headers once here (real loop) so the codec runs off the virtual
+        # loop; both the validator and the handler task get ready Payloads.
+        update_headers = await conversion.decode_headers(envelope.get("headers"))
         if defn.validator is not None:
-            update_headers = conversion.decode_headers(envelope.get("headers"))
 
             def run_validator() -> None:
                 # Routed through the inbound chain; the root sets the read-only,
@@ -2440,7 +2458,7 @@ class Interpreter(_Runtime):
         self._reply(acceptance_key, status="accepted")
         self._spawn_handler(
             self._run_update_handler(
-                defn.name, envelope["args"], reply_key, envelope.get("headers")
+                defn.name, envelope["args"], reply_key, update_headers
             ),
             kind="update",
             name=defn.name,
@@ -2453,7 +2471,7 @@ class Interpreter(_Runtime):
         name: str,
         args: Sequence[Any],
         reply_key: str,
-        headers: Optional[Mapping[str, Any]],
+        headers: Mapping[str, Any],
     ) -> None:
         try:
             assert self._inbound is not None
@@ -2462,7 +2480,7 @@ class Interpreter(_Runtime):
                     id=self._workflow_id,
                     update=name,
                     args=args,
-                    headers=conversion.decode_headers(headers),
+                    headers=headers,
                 )
             )
         except ContinueAsNewError as can:
@@ -2501,7 +2519,7 @@ class Interpreter(_Runtime):
                     id=self._workflow_id,
                     query=envelope["name"],
                     args=envelope["args"],
-                    headers=conversion.decode_headers(envelope.get("headers")),
+                    headers=await conversion.decode_headers(envelope.get("headers")),
                 )
             )
         except asyncio.CancelledError:

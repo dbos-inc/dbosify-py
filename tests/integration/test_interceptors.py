@@ -948,3 +948,60 @@ async def test_header_survives_continue_as_new() -> None:
             dbos_client.destroy()
 
     assert result == "hello"
+
+
+async def test_header_survives_payload_codec() -> None:
+    """A configured PayloadCodec protects header values and round-trips them
+    through the full channel (client -> workflow -> activity -> child)."""
+    from typing import Sequence
+
+    from temporal_dbos.converter import DataConverter, Payload, PayloadCodec
+
+    class _XorCodec(PayloadCodec):
+        async def encode(self, payloads: Sequence[Payload]) -> List[Payload]:
+            return [
+                Payload(
+                    metadata={**p.metadata, "codec": b"xor"},
+                    data=bytes(b ^ 0x5A for b in p.data),
+                )
+                for p in payloads
+            ]
+
+        async def decode(self, payloads: Sequence[Payload]) -> List[Payload]:
+            return [
+                Payload(
+                    metadata={k: v for k, v in p.metadata.items() if k != "codec"},
+                    data=bytes(b ^ 0x5A for b in p.data),
+                )
+                for p in payloads
+            ]
+
+    converter = DataConverter(payload_codec=_XorCodec())
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[TraceParentWorkflow, TraceChildWorkflow],
+        activities=[echo_trace],
+        interceptors=[_TraceWorkerInterceptor()],
+        data_converter=converter,
+    )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(
+                dbos_client,
+                interceptors=[_TraceClientInterceptor()],
+                data_converter=converter,
+            )
+            result = await client.execute_workflow(
+                TraceParentWorkflow.run, id="ic-trace-codec", task_queue=TASK_QUEUE
+            )
+        finally:
+            dbos_client.destroy()
+
+    # The codec ran on every header hop and the values still arrive intact.
+    assert result == {
+        "trace": "hello",
+        "activity": "hello",
+        "child": {"trace": "hello", "activity": "hello"},
+    }
