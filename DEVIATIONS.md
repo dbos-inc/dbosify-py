@@ -283,11 +283,23 @@ Deviations from Temporal:
   its own type (`SearchAttributeKey.for_keyword(...)` etc.); the deprecated
   untyped-dict form is also accepted, with the key type guessed as temporalio
   does.
-- The **visibility query language** is not wired yet: `Client.list_workflows`
-  / `count_workflows` and the `"CustomKeyword='foo' AND ..."` query string are
-  not implemented (Phase 3 remaining). The attributes are GIN-indexed, so a
-  future implementation maps query equality predicates onto JSONB `@>`
-  containment. The full query language is not planned.
+- The **visibility query language is a documented subset**, not Temporal's full
+  grammar. `Client.list_workflows(query=...)` / `count_workflows(query=...)`
+  parse a flat `AND` conjunction (no `OR`, no grouping parens, no
+  `ORDER BY`/`GROUP BY`) over: `WorkflowType` (`= != IN`), `WorkflowId`
+  (`= STARTS_WITH`), `ExecutionStatus` (`= IN`), `StartTime`/`CloseTime`
+  (`> >= < <= =`), and custom search attributes (`=` only, mapped onto the
+  GIN-indexed JSONB `@>` containment). Anything outside the subset raises with a
+  message listing what is supported. Specific gaps:
+  - **Time bounds are inclusive.** `>`/`>=` (and `<`/`<=`) both translate to
+    DBOS's inclusive bound, so a strict `>` may include an exact-timestamp match.
+  - **`count_workflows` scans, it does not aggregate.** DBOS has no count
+    primitive, so it pages over matching rows and sums them (O(matches)); the
+    `groups` field is always empty (no group-by support).
+  - **Each run-chain link is its own row**, keyed by run id (continue-as-new /
+    workflow-retry / cron hops), since `run_id` is the DBOS workflow id.
+  - **Search-attribute filtering is equality-only** (the containment subset);
+    ranges/`IN` on a search attribute are rejected.
 - The **deprecated untyped-dict removal idioms** are not honored. In temporalio
   an empty value list removes a search attribute: `upsert_search_attributes(
   {"k": []})` deletes the typed `k` (while leaving `k: []` in the legacy untyped
