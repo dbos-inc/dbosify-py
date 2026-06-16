@@ -71,6 +71,20 @@ harness).
 | update_with_start/lazy_initialization | ✅ (`WithStartWorkflowOperation`, `execute_update_with_start_workflow`) |
 | safe_message_handlers | ✅ (continue-as-new + handler-heavy traffic) — the `message_passing/` corpus is complete |
 
+`schedules/` (a long-running worker plus per-operation client scripts, run
+unmodified):
+
+| Sample | Status |
+|---|---|
+| start_schedule | ✅ (`create_schedule` with an interval `ScheduleSpec`) |
+| describe_schedule | ✅ (`ScheduleHandle.describe` → `state.note`) |
+| list_schedule | ✅ (`list_schedules` async iterator) |
+| trigger_schedule | ✅ (`trigger` fires an action immediately) |
+| update_schedule | ✅ (`update` callback; delete-then-recreate — deviation #16) |
+| pause_schedule | ✅ (`pause` with note) |
+| backfill_schedule | ✅ (`backfill` over a past window) |
+| delete_schedule | ✅ (`delete`) |
+
 ## Known deviations from Temporal
 
 **[DEVIATIONS.md](DEVIATIONS.md) is the canonical, detailed record of
@@ -95,6 +109,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 13 | Cron workflows are run chains with per-run results: `result()` on a successful cron run returns that run's result (temporalio's would follow the chain forever); cancellation between runs — or during a retry attempt's backoff — takes effect at the next fire; 6/7-field cron expressions are accepted as an extension. |
 | 14 | (Temporary) Workflow retry policies trigger on workflow *failures*. A run that exceeds its `run_timeout` is cancelled to TERMINATED and does **not** retry or continue a cron chain (Temporal raises TIMED_OUT and retries). `execution_timeout` (the whole-chain bound that also caps retry chains) is likewise unenforced — an unlimited retry policy retries without a time bound. Both land with the TIMED_OUT status-marker work. |
 | 15 | Workflow-retry edges: `non_retryable_error_types` additionally matches envelope failure classes (a superset of Temporal's application-type-only matching), and unconsumed signals carry over to the next retry attempt instead of dying with the failed run. |
+| 16 | Schedules (`create_schedule`/`ScheduleHandle`) back onto DBOS schedules: a `ScheduleSpec` compiles to one cron expression (intervals that divide a cron boundary are exact, others approximate; calendar `year`/interval `offset` dropped); the schedule's overlap policy honors SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL (CANCEL_OTHER doesn't wait for the cancelled run to finish; detection is grid-based and bounded) but rejects BUFFER_ONE/BUFFER_ALL, and a per-call `trigger`/`backfill` overlap override is not applied (only None/ALLOW_ALL accepted, others raise); `update` is delete-then-recreate and `pause`/`unpause` don't persist their `note`; schedule history (recent actions, action counts) and schedule `memo`/`search_attributes` are not tracked. See [DEVIATIONS.md](DEVIATIONS.md) D22. |
 
 ## Development
 

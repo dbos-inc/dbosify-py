@@ -6,6 +6,7 @@ resume correctly. This module provides the process-control plumbing; the
 scripts themselves live next to the tests that use them.
 """
 
+import asyncio
 import os
 import signal
 import subprocess
@@ -13,7 +14,36 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Awaitable, Callable, Optional, TypeVar
+
+T = TypeVar("T")
+
+
+async def retry_until_success_async(
+    check: Callable[[], Awaitable[T]],
+    *,
+    interval: float = 0.2,
+    max_attempts: int = 100,
+) -> T:
+    """Poll ``check`` until it returns without raising, then return its value.
+
+    Sleeps with ``asyncio.sleep`` between attempts so the event loop stays free
+    to make progress (e.g. an in-process Worker servicing the very thing we are
+    waiting on). Prefer this over a fixed ``asyncio.sleep`` in tests: a test
+    that waits for a real condition is both faster (returns as soon as the
+    condition holds) and more reliable (no guessing the duration). ``check``
+    signals "not yet" by raising (e.g. ``assert``).
+    """
+    error: Optional[BaseException] = None
+    for _ in range(max_attempts):
+        try:
+            return await check()
+        except Exception as e:  # noqa: BLE001 — any failure means "not yet"
+            error = e
+            await asyncio.sleep(interval)
+    if error is not None:
+        raise error
+    raise RuntimeError("retry_until_success_async exhausted without an exception")
 
 
 class PythonProcess:

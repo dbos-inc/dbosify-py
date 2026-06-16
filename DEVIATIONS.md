@@ -308,3 +308,54 @@ that checkpoints only the JSON-safe fields we use (`status`, `queue_name`,
 `parent_workflow_id`) — a whole `WorkflowStatus` is not JSON-serializable. This
 is invisible to users and preserves the checkpoint (and thus determinism)
 exactly, just serializably.
+
+### D22. Schedules compile to a single cron; overlap and history are partial
+
+`client.create_schedule` / `ScheduleHandle` (DESIGN §6.7) are backed by DBOS
+schedules: a Temporal `Schedule` compiles to one DBOS schedule row that fires a
+generic dispatcher, which starts the action workflow with a per-occurrence
+deterministic id. The `Schedule`/`ScheduleSpec`/... type surface mirrors
+temporalio; these edges differ:
+
+- **`ScheduleSpec` compiles to one cron expression.** Interval periods that
+  divide a cron boundary evenly (seconds into 60, minutes into 60, hours into
+  24, whole days) are exact; others are approximated to the nearest cron with a
+  debug-logged deviation. Calendar `year` constraints and interval `offset`s
+  have no cron equivalent and are dropped (debug-logged). Multiple
+  `intervals`/`calendars`/`cron_expressions` use the first.
+- **Overlap policy: SKIP / CANCEL_OTHER / TERMINATE_OTHER / ALLOW_ALL honored;
+  BUFFER_ONE / BUFFER_ALL rejected.** At each fire (for any policy but
+  ALLOW_ALL) the dispatcher walks prior occurrences backward on the cron grid —
+  exact-id status reads only, never a prefix scan — to find the most recently
+  *started* action (skipped occurrences leave no row) and whether it is still
+  open. SKIP drops the new fire; CANCEL_OTHER cooperatively cancels the running
+  action (but does **not** wait for it to finish unwinding before starting the
+  next — they may briefly overlap, unlike Temporal); TERMINATE_OTHER natively
+  cancels it. Edges: the walk is bounded by the schedule's creation time and a
+  hard cap (~60 occurrences), so an action overrunning more occurrences than the
+  cap may not be detected; detection is grid-based, so `trigger`/`backfill`
+  (off-grid / historical fires) aren't matched against grid occurrences; and a
+  scheduled action that continues-as-new or retries isn't tracked across the
+  hop. `BUFFER_ONE`/`BUFFER_ALL` (durable start-after-completion queueing) raise
+  `NotImplementedError` at `create_schedule`.
+- **Per-call overlap override is not applied.** `ScheduleHandle.trigger(overlap=)`
+  and `ScheduleBackfill.overlap` can't be threaded through DBOS's
+  trigger/backfill, so trigger/backfill always run under the schedule's
+  *configured* overlap policy. Only `None` (use the schedule's policy) and
+  `ALLOW_ALL` are accepted; any other per-call override raises
+  `NotImplementedError` rather than being silently ignored.
+- **`update` is delete-then-recreate.** DBOS has no in-place schedule update, so
+  `ScheduleHandle.update` deletes and re-creates the row — which resets
+  `last_fired_at`. `pause`/`unpause` use DBOS `pause_schedule`/`resume_schedule`
+  directly and accept a `note` but do **not** persist it (DBOS only flips
+  status; the stored `state.note` is unchanged).
+- **Schedule history/metadata is partial.** `ScheduleInfo.next_action_times` is
+  computed from the compiled cron; `recent_actions`/`running_actions`/action
+  counts are empty, `created_at` reflects the row's creation time, and
+  `last_updated_at` is always `None` (DBOS does not track schedule history).
+  A schedule's `memo`/`search_attributes`, and the action's
+  `memo`/`static_summary`/`static_details`/`priority`, are accepted and not
+  stored; the action's `execution_timeout`/`task_timeout` are accepted but not
+  applied (only `run_timeout` maps to a DBOS per-run timeout, as in
+  `start_workflow` — see D-note #14). `list_schedules` returns all temporal-dbos
+  schedules (the visibility `query` filter is ignored).
