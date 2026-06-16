@@ -48,6 +48,7 @@ from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from . import activities as activities_mod
 from . import conversion, ids, inbox, registry, schedules
 from . import status as _status
+from .activity_workflow import register_activity_dispatcher
 from .interpreter import (
     Interpreter,
     WorkflowCancelled,
@@ -79,11 +80,13 @@ def _reset_for_tests() -> None:
     DBOS registry is destroyed and re-created, which strands every function
     decorated against the old one.
     """
-    from . import interpreter
+    from . import activity_workflow, interpreter
 
     global _schedule_dispatcher_registered
     _schedule_dispatcher_registered = False
+    activity_workflow._activity_dispatcher_registered = False
     registry._dbos_workflows.clear()
+    registry._activity_dispatcher = None
     registry._workflows.clear()
     registry._activities.clear()
     registry.worker_failure_exception_types = ()
@@ -91,6 +94,7 @@ def _reset_for_tests() -> None:
     interpreter._init_step = None
     interpreter._child_result_step = None
     interpreter._child_exists_step = None
+    interpreter._activity_result_step = None
     interpreter._update_validate_step = None
     interpreter._safe_status_step = None
     interpreter._safe_status_list_step = None
@@ -113,6 +117,10 @@ def register_worker(
     # The generic schedule-fire dispatcher is process-global (§6.7); register
     # it so this worker can run schedules whose action targets it.
     register_schedule_dispatcher()
+    # The generic queued-activity dispatcher (§6.1.2) is likewise process-global
+    # and registered for every worker — including activities-only workers — so
+    # any worker hosting an activity can run cross-queue activities aimed at it.
+    register_activity_dispatcher()
     for cls in workflows:
         defn = registry.workflow_definition_of(cls)
         registry.register_workflow(defn)

@@ -359,3 +359,36 @@ temporalio; these edges differ:
   applied (only `run_timeout` maps to a DBOS per-run timeout, as in
   `start_workflow` — see D-note #14). `list_schedules` returns all temporal-dbos
   schedules (the visibility `query` filter is ignored).
+
+### D23. Cross-queue activities run on a different worker, with caveats
+
+`execute_activity(..., task_queue=)` is honored (DESIGN §6.1.2): when the named
+queue differs from the workflow's own queue, the activity does not run as an
+in-process step — the interpreter enqueues a generic `__temporal_activity` DBOS
+workflow onto that queue and awaits its result, exactly as it enqueues and
+awaits a child workflow. Whatever worker listens on that queue runs the
+activity, so "activities run on a different worker" holds. The activity workflow
+id is the deterministic `{parent_run_id}-a{seq}`, so a crash anywhere after the
+enqueue re-attaches idempotently on recovery (no twin), and a SIGKILL of either
+the workflow worker or the activity worker resumes correctly.
+
+Operational requirement and current scope:
+
+- **Cooperating workers must share a DBOS application version.** DBOS scopes
+  queue dequeuing by application version, and a workflow worker and an
+  activity-only worker register different function sets — so their
+  auto-computed versions differ and the activity worker would never dequeue the
+  workflow worker's enqueue. Pin `DBOS__APPVERSION` to the same value across all
+  workers that dispatch activities to one another. (Temporal coordinates on the
+  task queue alone; this version pin is the DBOS-backed analogue.)
+- **The queued path is single-attempt in this release.** It enforces
+  `start_to_close_timeout` (per attempt) and `schedule_to_close_timeout` (mapped
+  to the activity workflow's `SetWorkflowTimeout`), and the heartbeat-timeout
+  watchdog runs on the activity worker. Not yet honored on the *queued* path
+  (all work on the local/same-queue path): `retry_policy` (the activity runs
+  once, then `ActivityError`), cross-process heartbeat-detail delivery to the
+  workflow, cooperative cancellation reaching the running activity (the workflow
+  stops awaiting, but the activity finishes on its worker),
+  `schedule_to_start_timeout`, and `raise_complete_async` (raises a clear
+  `ActivityError` rather than parking). These are staged follow-on work; until
+  then they are documented here rather than silently ignored.

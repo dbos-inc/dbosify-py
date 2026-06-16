@@ -541,6 +541,7 @@ class _Runtime:
         cancellation_type: int = 0,
         heartbeat_timeout: Optional[timedelta] = None,
         result_type: Optional[type] = None,
+        task_queue: Optional[str] = None,
     ) -> "ActivityHandle":
         raise NotImplementedError
 
@@ -803,8 +804,10 @@ def start_activity(
     Honors arg/args, ``start_to_close_timeout``, ``schedule_to_close_timeout``,
     ``heartbeat_timeout`` (a non-heartbeating attempt fails with
     ``TimeoutType.HEARTBEAT`` and retries), ``retry_policy``,
-    ``cancellation_type``, and ``activity_id``; the remaining parameters are
-    accepted and ignored (debug-logged).
+    ``cancellation_type``, ``activity_id``, and ``task_queue`` (when it differs
+    from the workflow's own queue the activity runs on another worker via the
+    cross-queue path, §6.1.2); the remaining parameters are accepted and
+    ignored (debug-logged).
     ``result_type``, when given, is the type hint used to reconstruct the
     activity's result (overriding the registered activity's return
     annotation); without it the registry's return type is used, and absent
@@ -815,7 +818,6 @@ def start_activity(
             "Activity must have start_to_close_timeout or schedule_to_close_timeout"
         )
     ignored = {
-        "task_queue": task_queue,
         "schedule_to_start_timeout": schedule_to_start_timeout,
         "versioning_intent": versioning_intent,
         "summary": summary,
@@ -838,6 +840,7 @@ def start_activity(
         ),
         heartbeat_timeout=heartbeat_timeout,
         result_type=result_type,
+        task_queue=task_queue,
     )
 
 

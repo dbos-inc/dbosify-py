@@ -143,6 +143,7 @@ CAN_SUGGESTION_THRESHOLD = int(
 _init_step: Optional[Callable[[], Any]] = None
 _child_result_step: Optional[Callable[[str], Any]] = None
 _child_exists_step: Optional[Callable[[str], Any]] = None
+_activity_result_step: Optional[Callable[[str], Any]] = None
 _update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
 _safe_status_step: Optional[Callable[[str], Any]] = None
 _safe_status_list_step: Optional[Callable[[List[str]], Any]] = None
@@ -276,6 +277,57 @@ def _child_id_taken(child_id: str) -> Any:
 
         _child_exists_step = child_exists_step
     return _child_exists_step(child_id)
+
+
+def _await_activity_result(activity_id: str) -> Any:
+    """The queued-activity result waiter (the cross-queue path, §6.1.2): our
+    own step wrapping the non-recording wait on the ``__temporal_activity``
+    workflow, returning its envelope. Same rationale as ``_await_child_result``
+    — DBOS's ``get_result`` claims its function_id at completion (a
+    nondeterministic position across racing waiters), so we wrap the raw await
+    in a step that claims the id at launch and records the outcome in our slot.
+
+    The activity workflow catches user exceptions and returns an envelope
+    (``ok=False``) rather than raising, so the only exceptions reaching here are
+    termination (native DBOS cancel of the activity workflow) or an
+    infrastructure error.
+    """
+    global _activity_result_step
+    if _activity_result_step is None:
+
+        @DBOS.step(name="__tdb_activity_result")
+        async def activity_result_step(activity_id: str) -> Dict[str, Any]:
+            from dbos._dbos import _get_dbos_instance  # see docs/phase0.md
+            from dbos._error import DBOSAwaitedWorkflowCancelledError
+
+            from .payloads import serialize_failure
+
+            dbos = _get_dbos_instance()
+            try:
+                envelope: Dict[str, Any] = (
+                    await dbos._sys_db.await_workflow_result_async(
+                        activity_id, CHILD_POLL_INTERVAL_SECONDS
+                    )
+                )
+            except DBOSAwaitedWorkflowCancelledError:
+                # The activity workflow was terminated (native DBOS cancel):
+                # surface it as a cancellation of the activity.
+                cancelled = exceptions.CancelledError("Activity cancelled")
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(cancelled),
+                    "ended_at": time_mod.time(),
+                }
+            except Exception as err:  # noqa: BLE001 — FAIL_FAST / infra errors
+                return {
+                    "ok": False,
+                    "failure": serialize_failure(err),
+                    "ended_at": time_mod.time(),
+                }
+            return envelope
+
+        _activity_result_step = activity_result_step
+    return _activity_result_step(activity_id)
 
 
 # The status fields the interpreter actually reads — all JSON-serializable.
@@ -463,6 +515,10 @@ class _ActivityExec:
     # execute_activity(result_type=...) override; falls back to the activity's
     # registered return annotation.
     result_type: Optional[type] = None
+    # execute_activity(task_queue=...): when set and different from the
+    # workflow's own queue, the activity runs on another worker via the
+    # ``__temporal_activity`` queued path (§6.1.2) instead of a local step.
+    task_queue: Optional[str] = None
 
 
 @dataclass
@@ -925,9 +981,14 @@ class Interpreter(_Runtime):
         cancellation_type: int = 0,
         heartbeat_timeout: Optional[timedelta] = None,
         result_type: Optional[type] = None,
+        task_queue: Optional[str] = None,
     ) -> ActivityHandle:
         self._assert_not_read_only("start an activity")
-        activities_mod.attempt_step_for(activity_name)  # raise early if unknown
+        if task_queue is None:
+            # Local path: the step must already be registered with this worker.
+            # The queued path (task_queue set) targets another worker, where
+            # the step lives — so don't require it here.
+            activities_mod.attempt_step_for(activity_name)  # raise early if unknown
         seq = self._next_seq("activity")
         resolved_activity_id = activity_id or f"{seq}"
         if any(
@@ -966,6 +1027,7 @@ class Interpreter(_Runtime):
                 heartbeat_timeout.total_seconds() if heartbeat_timeout else None
             ),
             result_type=result_type,
+            task_queue=task_queue,
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
@@ -1028,7 +1090,20 @@ class Interpreter(_Runtime):
                 # Encode the args once (reused across retries); the step
                 # decodes them against the activity's signature.
                 exec_state.args = await conversion.encode_values(exec_state.args)
-                self._launch_attempt(exec_state)
+                # Resolve our own queue only when a task_queue was requested,
+                # so workflows that never use cross-queue dispatch keep their
+                # exact checkpoint shape (no extra status read).
+                if exec_state.task_queue is not None:
+                    await self._resolve_own_queue()
+                if (
+                    exec_state.task_queue is None
+                    or exec_state.task_queue == self._own_queue_name
+                ):
+                    # Local / same-queue path: run as an in-process step.
+                    self._launch_attempt(exec_state)
+                else:
+                    # Cross-queue path (§6.1.2): enqueue on another worker.
+                    await self._launch_queued_activity(exec_state)
             elif kind == "child":
                 await self._start_child(self._pending_children[seq])
                 progressed = True  # the start future resolved either way
@@ -1258,6 +1333,87 @@ class Interpreter(_Runtime):
             }
         return envelope
 
+    async def _launch_queued_activity(self, exec_state: _ActivityExec) -> None:
+        """Cross-queue / distributed activity dispatch (§6.1.2): enqueue the
+        ``__temporal_activity`` workflow on the target DBOS queue and await its
+        result envelope, mirroring the child-workflow enqueue (``_start_child``).
+
+        The activity-workflow id is the deterministic ``{run_id}-a{seq}`` so a
+        crash anywhere after the enqueue replays into an idempotent re-attach
+        (``SetWorkflowID``), exactly as child ids do — DBOS records the
+        in-workflow start, so recovery re-attaches to the same activity instead
+        of spawning a twin. (No collision with the ``--r{n}`` run-chain suffix:
+        ``ids.parse_run`` only treats a pure-digit ``--r`` suffix as a run.)
+        """
+        from contextlib import nullcontext
+
+        from dbos import SetWorkflowID, SetWorkflowTimeout
+
+        from . import registry
+
+        # Only reached from _process_commands when task_queue is set and differs
+        # from our own queue.
+        assert exec_state.task_queue is not None
+        seq = exec_state.seq
+        activity_dbos_id = f"{self._workflow_id}-a{seq}"
+        meta = {
+            "activity_id": exec_state.activity_id,
+            "activity_type": exec_state.activity_name,
+            "attempt": exec_state.attempt,
+            "heartbeat_timeout": exec_state.heartbeat_timeout,
+            "seq": seq,
+            "workflow_id": ids.parse_run(self._workflow_id)[0],
+            "workflow_run_id": self._workflow_id,
+            "workflow_type": self._defn.name,
+        }
+        payload = {
+            "activity_name": exec_state.activity_name,
+            "args": exec_state.args,  # already encoded in _process_commands
+            "start_to_close": exec_state.start_to_close,
+            "meta": meta,
+        }
+        try:
+            dispatch_fn = registry.activity_dispatcher_fn()
+            queue = await DBOS.retrieve_queue_async(exec_state.task_queue)
+            if queue is None:
+                raise RuntimeError(
+                    f"Task queue {exec_state.task_queue!r} is not registered "
+                    "(no worker has declared it)"
+                )
+            # schedule_to_close caps the whole queued execution, including the
+            # queue wait — map it to the activity workflow's timeout (§6.1.2).
+            timeout_ctx = (
+                SetWorkflowTimeout(exec_state.schedule_to_close)
+                if exec_state.schedule_to_close is not None
+                else nullcontext()
+            )
+            with SetWorkflowID(activity_dbos_id), timeout_ctx:
+                await queue.enqueue_async(dispatch_fn, payload)
+        except Exception as err:  # noqa: BLE001 — surface as an ActivityError
+            self._pending_activities.pop(seq, None)
+            if not exec_state.future.cancelled():
+                error = exceptions.ActivityError(
+                    "Failed to schedule activity on task queue "
+                    f"{exec_state.task_queue!r}",
+                    scheduled_event_id=0,
+                    started_event_id=0,
+                    identity="",
+                    activity_type=exec_state.activity_name,
+                    activity_id=exec_state.activity_id,
+                    retry_state=None,
+                )
+                error.__cause__ = exceptions.ApplicationError(
+                    str(err), type=type(err).__name__
+                )
+                exec_state.future.set_exception(error)
+            return
+        # Claim the result step's function_id at this deterministic position
+        # (like _launch_attempt); the decode rides outside the recorded step.
+        step_coro = _await_activity_result(activity_dbos_id)
+        self._launch_waiter(
+            "q_activity", seq, self._decode_activity_result(step_coro, exec_state)
+        )
+
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):
             self._launch_waiter(
@@ -1298,6 +1454,8 @@ class Interpreter(_Runtime):
                 self._deliver_timer(waiter.seq)
             elif waiter.kind == "activity":
                 self._deliver_activity_event(waiter)
+            elif waiter.kind == "q_activity":
+                self._deliver_queued_activity_event(waiter)
             elif waiter.kind == "act_s2c":
                 self._async_parked_timeout(
                     waiter.seq, exceptions.TimeoutType.START_TO_CLOSE
@@ -1388,6 +1546,57 @@ class Interpreter(_Runtime):
             activity_type=exec_state.activity_name,
             activity_id=exec_state.activity_id,
             retry_state=retry_state,
+        )
+        error.__cause__ = deserialize_failure(failure)
+        exec_state.future.set_exception(error)
+
+    def _deliver_queued_activity_event(self, waiter: _Waiter) -> None:
+        """Resolve a cross-queue activity from the ``__temporal_activity``
+        workflow's result envelope. The activity workflow owns retries/timeouts
+        on its own worker (Design A), so this is a terminal delivery — no
+        interpreter-side retry on this path, unlike ``_deliver_activity_event``.
+        """
+        exec_state = self._pending_activities.get(waiter.seq)
+        if exec_state is None or exec_state.future.cancelled():
+            # Cancelled between completion and delivery; drop the result.
+            self._pending_activities.pop(waiter.seq, None)
+            return
+        envelope: Dict[str, Any] = waiter.task.result()
+        self._advance_time(envelope.get("ended_at"))
+        del self._pending_activities[waiter.seq]
+        if envelope.get("async_pending"):
+            # raise_complete_async() on the queued path parks the activity for
+            # external completion — implemented in a later phase (§6.1.2). Until
+            # then, surface a clear failure rather than hanging.
+            error = exceptions.ActivityError(
+                "raise_complete_async() is not yet supported on the cross-queue "
+                "activity path",
+                scheduled_event_id=0,
+                started_event_id=0,
+                identity="",
+                activity_type=exec_state.activity_name,
+                activity_id=exec_state.activity_id,
+                retry_state=None,
+            )
+            error.__cause__ = exceptions.ApplicationError(
+                "queued async activity completion unimplemented",
+                type="NotImplementedError",
+            )
+            exec_state.future.set_exception(error)
+            return
+        if envelope["ok"]:
+            exec_state.future.set_result(envelope["result"])
+            return
+        failure: FailureEnvelope = envelope["failure"]
+        exec_state.last_failure = failure
+        error = exceptions.ActivityError(
+            "Activity task failed",
+            scheduled_event_id=0,
+            started_event_id=0,
+            identity="",
+            activity_type=exec_state.activity_name,
+            activity_id=exec_state.activity_id,
+            retry_state=exceptions.RetryState.MAXIMUM_ATTEMPTS_REACHED,
         )
         error.__cause__ = deserialize_failure(failure)
         exec_state.future.set_exception(error)
