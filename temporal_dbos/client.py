@@ -903,16 +903,20 @@ class WorkflowExecutionAsyncIterator:
         )
         raw_count = len(raw)
         self._fetch_offset += raw_count
-        survivors = (
-            [r for r in raw if self._post_filter(r)]
-            if self._post_filter is not None
-            else raw
-        )
+        # Only user Temporal workflows (named ``wf:{type}``) are visible: skip
+        # DBOS plumbing rows (``__temporal_activity`` / ``__temporal_schedule_fire``).
+        survivors = [
+            r
+            for r in raw
+            if (r.name or "").startswith("wf:")
+            and (self._post_filter is None or self._post_filter(r))
+        ]
         self._current_page = [_execution_from_status(r) for r in survivors]
         self._current_page_index = 0
         # A full raw page means there may be more rows; a short one is the end.
+        # ``size > 0`` guards a 0-page-size caller against an infinite loop.
         self._next_page_token = (
-            str(self._fetch_offset).encode() if raw_count == size else None
+            str(self._fetch_offset).encode() if raw_count == size and size > 0 else None
         )
 
     def __aiter__(self) -> "WorkflowExecutionAsyncIterator":
@@ -1400,21 +1404,25 @@ class Client:
                 "workflow's outcome. GROUP BY WorkflowType is supported."
             )
 
+        # Group by name in every path so we can count only user Temporal
+        # workflows (``wf:{type}``) and exclude DBOS plumbing rows
+        # (``__temporal_activity`` / ``__temporal_schedule_fire``), which the
+        # aggregate operator has no other way to filter out.
+        rows = await self._count_aggregate(
+            sys_db, "group_by_name", parsed.aggregate_filter_kwargs()
+        )
+        tallies: Dict[str, int] = {}
+        for r in rows:
+            name = r["group"].get("name") or ""
+            if not name.startswith("wf:"):
+                continue
+            key = name[3:]
+            tallies[key] = tallies.get(key, 0) + (r["count"] or 0)
+
         if parsed.group_by is None:
-            rows = await self._count_aggregate(
-                sys_db, "group_by_status", parsed.aggregate_filter_kwargs()
-            )
-            total = sum(r["count"] or 0 for r in rows)
-            return WorkflowExecutionCount(count=total, groups=[])
+            return WorkflowExecutionCount(count=sum(tallies.values()), groups=[])
 
         # GROUP BY WorkflowType (the only cleanly-aggregatable grouping).
-        tallies: Dict[str, int] = {}
-        for r in await self._count_aggregate(
-            sys_db, "group_by_name", parsed.aggregate_filter_kwargs()
-        ):
-            name = r["group"].get("name") or ""
-            key = name[3:] if name.startswith("wf:") else name
-            tallies[key] = tallies.get(key, 0) + (r["count"] or 0)
         groups = [
             WorkflowExecutionCountAggregationGroup(count=c, group_values=[v])
             for v, c in sorted(tallies.items())

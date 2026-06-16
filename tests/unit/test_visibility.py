@@ -50,6 +50,29 @@ def test_workflow_type_in_maps_to_name_list() -> None:
     assert parsed.to_dbos_filters() == {"name": ["wf:A", "wf:B"]}
 
 
+def test_workflow_type_repeated_equality_intersects() -> None:
+    # Two positive WorkflowType clauses joined by AND intersect (like
+    # ExecutionStatus) — not union. A=B is impossible → matches nothing.
+    parsed = parse_query("WorkflowType = 'A' AND WorkflowType = 'B'")
+    assert parsed.type_in == []
+    assert parsed.to_dbos_filters()["name"] == []
+
+
+def test_workflow_type_eq_then_in_intersects() -> None:
+    parsed = parse_query("WorkflowType = 'A' AND WorkflowType IN ('A', 'B')")
+    assert parsed.type_in == ["A"]
+
+
+def test_time_bound_repeated_clause_tightens() -> None:
+    # AND of two lower bounds keeps the tighter (later) one, not the last seen.
+    parsed = parse_query(
+        "StartTime >= '2024-06-01T00:00:00+00:00' "
+        "AND StartTime >= '2024-01-01T00:00:00+00:00'"
+    )
+    assert parsed.start_time_lo is not None
+    assert parsed.start_time_lo.month == 6
+
+
 def test_workflow_type_ne_post_filters() -> None:
     parsed = parse_query("WorkflowType != 'Skip'")
     # No native DBOS form: nothing in the kwargs, a predicate instead.

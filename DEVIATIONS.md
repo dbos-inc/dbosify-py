@@ -305,6 +305,17 @@ Deviations from Temporal:
     enumerate the rejected cases.
   - **Each run-chain link is its own row**, keyed by run id (continue-as-new /
     workflow-retry / cron hops), since `run_id` is the DBOS workflow id.
+  - **Only user workflows are visible.** `list_workflows`/`count_workflows`
+    return only DBOS workflows named `wf:{type}` (the user's Temporal workflow
+    types); the internal dispatcher workflows DBOS records — `__temporal_activity`
+    (cross-queue activity execution) and `__temporal_schedule_fire` (schedule
+    fires) — are filtered out, so they don't show up as phantom executions.
+  - **A scheduled workflow's `parent_id` points at its fire dispatcher.** Because
+    the schedule action is enqueued from inside the `__temporal_schedule_fire`
+    workflow, that dispatcher is the action's DBOS parent, so
+    `WorkflowExecution.parent_id` is the (internal) fire-workflow id rather than
+    `None`. Temporal scheduled workflows have no parent. (Continue-as-new and
+    cron successors correctly report no parent — those links are same-chain.)
   - **Search-attribute filtering is scalar-equality only** (the containment
     subset); ranges/`IN` on a search attribute are rejected, and **keyword-list
     attributes are not filterable** — the value is stored as a JSON array and,

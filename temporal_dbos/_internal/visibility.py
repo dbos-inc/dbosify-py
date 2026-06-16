@@ -303,7 +303,13 @@ def _apply_clause(q: VisibilityQuery, field_name: str, op: str, value: Any) -> N
         values = value if isinstance(value, list) else [value]
         names = [str(v) for v in values]
         if op == "=" or op == "IN":
-            q.type_in = (q.type_in or []) + names if q.type_in is not None else names
+            # Repeated positive WorkflowType clauses are joined by AND, so they
+            # intersect (mirrors ExecutionStatus); a first clause just sets it.
+            if q.type_in is None:
+                q.type_in = list(names)
+            else:
+                allowed = set(names)
+                q.type_in = [t for t in q.type_in if t in allowed]
         elif op == "!=":
             q.type_not_in.extend(names)
         else:
@@ -351,13 +357,22 @@ def _apply_clause(q: VisibilityQuery, field_name: str, op: str, value: Any) -> N
         dt = _parse_datetime(value, canonical)
         lo_attr = "start_time_lo" if canonical == "StartTime" else "close_time_lo"
         hi_attr = "start_time_hi" if canonical == "StartTime" else "close_time_hi"
+
+        def tighten_lo() -> None:
+            cur = getattr(q, lo_attr)
+            setattr(q, lo_attr, dt if cur is None else max(cur, dt))
+
+        def tighten_hi() -> None:
+            cur = getattr(q, hi_attr)
+            setattr(q, hi_attr, dt if cur is None else min(cur, dt))
+
         if op in (">", ">="):
-            setattr(q, lo_attr, dt)
+            tighten_lo()
         elif op in ("<", "<="):
-            setattr(q, hi_attr, dt)
+            tighten_hi()
         elif op == "=":
-            setattr(q, lo_attr, dt)
-            setattr(q, hi_attr, dt)
+            tighten_lo()
+            tighten_hi()
         else:
             raise VisibilityQueryError(
                 f"{canonical} supports > >= < <= =, not {op!r}. " + _SUPPORTED

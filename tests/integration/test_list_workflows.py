@@ -10,7 +10,7 @@ no kill-and-recover test is warranted here (cf. CLAUDE.md).
 """
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pytest
@@ -20,6 +20,10 @@ from temporal_dbos import workflow
 from temporal_dbos._internal.visibility import VisibilityQueryError
 from temporal_dbos.client import (
     Client,
+    Schedule,
+    ScheduleActionStartWorkflow,
+    ScheduleIntervalSpec,
+    ScheduleSpec,
     WorkflowExecution,
     WorkflowExecutionAsyncIterator,
     WorkflowExecutionCount,
@@ -34,6 +38,7 @@ from temporal_dbos.common import (
 from temporal_dbos.exceptions import ApplicationError
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
+from tests.harness import retry_until_success_async
 
 pytestmark = pytest.mark.usefixtures("tdb_env")
 
@@ -693,3 +698,48 @@ async def test_count_group_by_workflow_type_with_filter() -> None:
 
         await holder.signal(Holder.finish)
         await holder.result()
+
+
+# --- internal plumbing is invisible -------------------------------------------
+
+
+async def test_visibility_excludes_internal_plumbing_workflows() -> None:
+    # A schedule fire runs an internal `__temporal_schedule_fire` DBOS workflow
+    # that in turn starts the user action workflow. list/count must surface only
+    # the latter (a `wf:` workflow), never the dispatcher.
+    async with _env() as client:
+        sched = await client.create_schedule(
+            "sched-x",
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    Completer.run, "sched", id="sched-action", task_queue=TASK_QUEUE
+                ),
+                spec=ScheduleSpec(
+                    intervals=[ScheduleIntervalSpec(every=timedelta(minutes=10))]
+                ),
+            ),
+        )
+        await sched.trigger()
+
+        async def _action_started() -> None:
+            rows = await client._dbos_client.list_workflows_async(name="wf:Completer")
+            assert rows, "scheduled action has not started yet"
+
+        await retry_until_success_async(_action_started)
+        await sched.delete()
+
+        # The internal dispatcher really is present in the raw DBOS view...
+        fire_rows = await client._dbos_client.list_workflows_async(
+            name="__temporal_schedule_fire"
+        )
+        assert fire_rows, "expected a __temporal_schedule_fire row to exist"
+        fire_ids = {r.workflow_id for r in fire_rows}
+
+        # ...but the visibility API shows only the user (wf:) workflow.
+        rows = await _collect(client.list_workflows())
+        assert {r.workflow_type for r in rows} == {"Completer"}
+        assert fire_ids.isdisjoint({r.run_id for r in rows})
+        assert (await client.count_workflows()).count == 1
+        assert _groups(await client.count_workflows("GROUP BY WorkflowType")) == {
+            "Completer": 1
+        }
