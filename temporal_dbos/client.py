@@ -38,6 +38,7 @@ from . import _schedule, exceptions
 from ._internal import attributes as _attributes
 from ._internal import conversion, ids, inbox
 from ._internal import registry as _registry
+from ._internal import replay as _replay
 from ._internal import schedules as _schedules
 from ._internal import status as _status
 from ._internal import visibility as _visibility
@@ -187,6 +188,7 @@ __all__ = [
     "WorkflowExecutionDescription",
     "WorkflowExecutionStatus",
     "WorkflowFailureError",
+    "WorkflowHistory",
     "WorkflowQueryFailedError",
     "WorkflowUpdateFailedError",
     "WorkflowUpdateHandle",
@@ -681,6 +683,46 @@ class WorkflowExecutionCount:
 
     count: int
     groups: Sequence[WorkflowExecutionCountAggregationGroup]
+
+
+@dataclass(frozen=True)
+class WorkflowHistory:
+    """A workflow run's recorded execution, as the :class:`Replayer` consumes it.
+
+    Mirrors ``temporalio.client.WorkflowHistory`` in name and role, but its
+    contents are DBOS-native: rather than a Temporal event log, it carries the
+    run's DBOS-recorded step checkpoints (``recorded_steps``) plus the inputs
+    and attributes needed to re-execute it. v1 is **DB-bound** — it references a
+    live DBOS run (``run_id``) that the replay engine forks; there is no offline
+    JSON portability (a future ``from_json``/``to_json`` would slot in here).
+    Built by :py:meth:`WorkflowHandle.fetch_history`.
+    """
+
+    workflow_id: str
+    """Temporal workflow id (the run-chain base)."""
+    run_id: str
+    """DBOS run id whose checkpoints back this history."""
+    workflow_type: str
+    """Workflow type name (the ``wf:`` dispatcher prefix stripped)."""
+    input: Any = None
+    """Recorded dispatcher payload, kept opaque — the fork re-feeds it verbatim."""
+    recorded_steps: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
+    """The run's ``StepInfo`` checkpoints (``DBOS.list_workflow_steps`` order)."""
+    status: Optional[WorkflowExecutionStatus] = None
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+    """Raw DBOS attributes column (memo + search attributes), unparsed."""
+    app_version: Optional[str] = None
+
+    @property
+    def replay_horizon(self) -> int:
+        """Highest recorded ``function_id`` — the checkpoint horizon a replay
+        may reach (0 when no steps were recorded)."""
+        return max((s["function_id"] for s in self.recorded_steps), default=0)
+
+    @property
+    def step_count(self) -> int:
+        """Number of recorded steps."""
+        return len(self.recorded_steps)
 
 
 def _workflow_type_name(workflow: Any) -> str:
@@ -1897,13 +1939,14 @@ class WorkflowHandle:
             input.reject_condition or self._client._default_query_reject_condition
         )
         target = await self._target()
+        # Read status once: it gates the reject_condition and decides whether the
+        # query needs a rehydrate replay (closed workflow). Read directly rather
+        # than via describe() so a describe_workflow interceptor is not invoked
+        # as a side effect of a query. (No server arbiter, DEVIATIONS D7 family:
+        # the status read and the query send are not atomic.)
+        raw = await self._client._status_of(target)
+        status = _status.to_execution_status(raw.status, error=raw.error)
         if condition is not None and condition != QueryRejectCondition.NONE:
-            # Client-side check (no server arbiter — DEVIATIONS D7 family):
-            # the status read and the query send are not atomic. Read status
-            # directly rather than via describe() so a describe_workflow
-            # interceptor is not invoked as a side effect of a query.
-            raw = await self._client._status_of(target)
-            status = _status.to_execution_status(raw.status, error=raw.error)
             rejected = (
                 status != WorkflowExecutionStatus.RUNNING
                 if condition == QueryRejectCondition.NOT_OPEN
@@ -1914,27 +1957,80 @@ class WorkflowHandle:
         request_id = str(uuid_mod.uuid4())
         client = self._client._dbos_client
         timeout = input.rpc_timeout.total_seconds() if input.rpc_timeout else 60.0
-        await client.send_async(
-            target,
-            inbox.query_envelope(
-                input.query,
-                await conversion.encode_values(input.args),
-                request_id,
-                headers=await conversion.encode_headers(input.headers),
-            ),
-            inbox.INBOX_TOPIC,
+        envelope = inbox.query_envelope(
+            input.query,
+            await conversion.encode_values(input.args),
+            request_id,
+            headers=await conversion.encode_headers(input.headers),
         )
-        reply = await self._client._await_reply_event(
-            self._id, target, inbox.query_result_key(request_id), timeout
-        )
+        if status == WorkflowExecutionStatus.RUNNING:
+            await client.send_async(target, envelope, inbox.INBOX_TOPIC)
+            reply = await self._client._await_reply_event(
+                self._id, target, inbox.query_result_key(request_id), timeout
+            )
+        else:
+            # Query on a closed workflow: rehydrate by replay — fork the run to
+            # reconstruct its final state, serve the query against it, discard
+            # the scratch run (resolves README deviation #2 / Temporal serving
+            # queries after completion). Requires a worker in this process (the
+            # fork executes locally and consults the in-process rehydrate guard).
+            reply = await self._rehydrate_query(target, envelope, request_id, timeout)
         if reply is None:
             raise WorkflowQueryFailedError(
-                f"query did not complete within {timeout}s (v1 queries "
-                "require a RUNNING workflow; see README deviations)"
+                f"query did not complete within {timeout}s"
             )
         if reply["status"] == "completed":
             return await conversion.decode_value(reply["result"], input.ret_type)
         raise WorkflowQueryFailedError(str(deserialize_failure(reply["failure"])))
+
+    async def _rehydrate_query(
+        self, target: str, envelope: Any, request_id: str, timeout: float
+    ) -> Optional[Any]:
+        """Answer a query on a closed workflow by replaying it: fork the run one
+        step past its last checkpoint (copying every recorded step), let the
+        forked run replay to its final state and then serve this one query
+        against that reconstructed state, then discard the scratch run."""
+        client = self._client._dbos_client
+        steps = await client.list_workflow_steps_async(target)
+        horizon = max((s["function_id"] for s in steps), default=0)
+        scratch_handle = await client.fork_workflow_async(target, horizon + 1)
+        scratch_id = scratch_handle.get_workflow_id()
+        _replay.register_guard(
+            _replay._ReplayGuard(
+                scratch_id=scratch_id,
+                horizon=horizon,
+                step_count=len(steps),
+                mode="rehydrate",
+            )
+        )
+        try:
+            await client.send_async(scratch_id, envelope, inbox.INBOX_TOPIC)
+            reply = await self._client._await_reply_event(
+                scratch_id, scratch_id, inbox.query_result_key(request_id), timeout
+            )
+            # Tell the scratch run to stop serving and complete, then wait for
+            # it to settle so the delete below does not race a finishing run.
+            try:
+                await client.send_async(
+                    scratch_id, inbox.rehydrate_stop_envelope(), inbox.INBOX_TOPIC
+                )
+                await asyncio.wait_for(
+                    scratch_handle.get_result(polling_interval_sec=0.05), timeout=10.0
+                )
+            except Exception:  # noqa: BLE001 — best-effort; the deadline also stops it
+                pass
+            return reply
+        finally:
+            _replay.unregister_guard(scratch_id)
+            try:
+                # delete_children stays False: the rehydrated fork starts no
+                # real children (they replay from checkpoints), so it owns none
+                # — and we must never delete the source run's subtree.
+                await client.delete_workflow_async(scratch_id, delete_children=False)
+            except Exception:  # noqa: BLE001 — cleanup is best-effort
+                logger.warning(
+                    "query rehydrate: failed to delete scratch run %s", scratch_id
+                )
 
     async def start_update(
         self,
@@ -2106,6 +2202,51 @@ class WorkflowHandle:
         # the chain-base derived from the (possibly run-suffixed) DBOS id.
         object.__setattr__(description, "id", self._id)
         return description
+
+    async def fetch_history(
+        self,
+        *,
+        event_filter_type: Any = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> WorkflowHistory:
+        """Snapshot this run's recorded execution as a :class:`WorkflowHistory`
+        for replay. Reads the run's DBOS status plus its step checkpoints
+        (``list_workflow_steps``). ``event_filter_type`` has no analog (we have
+        no event log) and is accepted/ignored.
+
+        Unlike the interpreter's in-workflow step read (which must hop to an
+        executor thread to stay live, see ``interpreter.execute``), this runs on
+        a plain client with no DBOS workflow context, so the async call is safe.
+        """
+        _ignore_rpc_options("fetch_history", rpc_metadata, rpc_timeout)
+        if event_filter_type is not None:
+            logger.debug("fetch_history: ignoring event_filter_type")
+        dbos_id = self._result_run_id or await self._target()
+        status = await self._client._status_of(dbos_id)
+        steps = await self._client._dbos_client.list_workflow_steps_async(dbos_id)
+        workflow_type = status.name or ""
+        if workflow_type.startswith("wf:"):
+            workflow_type = workflow_type[3:]
+        return WorkflowHistory(
+            workflow_id=self._id,
+            run_id=dbos_id,
+            workflow_type=workflow_type,
+            input=status.input,
+            recorded_steps=list(steps),
+            status=_status.to_execution_status(status.status, error=status.error),
+            attributes=status.attributes or {},
+            app_version=status.app_version,
+        )
+
+    async def fetch_history_events(self, **kwargs: Any) -> Any:
+        """Not supported: temporal-dbos has no Temporal event history. Use
+        :py:meth:`fetch_history`, which returns a DBOS-step-derived
+        :class:`WorkflowHistory`."""
+        raise NotImplementedError(
+            "temporal-dbos has no Temporal event history; use "
+            "WorkflowHandle.fetch_history() for a DBOS-step-derived history"
+        )
 
     async def cancel(
         self,

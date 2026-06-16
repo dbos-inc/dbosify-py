@@ -40,8 +40,10 @@ from dbos import (
     WorkflowHandle,
 )
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
+from dbos._error import DBOSUnexpectedStepError
 
 from .. import exceptions
+from ..workflow import NondeterminismError
 
 # Re-exported here for the Phase 0 helper API; the canonical home mirrors
 # temporalio.client.WorkflowUpdateFailedError.
@@ -68,6 +70,7 @@ from .payloads import (
     unwrap_input,
     wrap_input,
 )
+from . import replay as _replay
 
 logger = logging.getLogger("temporal_dbos.dispatcher")
 
@@ -169,6 +172,32 @@ def _make_dbos_workflow(
             # semantics).
             raise SerializedWorkflowCancellation(
                 serialize_failure(cancelled.cause)
+            ) from None
+        except (NondeterminismError, DBOSUnexpectedStepError) as nde:
+            # A verification replay diverged (the interpreter guard fired, or
+            # DBOS saw a different step at a recorded function_id). Record it in
+            # the failure envelope under the nondeterminism marker so the replay
+            # engine can tell divergence apart from a faithfully-replayed
+            # genuine failure. No chain continuation — replay never retries.
+            # NondeterminismError is only ever raised by the replay guard, so it
+            # is always a replay; a bare DBOSUnexpectedStepError outside a replay
+            # is a real non-determinism bug and keeps its prior propagation.
+            dispatch_ctx = get_local_dbos_context()
+            if (
+                isinstance(nde, DBOSUnexpectedStepError)
+                and dispatch_ctx is not None
+                and _replay.current_guard_for(dispatch_ctx.workflow_id) is None
+            ):
+                raise
+            raise SerializedWorkflowFailure(
+                {
+                    "cls": "ApplicationError",
+                    "type": _replay.NONDETERMINISM_MARKER,
+                    "message": str(nde),
+                    "details": [],
+                    "non_retryable": True,
+                    "next_retry_delay": None,
+                }
             ) from None
         except exceptions.FailureError as err:
             # Record workflow failures in the stable envelope format so

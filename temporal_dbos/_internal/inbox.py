@@ -153,3 +153,9 @@ def update_result_key(update_id: str) -> str:
 
 def query_result_key(request_id: str) -> str:
     return f"__tdb_q_{request_id}"
+
+
+def rehydrate_stop_envelope() -> Envelope:
+    """Sent by the client to a rehydrated (replayed-for-query) scratch run once
+    it has read its query reply, so the run stops serving and completes."""
+    return {"kind": "rehydrate_stop", "sent_at": time.time()}

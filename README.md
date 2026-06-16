@@ -32,7 +32,7 @@ rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 `dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
 `message_passing/` corpus passes 5/5.
 
-Current pass rate: **17 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **18 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -55,7 +55,7 @@ harness).
 | hello_continue_as_new | ✅ (10 chained runs) |
 | hello_cron | ✅ (cron chain fires and hops; the sample never exits, so the harness verifies through the database) |
 | hello_search_attributes | ✅ (memo + search attributes on DBOS workflow attributes; set at start, `upsert_*` from inside, read via `describe()`). The sample upserts 2s in and describes 3s later, so its worker opts into near-immediate queue dispatch in the harness — scoped to this one sample (see `tests/conformance/runner.py`). |
-| hello_query | ⬜ Phase 4 (queries on closed workflows — deviation #2) |
+| hello_query | ✅ (queries a completed workflow; answered by rehydrate-by-replay — `Replayer` machinery, deviation #2) |
 | hello_activity_multiprocess | ⬜ multiprocess activity executors unsupported |
 | hello_change_log_level | — never exits by design (also true on Temporal) |
 | hello_mtls | — needs mTLS infrastructure |
@@ -101,7 +101,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | # | Deviation |
 |---|---|
 | 1 | No Temporal server/UI/CLI; no non-Python clients. Operate via DBOS tooling. |
-| 2 | Queries hit Postgres and (v1) require a RUNNING workflow. |
+| 2 | Queries hit Postgres. A RUNNING workflow is queried directly; a *closed* workflow is queried by rehydrate-by-replay (the `Replayer` machinery re-executes its checkpoints to reconstruct final state, answers, and discards the scratch run) — which requires a worker for that type in the querying process. See [DEVIATIONS.md](DEVIATIONS.md) D25. |
 | 3 | No workflow sandbox: determinism violations surface at recovery/replay as `NondeterminismError`, not at development time. |
 | 4 | Memo + search attributes are stored on DBOS workflow attributes (JSONB, GIN-indexed) — set at start, `upsert_*` from inside a workflow, read via `describe()`/`info()`. Search attributes are stored untyped (no cluster-side registration). `list_workflows(query=...)`/`count_workflows` support a documented subset of the visibility query language (a flat `AND` of `WorkflowType`/`WorkflowId`/`ExecutionStatus`/time-range/search-attribute predicates, plus an optional `GROUP BY ExecutionStatus`/`WorkflowType` for `count`; no `OR`/grouping/`ORDER BY`). `count` runs entirely on DBOS's server-side `COUNT`/`GROUP BY` aggregate and rejects (rather than scans) queries it can't express — search-attribute/exact-id/error-status filters and `GROUP BY ExecutionStatus`. See [DEVIATIONS.md](DEVIATIONS.md) D15. |
 | 5 | Default child-workflow IDs are derived from the parent, not random UUIDs. |
