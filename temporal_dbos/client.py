@@ -738,6 +738,11 @@ def _update_name(update: Any) -> str:
     if isinstance(update, str):
         return update
     if isinstance(update, _UpdateMethod):
+        if update.name is None:
+            raise TypeError(
+                "Cannot reference a dynamic update handler by method; pass the "
+                "update name as a string"
+            )
         return update.name
     raise TypeError(f"{update!r} is not a @workflow.update method or name")
 

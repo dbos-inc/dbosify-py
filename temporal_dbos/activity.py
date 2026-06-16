@@ -36,6 +36,7 @@ from typing import (
 
 from . import exceptions
 from ._internal import registry as _registry
+from .converter import PayloadConverter
 
 __all__ = [
     "Info",
@@ -45,6 +46,7 @@ __all__ = [
     "info",
     "is_cancelled",
     "logger",
+    "payload_converter",
     "raise_complete_async",
     "wait_for_cancelled_sync",
 ]
@@ -61,24 +63,38 @@ def defn(fn: _F) -> _F: ...
 
 
 @overload
-def defn(*, name: Optional[str] = None) -> Callable[[_F], _F]: ...
+def defn(
+    *, name: Optional[str] = None, dynamic: bool = False
+) -> Callable[[_F], _F]: ...
 
 
 def defn(
-    fn: Optional[_F] = None, *, name: Optional[str] = None
+    fn: Optional[_F] = None, *, name: Optional[str] = None, dynamic: bool = False
 ) -> Union[_F, Callable[[_F], _F]]:
-    """Decorator for activity functions (sync or async)."""
+    """Decorator for activity functions (sync or async).
+
+    ``dynamic=True`` makes this the catch-all activity, invoked for any
+    activity type with no exact registration; it must accept a single
+    ``Sequence[RawValue]`` and cannot also set ``name`` (§6.1.2).
+    """
+    if name is not None and dynamic:
+        raise RuntimeError("Cannot provide name and dynamic boolean")
 
     def decorator(fn: _F) -> _F:
         from ._internal.conversion import type_hints_from_func
 
         arg_types, ret_type = type_hints_from_func(fn)
+        if dynamic:
+            _registry.validate_dynamic_activity_sig(arg_types)
         defn = _registry.ActivityDefinition(
-            name=name if name is not None else fn.__name__,
+            name=(
+                fn.__name__ if dynamic else (name if name is not None else fn.__name__)
+            ),
             fn=fn,
             is_async=inspect.iscoroutinefunction(fn),
             arg_types=arg_types,
             ret_type=ret_type,
+            dynamic=dynamic,
         )
         setattr(fn, _registry.ACTIVITY_DEFN_ATTR, defn)
         return fn
@@ -86,6 +102,18 @@ def defn(
     if fn is not None:
         return decorator(fn)
     return decorator
+
+
+def payload_converter() -> PayloadConverter:
+    """The payload converter for this activity (the process's active
+    ``DataConverter``'s payload converter), mirroring
+    ``temporalio.activity.payload_converter``. Use it to convert the
+    ``RawValue`` arguments a dynamic activity receives, e.g.
+    ``payload_converter().from_payload(args[0].payload, MyType)``.
+    """
+    from ._internal import conversion
+
+    return conversion.get_converter().payload_converter
 
 
 @dataclass(frozen=True)

@@ -66,6 +66,7 @@ from dbos._context import get_local_dbos_context  # see docs/phase0.md
 from .. import activity as activity_api
 from .. import exceptions
 from ..common import (
+    RawValue,
     RetryPolicy,
     SearchAttributes,
     SearchAttributeUpdate,
@@ -1898,13 +1899,21 @@ class Interpreter(_Runtime):
 
     async def _decode_message_args(self, envelope: inbox.Envelope) -> inbox.Envelope:
         kind = envelope["kind"]
+        name = envelope["name"]
         defn: Any = None
         if kind == "signal":
-            defn = self._defn.signals.get(envelope["name"])
+            defn = self._defn.signals.get(name) or self._defn.signals.get(None)
         elif kind == "update":
-            defn = self._defn.updates.get(envelope["name"])
+            defn = self._defn.updates.get(name) or self._defn.updates.get(None)
         elif kind == "query":
-            defn = self._defn.queries.get(envelope["name"])
+            defn = self._defn.queries.get(name) or self._defn.queries.get(None)
+        if defn is not None and defn.name is None:
+            # Dynamic (catch-all) handler: deliver (name, Sequence[RawValue]) —
+            # the raw payloads wrapped untouched so the handler converts them
+            # itself via workflow.payload_converter().
+            raw_args = envelope.get("args", [])
+            raw = await conversion.decode_values(raw_args, [RawValue] * len(raw_args))
+            return {**envelope, "args": [name, raw]}
         arg_types = defn.arg_types if defn is not None else None
         decoded = await conversion.decode_values(envelope.get("args", []), arg_types)
         return {**envelope, "args": decoded}
@@ -2053,7 +2062,9 @@ class Interpreter(_Runtime):
             self._vloop.call_soon(self._primary_task.cancel)
 
     async def _apply_signal(self, envelope: inbox.Envelope) -> None:
-        defn = self._defn.signals.get(envelope["name"])
+        # Exact match first, then the dynamic (catch-all) handler if one is
+        # registered (name key ``None``).
+        defn = self._defn.signals.get(envelope["name"]) or self._defn.signals.get(None)
         if defn is None:
             # Buffered with its *encoded* args for delivery if a handler is
             # registered later (dynamic registration arrives in Phase 2) or, more
@@ -2072,7 +2083,9 @@ class Interpreter(_Runtime):
         self._spawn_handler(
             self._run_signal_handler(defn.fn, decoded["args"]),
             kind="signal",
-            name=defn.name,
+            # A dynamic handler has no name of its own; label it by the
+            # incoming signal name (for unfinished-handler warnings).
+            name=defn.name or envelope["name"],
             policy=defn.unfinished_policy,
         )
 
@@ -2181,7 +2194,7 @@ class Interpreter(_Runtime):
         self._seen_update_ids.add(update_id)
         reply_key = inbox.update_result_key(update_id)
         acceptance_key = inbox.update_acceptance_key(update_id)
-        defn = self._defn.updates.get(envelope["name"])
+        defn = self._defn.updates.get(envelope["name"]) or self._defn.updates.get(None)
         if defn is None:
             failure = exceptions.ApplicationError(
                 f"update handler {envelope['name']!r} not found",
@@ -2222,7 +2235,9 @@ class Interpreter(_Runtime):
         self._spawn_handler(
             self._run_update_handler(defn.fn, envelope["args"], reply_key),
             kind="update",
-            name=defn.name,
+            # A dynamic handler has no name of its own; label it by the
+            # incoming update name.
+            name=defn.name or envelope["name"],
             policy=defn.unfinished_policy,
             handler_id=envelope["update_id"],
         )
@@ -2251,7 +2266,7 @@ class Interpreter(_Runtime):
 
     def _apply_query(self, envelope: inbox.Envelope) -> None:
         reply_key = inbox.query_result_key(envelope["request_id"])
-        defn = self._defn.queries.get(envelope["name"])
+        defn = self._defn.queries.get(envelope["name"]) or self._defn.queries.get(None)
         if defn is None:
             failure = exceptions.ApplicationError(
                 f"query handler {envelope['name']!r} not found",

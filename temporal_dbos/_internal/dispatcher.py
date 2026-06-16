@@ -92,9 +92,11 @@ def _reset_for_tests() -> None:
     registry._activity_dispatcher = None
     registry._workflows.clear()
     registry._activities.clear()
+    registry._dynamic_activity = None
     registry.worker_failure_exception_types = ()
     registry.worker_interceptors = ()
     activities_mod._attempt_steps.clear()
+    activities_mod._dynamic_attempt_step = None
     interpreter._init_step = None
     interpreter._child_result_step = None
     interpreter._child_exists_step = None
@@ -140,7 +142,10 @@ def register_worker(
             # actually registered (temporalio supports method activities).
             activity_defn = dataclasses.replace(activity_defn, fn=fn)
         registry.register_activity(activity_defn)
-        activities_mod.ensure_attempt_step(activity_defn.name)
+        if activity_defn.dynamic:
+            activities_mod.ensure_dynamic_attempt_step()
+        else:
+            activities_mod.ensure_attempt_step(activity_defn.name)
 
 
 def _make_dbos_workflow(

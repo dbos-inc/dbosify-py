@@ -48,6 +48,7 @@ from .common import (
     TypedSearchAttributes,
     _warn_on_deprecated_search_attributes,
 )
+from .converter import PayloadConverter
 
 __all__ = [
     "ActivityCancellationType",
@@ -82,6 +83,7 @@ __all__ = [
     "memo",
     "memo_value",
     "now",
+    "payload_converter",
     "query",
     "random",
     "run",
@@ -207,6 +209,7 @@ def defn(
     *,
     name: Optional[str] = None,
     sandboxed: bool = True,
+    dynamic: bool = False,
     failure_exception_types: Sequence[Type[BaseException]] = [],
 ) -> Callable[[_CT], _CT]: ...
 
@@ -216,11 +219,26 @@ def defn(
     *,
     name: Optional[str] = None,
     sandboxed: bool = True,
+    dynamic: bool = False,
     failure_exception_types: Sequence[Type[BaseException]] = [],
 ) -> Union[_CT, Callable[[_CT], _CT]]:
     """Decorator for workflow classes. ``sandboxed`` is accepted and ignored
     (temporal-dbos runs no sandbox — see the README deviations table).
+
+    ``dynamic`` is **not supported**: a catch-all workflow has no
+    ``wf:{type}`` registration to dispatch to, which conflicts with the
+    one-DBOS-workflow-per-type model (DESIGN §10.1, DEVIATIONS D25). Passing
+    ``dynamic=True`` raises ``NotImplementedError``. (Dynamic *signal/query/
+    update* handlers and dynamic *activities* are supported.)
     """
+    if dynamic:
+        raise NotImplementedError(
+            "temporal-dbos does not support dynamic workflows "
+            "(@workflow.defn(dynamic=True)): a catch-all workflow type has no "
+            "per-type DBOS registration to dispatch to (DESIGN §10.1, "
+            "DEVIATIONS D25). Register each workflow type explicitly. Dynamic "
+            "signal/query/update handlers and dynamic activities are supported."
+        )
 
     def decorator(cls: _CT) -> _CT:
         defn = _registry.build_workflow_definition(
@@ -250,7 +268,9 @@ def signal(fn: _F) -> _F: ...
 def signal(
     *,
     name: Optional[str] = None,
+    dynamic: bool = False,
     unfinished_policy: HandlerUnfinishedPolicy = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
+    description: Optional[str] = None,
 ) -> Callable[[_F], _F]: ...
 
 
@@ -258,13 +278,24 @@ def signal(
     fn: Optional[_F] = None,
     *,
     name: Optional[str] = None,
+    dynamic: bool = False,
     unfinished_policy: HandlerUnfinishedPolicy = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
+    description: Optional[str] = None,
 ) -> Union[_F, Callable[[_F], _F]]:
-    """Decorator for a workflow signal handler method."""
+    """Decorator for a workflow signal handler method.
+
+    ``dynamic=True`` makes this the catch-all handler for any signal with no
+    exact match; it must be ``(self, name: str, args: Sequence[RawValue])``
+    and cannot also set ``name``. ``description`` is metadata.
+    """
+    if name is not None and dynamic:
+        raise RuntimeError("Cannot provide name and dynamic boolean")
 
     def decorator(fn: _F) -> _F:
-        setattr(fn, _registry.SIGNAL_ATTR, name if name is not None else fn.__name__)
+        marker = None if dynamic else (name if name is not None else fn.__name__)
+        setattr(fn, _registry.SIGNAL_ATTR, marker)
         setattr(fn, _registry.SIGNAL_POLICY_ATTR, int(unfinished_policy))
+        setattr(fn, _registry.SIGNAL_DESC_ATTR, description)
         return fn
 
     if fn is not None:
@@ -277,20 +308,36 @@ def query(fn: _F) -> _F: ...
 
 
 @overload
-def query(*, name: str) -> Callable[[_F], _F]: ...
+def query(
+    *,
+    name: Optional[str] = None,
+    dynamic: bool = False,
+    description: Optional[str] = None,
+) -> Callable[[_F], _F]: ...
 
 
 def query(
-    fn: Optional[_F] = None, *, name: Optional[str] = None
+    fn: Optional[_F] = None,
+    *,
+    name: Optional[str] = None,
+    dynamic: bool = False,
+    description: Optional[str] = None,
 ) -> Union[_F, Callable[[_F], _F]]:
-    """Decorator for a workflow query handler method. Must be synchronous in
-    Phase 0.
+    """Decorator for a workflow query handler method. Must be synchronous.
+
+    ``dynamic=True`` makes this the catch-all handler for any query with no
+    exact match; it must be ``(self, name: str, args: Sequence[RawValue])``
+    and cannot also set ``name``. ``description`` is metadata.
     """
+    if name is not None and dynamic:
+        raise RuntimeError("Cannot provide name and dynamic boolean")
 
     def decorator(fn: _F) -> _F:
         if inspect.iscoroutinefunction(fn):
             raise ValueError("Query handlers must be synchronous in temporal-dbos v0")
-        setattr(fn, _registry.QUERY_ATTR, name if name is not None else fn.__name__)
+        marker = None if dynamic else (name if name is not None else fn.__name__)
+        setattr(fn, _registry.QUERY_ATTR, marker)
+        setattr(fn, _registry.QUERY_DESC_ATTR, description)
         return fn
 
     if fn is not None:
@@ -308,10 +355,15 @@ class _UpdateMethod:
         fn: Callable[..., Any],
         name: Optional[str],
         unfinished_policy: "HandlerUnfinishedPolicy" = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
+        *,
+        dynamic: bool = False,
+        description: Optional[str] = None,
     ) -> None:
         self.fn = fn
-        self.name = name if name is not None else fn.__name__
+        # ``None`` name marks the dynamic (catch-all) update handler.
+        self.name = None if dynamic else (name if name is not None else fn.__name__)
         self.unfinished_policy = unfinished_policy
+        self.description = description
         self.validator_fn: Optional[Callable[..., Any]] = None
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
@@ -384,7 +436,9 @@ def update(fn: Callable[..., Any]) -> _UpdateMethod: ...
 def update(
     *,
     name: Optional[str] = None,
+    dynamic: bool = False,
     unfinished_policy: HandlerUnfinishedPolicy = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
+    description: Optional[str] = None,
 ) -> Callable[[Callable[..., Any]], _UpdateMethod]: ...
 
 
@@ -392,14 +446,24 @@ def update(
     fn: Optional[Callable[..., Any]] = None,
     *,
     name: Optional[str] = None,
+    dynamic: bool = False,
     unfinished_policy: HandlerUnfinishedPolicy = HandlerUnfinishedPolicy.WARN_AND_ABANDON,
+    description: Optional[str] = None,
 ) -> Union[_UpdateMethod, Callable[[Callable[..., Any]], _UpdateMethod]]:
     """Decorator for a workflow update handler method. Attach a validator
     with ``@my_update.validator``.
+
+    ``dynamic=True`` makes this the catch-all handler for any update with no
+    exact match; it must be ``(self, name: str, args: Sequence[RawValue])``
+    and cannot also set ``name``. ``description`` is metadata.
     """
+    if name is not None and dynamic:
+        raise RuntimeError("Cannot provide name and dynamic boolean")
 
     def decorator(fn: Callable[..., Any]) -> _UpdateMethod:
-        return _UpdateMethod(fn, name, unfinished_policy)
+        return _UpdateMethod(
+            fn, name, unfinished_policy, dynamic=dynamic, description=description
+        )
 
     if fn is not None:
         return decorator(fn)
@@ -718,6 +782,18 @@ def in_workflow() -> bool:
 def info() -> Info:
     """Current workflow's info."""
     return _runtime().runtime_info()
+
+
+def payload_converter() -> PayloadConverter:
+    """The payload converter for this workflow (the process's active
+    ``DataConverter``'s payload converter), mirroring
+    ``temporalio.workflow.payload_converter``. Use it to convert the
+    ``RawValue`` arguments a dynamic handler receives, e.g.
+    ``payload_converter().from_payload(arg.payload, MyType)``.
+    """
+    from ._internal import conversion
+
+    return conversion.get_converter().payload_converter
 
 
 def all_handlers_finished() -> bool:

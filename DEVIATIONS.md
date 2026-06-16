@@ -546,3 +546,32 @@ and edges:
   intercepted via its constituent `start_workflow` + `start_workflow_update`
   calls, not as its own outbound verb. `list_schedules` is an `async` outbound
   (our `Client.list_schedules` is async), where temporalio's is synchronous.
+
+### D25. Dynamic handlers and activities are supported; dynamic workflows are not
+
+Dynamic **signal/query/update handlers** and dynamic **activities** work
+(DESIGN §6.1):
+
+- `@workflow.signal(dynamic=True)` / `@workflow.query(dynamic=True)` /
+  `@workflow.update(dynamic=True)` register a single catch-all handler per
+  category — invoked as `(self, name: str, args: Sequence[RawValue])` for any
+  message whose name has no exact handler. An exact match always wins; the
+  dynamic handler is the fallback. `description=` on these decorators is stored
+  as handler metadata.
+- `@activity.defn(dynamic=True)` registers a single catch-all activity —
+  invoked as `(args: Sequence[RawValue])` for any activity type with no exact
+  registration; the requested type is its `activity.info().activity_type`. It
+  shares the full local + cross-queue execution path (timeouts, retries,
+  cancellation, recovery).
+- `workflow.payload_converter()` / `activity.payload_converter()` are exposed so
+  a dynamic handler can convert the `RawValue` payloads it receives, e.g.
+  `payload_converter().from_payload(arg.payload, MyType)`.
+
+**Dynamic workflows (`@workflow.defn(dynamic=True)`) are not supported** and
+raise `NotImplementedError`. temporal-dbos registers one DBOS workflow per
+Temporal type (`wf:{type}`, resolved decision DESIGN §10.1) so that native
+name-based listing/filtering works; a catch-all workflow has no such per-type
+registration for an unknown incoming type to dispatch to, so it conflicts with
+that model. Register each workflow type explicitly. (The `dynamic` parameter is
+still accepted on `@workflow.defn` for signature parity — it is rejected, not
+absent.)

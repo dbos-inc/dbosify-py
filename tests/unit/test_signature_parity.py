@@ -91,14 +91,14 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
 # temporalio parameters not accepted yet, recorded exactly. qualname ->
 # parameter names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # Dynamic handlers + handler descriptions: Phase 3.
-    # versioning_behavior: Phase 4; no_thread_cancel_exception: Phase 3
-    # (activity cancellation types).
-    "workflow.defn": {"dynamic", "versioning_behavior"},
-    "workflow.signal": {"description", "dynamic"},
-    "workflow.query": {"description", "dynamic"},
-    "workflow.update": {"description", "dynamic"},
-    "activity.defn": {"dynamic", "no_thread_cancel_exception"},
+    # Dynamic signal/query/update handlers + handler descriptions are now
+    # supported (so signal/query/update have no missing params). Dynamic
+    # *workflows* are intentionally rejected, not absent: workflow.defn still
+    # accepts ``dynamic`` (raising NotImplementedError, DEVIATIONS D25), so it
+    # is not listed here. versioning_behavior: Phase 4;
+    # no_thread_cancel_exception: Phase 3 (activity cancellation types).
+    "workflow.defn": {"versioning_behavior"},
+    "activity.defn": {"no_thread_cancel_exception"},
     # Info/describe field coverage grows with features (DESIGN §6.8).
     "workflow.Info.__init__": {
         "execution_timeout",
