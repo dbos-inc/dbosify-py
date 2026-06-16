@@ -283,11 +283,45 @@ Deviations from Temporal:
   its own type (`SearchAttributeKey.for_keyword(...)` etc.); the deprecated
   untyped-dict form is also accepted, with the key type guessed as temporalio
   does.
-- The **visibility query language** is not wired yet: `Client.list_workflows`
-  / `count_workflows` and the `"CustomKeyword='foo' AND ..."` query string are
-  not implemented (Phase 3 remaining). The attributes are GIN-indexed, so a
-  future implementation maps query equality predicates onto JSONB `@>`
-  containment. The full query language is not planned.
+- The **visibility query language is a documented subset**, not Temporal's full
+  grammar. `Client.list_workflows(query=...)` / `count_workflows(query=...)`
+  parse a flat `AND` conjunction (no `OR`, no grouping parens, no `ORDER BY`)
+  over: `WorkflowType` (`= != IN`), `WorkflowId` (`= STARTS_WITH`),
+  `ExecutionStatus` (`= IN`), `StartTime`/`CloseTime` (`> >= < <= =`), and custom
+  search attributes (`=` only, mapped onto the GIN-indexed JSONB `@>`
+  containment), plus an optional trailing `GROUP BY ExecutionStatus` /
+  `GROUP BY WorkflowType` (`count_workflows` only). Anything outside the subset
+  raises with a message listing what is supported. Specific gaps:
+  - **Time bounds are inclusive.** `>`/`>=` (and `<`/`<=`) both translate to
+    DBOS's inclusive bound, so a strict `>` may include an exact-timestamp match.
+  - **`count_workflows` is aggregate-only.** It runs entirely through DBOS's
+    server-side `get_workflow_aggregates` (`COUNT` + `GROUP BY`) and **rejects**
+    (rather than scans) any query that operator can't express: filters on exact
+    `WorkflowId`, a search attribute, `WorkflowType !=`, or an ERROR-family
+    `ExecutionStatus` (Failed/Canceled/TimedOut/ContinuedAsNew — all stored as a
+    single DBOS `ERROR` status), and `GROUP BY ExecutionStatus` (telling those
+    error states apart needs each workflow's recorded outcome). The only
+    supported grouping is `GROUP BY WorkflowType`. Use `list_workflows` to
+    enumerate the rejected cases.
+  - **Each run-chain link is its own row**, keyed by run id (continue-as-new /
+    workflow-retry / cron hops), since `run_id` is the DBOS workflow id.
+  - **Only user workflows are visible.** `list_workflows`/`count_workflows`
+    return only DBOS workflows named `wf:{type}` (the user's Temporal workflow
+    types); the internal dispatcher workflows DBOS records — `__temporal_activity`
+    (cross-queue activity execution) and `__temporal_schedule_fire` (schedule
+    fires) — are filtered out, so they don't show up as phantom executions.
+  - **A scheduled workflow's `parent_id` points at its fire dispatcher.** Because
+    the schedule action is enqueued from inside the `__temporal_schedule_fire`
+    workflow, that dispatcher is the action's DBOS parent, so
+    `WorkflowExecution.parent_id` is the (internal) fire-workflow id rather than
+    `None`. Temporal scheduled workflows have no parent. (Continue-as-new and
+    cron successors correctly report no parent — those links are same-chain.)
+  - **Search-attribute filtering is scalar-equality only** (the containment
+    subset); ranges/`IN` on a search attribute are rejected, and **keyword-list
+    attributes are not filterable** — the value is stored as a JSON array and,
+    with no cluster type registry, the query can't know to match it as a member
+    rather than a scalar (`@>` containment of a scalar against a stored array
+    never matches).
 - The **deprecated untyped-dict removal idioms** are not honored. In temporalio
   an empty value list removes a search attribute: `upsert_search_attributes(
   {"k": []})` deletes the typed `k` (while leaving `k: []` in the legacy untyped

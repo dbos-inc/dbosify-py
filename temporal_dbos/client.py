@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from enum import IntEnum
 from typing import (
     Any,
+    Callable,
     Dict,
     List,
     Mapping,
@@ -39,6 +40,7 @@ from ._internal import conversion, ids, inbox
 from ._internal import registry as _registry
 from ._internal import schedules as _schedules
 from ._internal import status as _status
+from ._internal import visibility as _visibility
 from ._internal.client_interceptor import (
     BackfillScheduleInput,
     CancelWorkflowInput,
@@ -179,6 +181,9 @@ __all__ = [
     "WorkflowQueryRejectedError",
     "WorkflowHandle",
     "WorkflowExecution",
+    "WorkflowExecutionAsyncIterator",
+    "WorkflowExecutionCount",
+    "WorkflowExecutionCountAggregationGroup",
     "WorkflowExecutionDescription",
     "WorkflowExecutionStatus",
     "WorkflowFailureError",
@@ -658,6 +663,26 @@ class WorkflowExecutionDescription(WorkflowExecution):
     """Description for a single workflow execution run."""
 
 
+@dataclass(frozen=True)
+class WorkflowExecutionCountAggregationGroup:
+    """Aggregation group if the count query had a group-by clause.
+
+    We don't parse group-by (DEVIATION), so this is never populated; it exists
+    for shape parity with temporalio.
+    """
+
+    count: int
+    group_values: Sequence[Any]
+
+
+@dataclass(frozen=True)
+class WorkflowExecutionCount:
+    """Representation of a count from a ``count_workflows`` call."""
+
+    count: int
+    groups: Sequence[WorkflowExecutionCountAggregationGroup]
+
+
 def _workflow_type_name(workflow: Any) -> str:
     """Resolve a workflow reference the temporalio ways: the class, the run
     method (``MyWorkflow.run``), or the type-name string.
@@ -754,6 +779,48 @@ def _to_datetime(epoch_ms: Optional[int]) -> Optional[datetime]:
     return datetime.fromtimestamp(epoch_ms / 1000, tz=timezone.utc)
 
 
+def _execution_from_status(
+    status: WorkflowStatus, cls: Type[WorkflowExecution] = WorkflowExecution
+) -> WorkflowExecution:
+    """Synthesize a :class:`WorkflowExecution` (or a subclass — ``describe()``
+    passes :class:`WorkflowExecutionDescription`) from a DBOS ``WorkflowStatus``.
+
+    The DBOS workflow id is the run id (decision §10.3); the Temporal workflow
+    id is its run-chain base. The DBOS workflow name is ``wf:{type}``.
+    """
+    workflow_type = status.name or ""
+    if workflow_type.startswith("wf:"):
+        workflow_type = workflow_type[3:]
+    stored_attrs = status.attributes or {}
+    typed_sa = _attributes.decode_search_attributes(
+        stored_attrs.get(_attributes.SEARCH_ATTRIBUTES_KEY, {})
+    )
+    dbos_id = status.workflow_id
+    execution = cls(
+        id=ids.parse_run(dbos_id)[0],
+        run_id=dbos_id,
+        workflow_type=workflow_type,
+        task_queue=status.queue_name,
+        status=_status.to_execution_status(status.status, error=status.error),
+        start_time=_to_datetime(status.created_at),
+        close_time=_to_datetime(status.completed_at),
+        search_attributes=_attributes.typed_to_untyped(typed_sa),
+        typed_search_attributes=typed_sa,
+        # A same-chain DBOS parent link is a continuation (continue-as-new),
+        # not a parent; only cross-chain links are real parents.
+        parent_id=(
+            status.parent_workflow_id
+            if status.parent_workflow_id is not None
+            and ids.parse_run(status.parent_workflow_id)[0] != ids.parse_run(dbos_id)[0]
+            else None
+        ),
+    )
+    object.__setattr__(
+        execution, "_encoded_memo", stored_attrs.get(_attributes.MEMO_KEY, {})
+    )
+    return execution
+
+
 def _ignore_rpc_options(
     where: str, rpc_metadata: Mapping[str, Any], rpc_timeout: Optional[timedelta]
 ) -> None:
@@ -763,6 +830,117 @@ def _ignore_rpc_options(
         logger.debug("%s: ignoring rpc_metadata", where)
     if rpc_timeout is not None:
         logger.debug("%s: ignoring rpc_timeout", where)
+
+
+class WorkflowExecutionAsyncIterator:
+    """Async iterator over :class:`WorkflowExecution` values, as returned by
+    :py:meth:`Client.list_workflows`. Most callers just ``async for`` over it.
+
+    Pagination rides DBOS ``limit``/``offset`` rather than an opaque server
+    cursor, so :py:attr:`next_page_token` encodes the next raw offset. The
+    *raw* offset (DBOS rows scanned) is tracked separately from the count of
+    yielded rows, so post-filtering (the ERROR-family ``ExecutionStatus`` and
+    ``WorkflowType !=`` cases DBOS can't express) never misaligns pages.
+    """
+
+    def __init__(
+        self,
+        client: "Client",
+        *,
+        query: Optional[str],
+        page_size: int,
+        limit: Optional[int],
+        next_page_token: Optional[bytes] = None,
+    ) -> None:
+        self._client = client
+        self._query = query
+        self._page_size = page_size
+        self._limit = limit
+        self._fetch_offset = int(next_page_token) if next_page_token else 0
+        self._next_page_token: Optional[bytes] = next_page_token
+        self._current_page: Optional[Sequence[WorkflowExecution]] = None
+        self._current_page_index = 0
+        self._yielded = 0
+        # The query is parsed lazily on the first fetch, so (as in temporalio)
+        # no work happens until iteration begins and a bad query surfaces then.
+        self._parsed = False
+        self._dbos_filters: Dict[str, Any] = {}
+        self._post_filter: Optional[Callable[[WorkflowStatus], bool]] = None
+
+    def _ensure_parsed(self) -> None:
+        if not self._parsed:
+            parsed = _visibility.parse_query(self._query)
+            self._dbos_filters = parsed.to_dbos_filters()
+            self._post_filter = parsed.post_filter()
+            self._parsed = True
+
+    @property
+    def current_page_index(self) -> int:
+        """Index of the entry in the current page returned next."""
+        return self._current_page_index
+
+    @property
+    def current_page(self) -> Optional[Sequence[WorkflowExecution]]:
+        """Current page, if it has been fetched yet."""
+        return self._current_page
+
+    @property
+    def next_page_token(self) -> Optional[bytes]:
+        """Token for the next page request if any."""
+        return self._next_page_token
+
+    async def fetch_next_page(self, *, page_size: Optional[int] = None) -> None:
+        """Fetch the next page if any."""
+        self._ensure_parsed()
+        size = page_size or self._page_size
+        raw = await self._client._dbos_client.list_workflows_async(
+            load_input=False,
+            load_output=True,
+            sort_desc=True,
+            limit=size,
+            offset=self._fetch_offset,
+            **self._dbos_filters,
+        )
+        raw_count = len(raw)
+        self._fetch_offset += raw_count
+        # Only user Temporal workflows (named ``wf:{type}``) are visible: skip
+        # DBOS plumbing rows (``__temporal_activity`` / ``__temporal_schedule_fire``).
+        survivors = [
+            r
+            for r in raw
+            if (r.name or "").startswith("wf:")
+            and (self._post_filter is None or self._post_filter(r))
+        ]
+        self._current_page = [_execution_from_status(r) for r in survivors]
+        self._current_page_index = 0
+        # A full raw page means there may be more rows; a short one is the end.
+        # ``size > 0`` guards a 0-page-size caller against an infinite loop.
+        self._next_page_token = (
+            str(self._fetch_offset).encode() if raw_count == size and size > 0 else None
+        )
+
+    def __aiter__(self) -> "WorkflowExecutionAsyncIterator":
+        """Return self as the iterator."""
+        return self
+
+    async def __anext__(self) -> WorkflowExecution:
+        """Next execution, fetching pages (and skipping empty post-filtered
+        pages) as needed."""
+        if self._limit is not None and self._yielded >= self._limit:
+            raise StopAsyncIteration
+        while True:
+            if self._current_page is None:
+                await self.fetch_next_page()
+                continue
+            if self._current_page_index >= len(self._current_page):
+                if self._next_page_token is not None:
+                    await self.fetch_next_page()
+                    continue
+                raise StopAsyncIteration
+            ret = self._current_page[self._current_page_index]
+            self._current_page_index += 1
+            self._yielded += 1
+            return ret
 
 
 class Client:
@@ -1153,6 +1331,118 @@ class Client:
             run_id=run_id,
             first_execution_run_id=first_execution_run_id,
             result_type=_result_type_for(workflow, None),
+        )
+
+    # ------------------------------------------------------------------
+    # Visibility (DESIGN §6.2)
+    # ------------------------------------------------------------------
+
+    def list_workflows(
+        self,
+        query: Optional[str] = None,
+        *,
+        limit: Optional[int] = None,
+        page_size: int = 1000,
+        next_page_token: Optional[bytes] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> WorkflowExecutionAsyncIterator:
+        """List workflows matching a visibility ``query`` (a Temporal-style
+        filter string; see :mod:`temporal_dbos._internal.visibility` for the
+        supported subset). Newest-first. As in temporalio, no request is made
+        until the first iteration, so a bad query raises on first ``__anext__``.
+
+        Each run-chain link (continue-as-new / workflow-retry / cron hop) is a
+        separate row, keyed by its run id (decision §10.3).
+        """
+        _ignore_rpc_options("list_workflows", rpc_metadata, rpc_timeout)
+        return WorkflowExecutionAsyncIterator(
+            self,
+            query=query,
+            page_size=page_size,
+            limit=limit,
+            next_page_token=next_page_token,
+        )
+
+    async def count_workflows(
+        self,
+        query: Optional[str] = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> WorkflowExecutionCount:
+        """Count workflows matching a visibility ``query``, optionally with a
+        trailing ``GROUP BY WorkflowType``.
+
+        Counting is **aggregate-only**: it runs entirely through DBOS's
+        server-side ``get_workflow_aggregates`` (``COUNT`` + ``GROUP BY``).
+        Queries it cannot express there are rejected with a
+        :class:`~temporal_dbos._internal.visibility.VisibilityQueryError` rather
+        than silently scanning rows — namely filters on exact ``WorkflowId``, a
+        search attribute, ``WorkflowType !=``, or an ERROR-family
+        ``ExecutionStatus`` (Failed/Canceled/TimedOut/ContinuedAsNew, which DBOS
+        stores under a single ``ERROR`` status), and ``GROUP BY ExecutionStatus``
+        (distinguishing those error states needs each workflow's recorded
+        outcome). Use :py:meth:`list_workflows` to enumerate those.
+        """
+        _ignore_rpc_options("count_workflows", rpc_metadata, rpc_timeout)
+        parsed = _visibility.parse_query(query)
+        sys_db: Any = getattr(self._dbos_client, "_sys_db", None)
+        if sys_db is None:
+            raise RuntimeError(
+                "count_workflows requires DBOS system-database access "
+                "(the wrapped DBOSClient exposes no _sys_db)"
+            )
+
+        if not parsed.aggregate_eligible() or parsed.post_filter() is not None:
+            raise _visibility.VisibilityQueryError(
+                "count_workflows runs only what DBOS's aggregate operator can "
+                "express: it cannot filter by exact WorkflowId, a search "
+                "attribute, WorkflowType !=, or an ERROR-family ExecutionStatus "
+                "(Failed/Canceled/TimedOut/ContinuedAsNew, stored as one ERROR "
+                "status). Narrow the query or enumerate with list_workflows."
+            )
+        if parsed.group_by == "ExecutionStatus":
+            raise _visibility.VisibilityQueryError(
+                "count_workflows cannot GROUP BY ExecutionStatus: DBOS stores "
+                "Failed/Canceled/TimedOut/ContinuedAsNew under a single ERROR "
+                "status, so distinguishing them would require reading each "
+                "workflow's outcome. GROUP BY WorkflowType is supported."
+            )
+
+        # Group by name in every path so we can count only user Temporal
+        # workflows (``wf:{type}``) and exclude DBOS plumbing rows
+        # (``__temporal_activity`` / ``__temporal_schedule_fire``), which the
+        # aggregate operator has no other way to filter out.
+        rows = await self._count_aggregate(
+            sys_db, "group_by_name", parsed.aggregate_filter_kwargs()
+        )
+        tallies: Dict[str, int] = {}
+        for r in rows:
+            name = r["group"].get("name") or ""
+            if not name.startswith("wf:"):
+                continue
+            key = name[3:]
+            tallies[key] = tallies.get(key, 0) + (r["count"] or 0)
+
+        if parsed.group_by is None:
+            return WorkflowExecutionCount(count=sum(tallies.values()), groups=[])
+
+        # GROUP BY WorkflowType (the only cleanly-aggregatable grouping).
+        groups = [
+            WorkflowExecutionCountAggregationGroup(count=c, group_values=[v])
+            for v, c in sorted(tallies.items())
+        ]
+        return WorkflowExecutionCount(count=sum(tallies.values()), groups=groups)
+
+    async def _count_aggregate(
+        self, sys_db: Any, group_flag: str, filter_kwargs: Mapping[str, Any]
+    ) -> List[Any]:
+        """One ``get_workflow_aggregates`` COUNT call grouped by ``group_flag``
+        (run off-loop since the operator is synchronous)."""
+        return await asyncio.to_thread(
+            lambda: sys_db.get_workflow_aggregates(
+                select_count=True, **{group_flag: True}, **filter_kwargs
+            )
         )
 
     async def start_update_with_start_workflow(
@@ -1810,37 +2100,11 @@ class WorkflowHandle:
     ) -> WorkflowExecutionDescription:
         dbos_id = await self._target()
         status = await self._client._status_of(dbos_id)
-        workflow_type = status.name or ""
-        if workflow_type.startswith("wf:"):
-            workflow_type = workflow_type[3:]
-        stored_attrs = status.attributes or {}
-        typed_sa = _attributes.decode_search_attributes(
-            stored_attrs.get(_attributes.SEARCH_ATTRIBUTES_KEY, {})
-        )
-        description = WorkflowExecutionDescription(
-            id=self._id,
-            run_id=status.workflow_id,
-            workflow_type=workflow_type,
-            task_queue=status.queue_name,
-            status=_status.to_execution_status(status.status, error=status.error),
-            start_time=_to_datetime(status.created_at),
-            close_time=_to_datetime(status.completed_at),
-            search_attributes=_attributes.typed_to_untyped(typed_sa),
-            typed_search_attributes=typed_sa,
-            # A same-chain DBOS parent link is a continuation
-            # (continue-as-new), not a parent (Info.continued_run_id
-            # territory); only cross-chain links are real parents.
-            parent_id=(
-                status.parent_workflow_id
-                if status.parent_workflow_id is not None
-                and ids.parse_run(status.parent_workflow_id)[0]
-                != ids.parse_run(status.workflow_id)[0]
-                else None
-            ),
-        )
-        object.__setattr__(
-            description, "_encoded_memo", stored_attrs.get(_attributes.MEMO_KEY, {})
-        )
+        description = _execution_from_status(status, WorkflowExecutionDescription)
+        assert isinstance(description, WorkflowExecutionDescription)
+        # describe() is bound to a specific Temporal workflow id; honor it over
+        # the chain-base derived from the (possibly run-suffixed) DBOS id.
+        object.__setattr__(description, "id", self._id)
         return description
 
     async def cancel(

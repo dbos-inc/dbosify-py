@@ -82,6 +82,10 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
         "wraps a pre-fetched page of DBOS schedule rows, not a gRPC paginator "
         "(DESIGN §6.7); the async-iteration contract is identical"
     ),
+    "client.WorkflowExecutionAsyncIterator.__init__": (
+        "pages via DBOS limit/offset (DESIGN §6.2) instead of a gRPC cursor + "
+        "ListWorkflowsInput; the async-iteration contract is identical"
+    ),
 }
 
 # temporalio parameters not accepted yet, recorded exactly. qualname ->
