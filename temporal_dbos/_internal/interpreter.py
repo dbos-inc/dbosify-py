@@ -1118,7 +1118,14 @@ class Interpreter(_Runtime):
                 else:
                     self._launch_waiter("timer", seq, DBOS.sleep_async(real_delay))
             elif kind == "activity":
-                exec_state = self._pending_activities[seq]
+                exec_state = self._pending_activities.get(seq)
+                if exec_state is None:
+                    # Cancelled within the same drain that started it, before
+                    # this dispatch ran: the cancellation sweep already retired
+                    # the exec (TRY_CANCEL cancelled the future, so the awaiter
+                    # saw CancelledError) and nothing was dispatched on either
+                    # path — so there is nothing to launch or cancel.
+                    continue
                 # Encode the args once (reused across retries); the step
                 # decodes them against the activity's signature.
                 exec_state.args = await conversion.encode_values(exec_state.args)
@@ -1478,7 +1485,9 @@ class Interpreter(_Runtime):
                 exec_state.future.set_exception(error)
             return
         # Record the dispatched id so cancellation can reach the activity on
-        # its own worker (natively cancelling this workflow).
+        # its own worker (cooperatively — a checkpointed cancel event plus a
+        # completion-topic marker; see _signal_queued_activity_cancel — not a
+        # native DBOS cancel of this workflow).
         exec_state.queued_dbos_id = activity_dbos_id
         # Claim the result step's function_id at this deterministic position
         # (like _launch_attempt); the decode rides outside the recorded step.
@@ -1486,6 +1495,14 @@ class Interpreter(_Runtime):
         self._launch_waiter(
             "q_activity", seq, self._decode_activity_result(step_coro, exec_state)
         )
+        if exec_state.cancel_requested:
+            # A WAIT_CANCELLATION_COMPLETED cancel requested before this dispatch
+            # committed: queued_dbos_id was still None when the sweep ran, so the
+            # cross-process signal was deferred to here (now that the activity
+            # workflow exists and its result waiter is in place to confirm the
+            # unwind). TRY_CANCEL doesn't reach here — it cancels the future,
+            # retiring the exec before dispatch (handled in _process_commands).
+            await self._signal_queued_activity_cancel(exec_state)
 
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):

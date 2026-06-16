@@ -411,11 +411,16 @@ Operational requirement and current scope:
   normal completion, and cooperative cancel all run the same close path, which
   sends the cross-process cancel signal to any still-pending queued activity — so
   a fire-and-forget or not-yet-finished activity does not outlive its workflow.
-  **Exception: forceful `terminate`** is a native DBOS cancel that runs no close
-  code, so it does *not* cancel in-flight cross-queue activities (they finish on
-  their worker, their result discarded) — the same "no cleanup" behaviour
-  `terminate` already has for child workflows. Use cooperative cancel if you need
-  the activity stopped.
+  This close-time cancellation is unconditional: it ignores the activity's
+  `ActivityCancellationType`, so an `ABANDON` cross-queue activity is *also*
+  cancelled at a non-`terminate` close, not left running to completion. (The
+  type still governs in-run `handle.cancel()`: `ABANDON` there detaches. This
+  matches the local path, which likewise cancels every in-flight attempt at
+  close regardless of type.) **Exception: forceful `terminate`** is a native
+  DBOS cancel that runs no close code, so it does *not* cancel in-flight
+  cross-queue activities (they finish on their worker, their result discarded) —
+  the same "no cleanup" behaviour `terminate` already has for child workflows.
+  Use cooperative cancel if you need the activity stopped.
 - **`schedule_to_start_timeout` bounds the queue dwell.** The activity workflow
   compares its enqueue time (`created_at`) to its start time on the worker and,
   if the budget was exceeded, fails with `TimeoutType.SCHEDULE_TO_START` before

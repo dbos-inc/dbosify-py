@@ -47,7 +47,7 @@ async def cancellable_activity() -> str:
 @workflow.defn(name="cancel-cross-queue-workflow")
 class CancelCrossQueueWorkflow:
     @workflow.run
-    async def run(self, cancel_type: str) -> str:
+    async def run(self, cancel_type: str, cancel_when: str = "delayed") -> str:
         handle = workflow.start_activity(
             cancellable_activity,
             task_queue=ACTIVITY_TASK_QUEUE,
@@ -58,8 +58,14 @@ class CancelCrossQueueWorkflow:
                 else ActivityCancellationType.TRY_CANCEL
             ),
         )
-        # Give the activity time to start on its worker, then cancel it.
-        await workflow.sleep(3)
+        if cancel_when == "delayed":
+            # Give the activity time to start on its worker, then cancel it.
+            await workflow.sleep(3)
+        # "immediate": cancel before the cross-queue dispatch has even committed
+        # (no awaiting boundary between start and cancel) — the cancel-before-
+        # dispatch path. It must still take effect rather than being dropped:
+        # TRY_CANCEL retires the never-dispatched activity; WAIT_CANCELLATION_
+        # COMPLETED is signalled across to the worker at dispatch time.
         handle.cancel()
         try:
             await handle
@@ -97,7 +103,10 @@ async def run_workflow_worker(workflow_id: str) -> None:
             client = await Client.connect(dbos_client)
             handle = await client.start_workflow(
                 CancelCrossQueueWorkflow.run,
-                os.environ.get("TDB_TEST_CANCEL_TYPE", "try"),
+                args=[
+                    os.environ.get("TDB_TEST_CANCEL_TYPE", "try"),
+                    os.environ.get("TDB_TEST_CANCEL_WHEN", "delayed"),
+                ],
                 id=workflow_id,
                 task_queue=WORKFLOW_TASK_QUEUE,
             )
