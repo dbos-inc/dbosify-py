@@ -323,11 +323,21 @@ temporalio; these edges differ:
   debug-logged deviation. Calendar `year` constraints and interval `offset`s
   have no cron equivalent and are dropped (debug-logged). Multiple
   `intervals`/`calendars`/`cron_expressions` use the first.
-- **Overlap policy is idempotent-per-occurrence.** A re-fire at the same nominal
-  time is a no-op (SKIP-style idempotency, also what makes recovery safe), and
-  distinct occurrences each run (ALLOW_ALL-style). The cross-occurrence
-  SKIP/BUFFER/CANCEL/TERMINATE distinction (act only when a *prior* occurrence
-  is still running) is not enforced in v1; `overlap` is accepted and stored.
+- **Overlap policy: SKIP / CANCEL_OTHER / TERMINATE_OTHER / ALLOW_ALL honored;
+  BUFFER_ONE / BUFFER_ALL rejected.** At each fire (for any policy but
+  ALLOW_ALL) the dispatcher walks prior occurrences backward on the cron grid —
+  exact-id status reads only, never a prefix scan — to find the most recently
+  *started* action (skipped occurrences leave no row) and whether it is still
+  open. SKIP drops the new fire; CANCEL_OTHER cooperatively cancels the running
+  action (but does **not** wait for it to finish unwinding before starting the
+  next — they may briefly overlap, unlike Temporal); TERMINATE_OTHER natively
+  cancels it. Edges: the walk is bounded by the schedule's creation time and a
+  hard cap (~60 occurrences), so an action overrunning more occurrences than the
+  cap may not be detected; detection is grid-based, so `trigger`/`backfill`
+  (off-grid / historical fires) aren't matched against grid occurrences; and a
+  scheduled action that continues-as-new or retries isn't tracked across the
+  hop. `BUFFER_ONE`/`BUFFER_ALL` (durable start-after-completion queueing) raise
+  `NotImplementedError` at `create_schedule`.
 - **`update` is delete-then-recreate.** DBOS has no in-place schedule update, so
   `ScheduleHandle.update` (and a `pause`/`unpause` carrying a `note`) deletes and
   re-creates the row — which resets `last_fired_at`.

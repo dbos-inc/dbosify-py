@@ -47,6 +47,7 @@ from .. import exceptions
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from . import activities as activities_mod
 from . import conversion, ids, inbox, registry, schedules
+from . import status as _status
 from .interpreter import (
     Interpreter,
     WorkflowCancelled,
@@ -381,13 +382,30 @@ async def _enqueue_next_run(
 # ---------------------------------------------------------------------------
 # Schedules (§6.7): the generic schedule-fire dispatcher. DBOS fires it once
 # per schedule occurrence with ``(fired_at, context)``; it enforces the spec's
-# start/end bounds and jitter, then starts the action workflow under a
-# per-occurrence deterministic id (so a re-fire at the same nominal time is an
-# idempotent no-op — SKIP semantics — while distinct occurrences each run).
+# start/end bounds and jitter, applies the overlap policy, then starts the
+# action workflow under a per-occurrence deterministic id (so a re-fire at the
+# same nominal time is an idempotent no-op while distinct occurrences each run).
+#
+# Overlap (DEVIATIONS D22): for any policy other than ALLOW_ALL the dispatcher
+# walks prior occurrences backward on the cron grid — exact-id status reads
+# only, never a prefix scan (§6.4) — to find the most recently *started* action
+# (skipped occurrences leave no row) and whether it is still open. SKIP drops
+# this fire; CANCEL_OTHER cooperatively cancels it; TERMINATE_OTHER natively
+# cancels it; then (except SKIP) the new action starts. The walk is bounded by
+# the schedule's created_at and a hard cap.
 # ---------------------------------------------------------------------------
 
 SCHEDULE_FIRE_NAME = "__temporal_schedule_fire"
 _schedule_dispatcher_registered = False
+
+# ScheduleOverlapPolicy values (mirror _schedule.ScheduleOverlapPolicy).
+_OVERLAP_SKIP = 1
+_OVERLAP_CANCEL_OTHER = 4
+_OVERLAP_TERMINATE_OTHER = 5
+_OVERLAP_ALLOW_ALL = 6
+# Backstop on the backward occurrence walk when created_at doesn't bound it
+# (e.g. an action overrunning many periods): detection degrades past this.
+_OVERLAP_LOOKBACK_LIMIT = 60
 
 
 def register_schedule_dispatcher() -> None:
@@ -427,7 +445,61 @@ async def _schedule_fire(fired_at: datetime, context: Dict[str, Any]) -> None:
         # identically on recovery.
         delay = random.Random(int(fired_at.timestamp())).random() * float(jitter)
         await DBOS.sleep_async(delay)
-    await _start_scheduled_action(context["action"], fired_at)
+    action = context["action"]
+    if not await _apply_overlap_policy(action, context, fired_at):
+        return  # SKIP: a prior occurrence is still running
+    await _start_scheduled_action(action, fired_at)
+
+
+async def _apply_overlap_policy(
+    action: Dict[str, Any], context: Dict[str, Any], fired_at: datetime
+) -> bool:
+    """Apply the schedule's overlap policy. Returns False if this fire should be
+    skipped (SKIP with a running prior); otherwise handles CANCEL/TERMINATE and
+    returns True so the caller starts the new action."""
+    overlap = int(context.get("policy", {}).get("overlap", _OVERLAP_SKIP))
+    cron = context.get("cron")
+    if overlap == _OVERLAP_ALLOW_ALL or not cron:
+        return True
+    prior = await _running_prior_occurrence(action, context, cron, fired_at)
+    if prior is None:
+        return True
+    if overlap == _OVERLAP_SKIP:
+        return False
+    if overlap == _OVERLAP_TERMINATE_OTHER:
+        await DBOS.cancel_workflow_async(prior, cancel_children=True)
+    elif overlap == _OVERLAP_CANCEL_OTHER:
+        # Cooperative cancel (lets the running action's cleanup run). We do not
+        # wait for it to finish unwinding before starting the next (DEVIATIONS
+        # D22): they may briefly overlap.
+        await DBOS.send_async(
+            prior, inbox.cancel_envelope("schedule overlap"), inbox.INBOX_TOPIC
+        )
+    return True
+
+
+async def _running_prior_occurrence(
+    action: Dict[str, Any], context: Dict[str, Any], cron: str, fired_at: datetime
+) -> Optional[str]:
+    """The id of the most recently started action of this schedule if it is
+    still open, else None. Walks the cron grid backward from ``fired_at`` using
+    exact-id status reads (each a checkpointed step → replay-stable), stopping
+    at the first occurrence that left a row (skipped ones did not), at
+    ``created_at``, or at the lookback cap."""
+    base = action["id"]
+    tz_name = context.get("timezone")
+    created_at = context.get("created_at")
+    floor = _to_aware_utc(datetime.fromisoformat(created_at)) if created_at else None
+    when = fired_at
+    for _ in range(_OVERLAP_LOOKBACK_LIMIT):
+        when = _to_aware_utc(schedules.prev_fire_time(cron, when, tz_name))
+        if floor is not None and when < floor:
+            return None
+        occurrence_id = f"{base}-{int(when.timestamp())}"
+        fields = await _safe_status(occurrence_id)
+        if fields is not None:
+            return occurrence_id if _status.is_open(fields["status"]) else None
+    return None
 
 
 async def _start_scheduled_action(action: Dict[str, Any], fired_at: datetime) -> None:

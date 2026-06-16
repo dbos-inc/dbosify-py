@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, List, Optional
 
 import pytest
-from dbos import DBOSClient
+from dbos import DBOSClient, DBOSConfig
 
 from temporal_dbos import activity, workflow
 from temporal_dbos.client import (
@@ -21,10 +21,12 @@ from temporal_dbos.client import (
     ScheduleBackfill,
     ScheduleIntervalSpec,
     ScheduleOverlapPolicy,
+    SchedulePolicy,
     ScheduleSpec,
     ScheduleState,
     ScheduleUpdate,
     ScheduleUpdateInput,
+    WorkflowExecutionStatus,
 )
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
@@ -50,26 +52,73 @@ async def greet(p: Params) -> str:
 class ScheduledGreeter:
     @workflow.run
     async def run(self, name: str) -> str:
-        return await workflow.execute_activity(
+        result: str = await workflow.execute_activity(
             greet, Params("Hello", name), start_to_close_timeout=timedelta(seconds=10)
         )
+        return result
 
 
-def _fast_scheduler_config() -> dict:
-    config = dict(default_config())
+# --- overlap-policy probe: counts how many actions actually start ------------
+# Activities run in the in-process worker, so they share this module state. We
+# count *starts* (not instantaneous concurrency): SKIP suppresses most fires
+# while an action is still running, so far fewer actions start than under
+# ALLOW_ALL — a signal robust to the small fire-time TOCTOU race (D22).
+_overlap = {"started": 0}
+
+
+@activity.defn
+async def overlap_record() -> None:
+    _overlap["started"] += 1
+
+
+@workflow.defn
+class OverlapAction:
+    @workflow.run
+    async def run(self, seconds: float) -> None:
+        await workflow.execute_activity(
+            overlap_record, start_to_close_timeout=timedelta(seconds=10)
+        )
+        await workflow.sleep(seconds)
+
+
+def _overlap_schedule(
+    overlap: ScheduleOverlapPolicy, *, action_id: str, seconds: float = 2.0
+) -> Schedule:
+    return Schedule(
+        action=ScheduleActionStartWorkflow(
+            OverlapAction.run, seconds, id=action_id, task_queue=TASK_QUEUE
+        ),
+        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=1))]),
+        policy=SchedulePolicy(overlap=overlap),
+    )
+
+
+async def _action_statuses(
+    client: Client,
+) -> "list[Optional[WorkflowExecutionStatus]]":
+    rows = await client._dbos_client.list_workflows_async(name="wf:OverlapAction")
+    statuses: "list[Optional[WorkflowExecutionStatus]]" = []
+    for row in rows:
+        desc = await client.get_workflow_handle(row.workflow_id).describe()
+        statuses.append(desc.status)
+    return statuses
+
+
+def _fast_scheduler_config() -> DBOSConfig:
+    config = default_config()
     # Make the dynamic scheduler poll quickly so automatic cron fires happen
     # within the test timeout.
-    config["runtimeConfig"] = {"scheduler_polling_interval_sec": 0.1}
+    config["scheduler_polling_interval_sec"] = 0.1
     return config
 
 
 @asynccontextmanager
-async def _env(config: Optional[dict] = None) -> AsyncIterator[Client]:
+async def _env(config: Optional[DBOSConfig] = None) -> AsyncIterator[Client]:
     worker = Worker(
         config or default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[ScheduledGreeter],
-        activities=[greet],
+        workflows=[ScheduledGreeter, OverlapAction],
+        activities=[greet, overlap_record],
     )
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
@@ -89,7 +138,8 @@ async def _wait_for_action(
         for row in rows:
             if row.status == "SUCCESS":
                 handle = client.get_workflow_handle(row.workflow_id, result_type=str)
-                return await handle.result()
+                result: str = await handle.result()
+                return result
         await asyncio.sleep(0.1)
     pytest.fail("scheduled action workflow never completed")
 
@@ -218,3 +268,84 @@ async def test_schedule_persists_across_worker_restart() -> None:
         await handle.trigger()
         assert await _wait_for_action(client) == "Hello, World!"
         await handle.delete()
+
+
+# --- overlap policies (DEVIATIONS D22) --------------------------------------
+
+
+async def test_overlap_skip_suppresses_runs() -> None:
+    # SKIP: while one ~3s action is running, the ~1/s occurrences are dropped,
+    # so only a couple of actions start over the window (one extra tolerated for
+    # the fire-time TOCTOU race, D22).
+    _overlap.update(started=0)
+    async with _env(_fast_scheduler_config()) as client:
+        await client.create_schedule(
+            "ov-skip",
+            _overlap_schedule(
+                ScheduleOverlapPolicy.SKIP, action_id="ov-skip-wf", seconds=3.0
+            ),
+        )
+        await asyncio.sleep(6.5)
+        await client.get_schedule_handle("ov-skip").delete()
+    assert _overlap["started"] <= 3
+
+
+async def test_overlap_allow_all_runs_concurrently() -> None:
+    # ALLOW_ALL: every ~1/s occurrence starts even while prior ~3s actions run,
+    # so many more start than under SKIP (proving SKIP actually suppresses).
+    _overlap.update(started=0)
+    async with _env(_fast_scheduler_config()) as client:
+        await client.create_schedule(
+            "ov-all",
+            _overlap_schedule(
+                ScheduleOverlapPolicy.ALLOW_ALL, action_id="ov-all-wf", seconds=3.0
+            ),
+        )
+        await asyncio.sleep(6.5)
+        await client.get_schedule_handle("ov-all").delete()
+    assert _overlap["started"] >= 5
+
+
+async def test_overlap_cancel_other_cancels_running() -> None:
+    # CANCEL_OTHER: each new occurrence cooperatively cancels the still-running
+    # prior action, so at least one ends CANCELED.
+    _overlap.update(started=0)
+    async with _env(_fast_scheduler_config()) as client:
+        await client.create_schedule(
+            "ov-cancel",
+            _overlap_schedule(
+                ScheduleOverlapPolicy.CANCEL_OTHER, action_id="ov-cancel-wf"
+            ),
+        )
+        await asyncio.sleep(5)
+        statuses = await _action_statuses(client)
+        await client.get_schedule_handle("ov-cancel").delete()
+    assert WorkflowExecutionStatus.CANCELED in statuses
+
+
+async def test_overlap_terminate_other_terminates_running() -> None:
+    # TERMINATE_OTHER: each new occurrence forcefully terminates the prior
+    # running action, so at least one ends TERMINATED.
+    _overlap.update(started=0)
+    async with _env(_fast_scheduler_config()) as client:
+        await client.create_schedule(
+            "ov-term",
+            _overlap_schedule(
+                ScheduleOverlapPolicy.TERMINATE_OTHER, action_id="ov-term-wf"
+            ),
+        )
+        await asyncio.sleep(5)
+        statuses = await _action_statuses(client)
+        await client.get_schedule_handle("ov-term").delete()
+    assert WorkflowExecutionStatus.TERMINATED in statuses
+
+
+async def test_buffer_overlap_rejected() -> None:
+    async with _env() as client:
+        with pytest.raises(NotImplementedError):
+            await client.create_schedule(
+                "ov-buffer",
+                _overlap_schedule(
+                    ScheduleOverlapPolicy.BUFFER_ONE, action_id="ov-buffer-wf"
+                ),
+            )

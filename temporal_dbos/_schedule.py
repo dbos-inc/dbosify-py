@@ -12,10 +12,10 @@ it; ``ScheduleSpec`` itself compiles down to a cron string + timezone for DBOS.
 
 Deviations (DEVIATIONS D22): interval periods that don't divide a cron
 boundary, calendar ``year`` constraints, and interval offsets are approximated;
-overlap policy is idempotent-per-occurrence (effectively ALLOW_ALL across
-distinct occurrences) in v1; ``update`` is delete-then-recreate (DBOS has no
-in-place schedule update); schedule history (recent_actions, created_at) is not
-tracked.
+overlap policy honors SKIP / CANCEL_OTHER / TERMINATE_OTHER / ALLOW_ALL (via a
+bounded backward walk of prior occurrences at fire time) but rejects
+BUFFER_ONE/BUFFER_ALL; ``update`` is delete-then-recreate (DBOS has no in-place
+schedule update); schedule history (recent_actions) is not tracked.
 """
 
 import asyncio
@@ -159,7 +159,11 @@ class ScheduleOverlapPolicy(IntEnum):
 
 @dataclass
 class SchedulePolicy:
-    """Policies of a schedule."""
+    """Policies of a schedule.
+
+    ``overlap`` defaults to ``SKIP`` (matching Temporal). SKIP, CANCEL_OTHER,
+    TERMINATE_OTHER, and ALLOW_ALL are honored; BUFFER_ONE/BUFFER_ALL are
+    rejected at ``create_schedule`` time (DEVIATIONS D22)."""
 
     overlap: ScheduleOverlapPolicy = field(
         default_factory=lambda: ScheduleOverlapPolicy.SKIP
@@ -480,6 +484,7 @@ class ScheduleHandle:
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
         """Trigger an immediate action on this schedule."""
+        require_supported_overlap(overlap)
         await asyncio.to_thread(self._client._dbos_client.trigger_schedule, self.id)
 
     async def backfill(
@@ -491,6 +496,8 @@ class ScheduleHandle:
         """Backfill this schedule over the given time periods."""
         if not backfill:
             raise ValueError("At least one backfill required")
+        for b in backfill:
+            require_supported_overlap(b.overlap)
         for b in backfill:
             await asyncio.to_thread(
                 self._client._dbos_client.backfill_schedule,
@@ -761,7 +768,7 @@ def _description_from_row(row: Mapping[str, Any]) -> ScheduleDescription:
         running_actions=[],
         recent_actions=[],
         next_action_times=_next_action_times(ctx, 10),
-        created_at=datetime.now(timezone.utc),
+        created_at=_parse_dt(ctx.get("created_at")) or datetime.now(timezone.utc),
         last_updated_at=None,
     )
     return ScheduleDescription(id=row["schedule_name"], schedule=schedule, info=info)
@@ -787,6 +794,25 @@ def _list_description_from_row(row: Mapping[str, Any]) -> ScheduleListDescriptio
     )
 
 
+def require_supported_overlap(overlap: Optional[ScheduleOverlapPolicy]) -> None:
+    """Reject overlap policies temporal-dbos does not implement (DEVIATIONS D22).
+
+    SKIP, CANCEL_OTHER, TERMINATE_OTHER, and ALLOW_ALL are honored;
+    BUFFER_ONE/BUFFER_ALL need durable start-after-completion queueing we don't
+    do yet, so we fail loudly. ``None`` (a trigger/backfill override that defers
+    to the schedule's policy) is allowed.
+    """
+    if overlap in (
+        ScheduleOverlapPolicy.BUFFER_ONE,
+        ScheduleOverlapPolicy.BUFFER_ALL,
+    ):
+        raise NotImplementedError(
+            "temporal-dbos does not support ScheduleOverlapPolicy.BUFFER_ONE / "
+            "BUFFER_ALL yet (DEVIATIONS D22); SKIP, CANCEL_OTHER, "
+            "TERMINATE_OTHER, and ALLOW_ALL are supported"
+        )
+
+
 async def create_schedule_row(
     client: "Client",
     id: str,
@@ -800,11 +826,20 @@ async def create_schedule_row(
         raise TypeError(
             "temporal-dbos schedules support ScheduleActionStartWorkflow only"
         )
+    require_supported_overlap(schedule.policy.overlap)
+    for b in backfill:
+        require_supported_overlap(b.overlap)
     from ._internal import ids as _ids
 
     _ids.validate_workflow_id(schedule.action.id)
     cron, tz_name = compile_spec(schedule.spec)
     context = serialize_schedule_context(schedule)
+    # The fire dispatcher needs the compiled cron + timezone to walk prior
+    # occurrences for overlap handling, and created_at to bound that walk
+    # (and to back describe()'s ScheduleInfo.created_at).
+    context["cron"] = cron
+    context["timezone"] = tz_name
+    context["created_at"] = datetime.now(timezone.utc).isoformat()
     await client._dbos_client.create_schedule_async(
         schedule_name=id,
         workflow_name=SCHEDULE_FIRE_WORKFLOW,

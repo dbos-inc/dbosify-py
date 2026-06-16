@@ -19,6 +19,7 @@ from temporal_dbos._schedule import (
     ScheduleState,
     _schedule_from_context,
     compile_spec,
+    require_supported_overlap,
     serialize_schedule_context,
 )
 
@@ -158,3 +159,49 @@ def test_schedule_range_post_init_defaults() -> None:
     assert r.end == 5 and r.step == 1
     r = ScheduleRange(1, 10)
     assert r.step == 1
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        None,
+        ScheduleOverlapPolicy.SKIP,
+        ScheduleOverlapPolicy.CANCEL_OTHER,
+        ScheduleOverlapPolicy.TERMINATE_OTHER,
+        ScheduleOverlapPolicy.ALLOW_ALL,
+    ],
+)
+def test_require_supported_overlap_allows(policy: object) -> None:
+    require_supported_overlap(policy)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [ScheduleOverlapPolicy.BUFFER_ONE, ScheduleOverlapPolicy.BUFFER_ALL],
+)
+def test_require_supported_overlap_rejects_buffer(
+    policy: ScheduleOverlapPolicy,
+) -> None:
+    with pytest.raises(NotImplementedError):
+        require_supported_overlap(policy)
+
+
+def test_default_overlap_is_skip() -> None:
+    # Matches Temporal's default (we honor SKIP).
+    assert SchedulePolicy().overlap == ScheduleOverlapPolicy.SKIP
+
+
+def test_prev_fire_time_grid() -> None:
+    before = datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc)
+    prev = schedules.prev_fire_time("*/1 * * * *", before)
+    assert prev == datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_prev_fire_time_timezone() -> None:
+    # "0 9 * * *" daily 09:00 in New York; previous before 2026-01-01 12:00 UTC
+    # (07:00 NY) is 2025-12-31 09:00 NY == 14:00 UTC.
+    before = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    prev = schedules.prev_fire_time("0 9 * * *", before, "America/New_York")
+    assert prev.astimezone(timezone.utc) == datetime(
+        2025, 12, 31, 14, 0, tzinfo=timezone.utc
+    )
