@@ -140,7 +140,9 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
                     else inbox.RECV_TIMEOUT_SECONDS
                 )
             )
-            envelope = await _await_async_completion(envelope, timeout)
+            envelope = await _await_async_completion(
+                envelope, timeout, str(meta.get("activity_id", ""))
+            )
         if envelope.get("ok"):
             return envelope
         failure = envelope["failure"]
@@ -164,40 +166,64 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _await_async_completion(
-    pending_env: Dict[str, Any], timeout: float
+    pending_env: Dict[str, Any], timeout: float, activity_id: str
 ) -> Dict[str, Any]:
     """Park the activity workflow for external completion (raise_complete_async
     on the queued path). Returns a normal attempt envelope: complete -> ok,
     fail -> a retryable failure (the caller re-runs per policy), report_cancellation
-    -> a terminal CancelledError, and a recv timeout -> a START_TO_CLOSE timeout.
+    (or a cancellation marker from the interpreter) -> a terminal CancelledError,
+    and a recv timeout -> a START_TO_CLOSE timeout.
+
+    Heartbeats sent by the completer are not completions: they are skipped so the
+    park keeps waiting (detail forwarding to the workflow side remains a
+    documented gap, D23). On a definitely-terminal outcome (complete / cancel) we
+    set the gone-event so a later completer raises rather than sending into the
+    void.
 
     Timestamps come from recorded values (the completer's ``sent_at`` or the
     parked attempt's ``ended_at``), never a live clock read in the workflow body.
     """
-    completion = await DBOS.recv_async(inbox.ASYNC_COMPLETE_TOPIC, timeout)
     ended_at = float(pending_env.get("ended_at", 0.0))
-    if completion is None:
-        timed_out = exceptions.TimeoutError(
-            "activity Start-To-Close timeout",
-            type=exceptions.TimeoutType.START_TO_CLOSE,
-            last_heartbeat_details=[],
-        )
+    while True:
+        completion = await DBOS.recv_async(inbox.ASYNC_COMPLETE_TOPIC, timeout)
+        if completion is None:
+            timed_out = exceptions.TimeoutError(
+                "activity Start-To-Close timeout",
+                type=exceptions.TimeoutType.START_TO_CLOSE,
+                last_heartbeat_details=[],
+            )
+            return {
+                "ok": False,
+                "failure": serialize_failure(timed_out),
+                "ended_at": ended_at,
+            }
+        if completion.get("kind") == "activity_heartbeat":
+            # A heartbeat keeps the parked activity alive but is not a
+            # completion; wait for the next message.
+            continue
+        ended_at = float(completion.get("sent_at", ended_at))
+        if completion.get("cancelled"):
+            await DBOS.set_event_async(inbox.async_activity_gone_key(activity_id), True)
+            cancelled = exceptions.CancelledError("Activity cancelled")
+            return {
+                "ok": False,
+                "failure": serialize_failure(cancelled),
+                "ended_at": ended_at,
+            }
+        if completion.get("ok"):
+            await DBOS.set_event_async(inbox.async_activity_gone_key(activity_id), True)
+            return {
+                "ok": True,
+                "result": completion.get("result"),
+                "ended_at": ended_at,
+            }
+        # An external fail: hand it back so the caller's loop retries per the
+        # policy (which may re-run the activity and park again).
         return {
             "ok": False,
-            "failure": serialize_failure(timed_out),
+            "failure": completion["failure"],
             "ended_at": ended_at,
         }
-    ended_at = float(completion.get("sent_at", ended_at))
-    if completion.get("cancelled"):
-        cancelled = exceptions.CancelledError("Activity cancelled")
-        return {
-            "ok": False,
-            "failure": serialize_failure(cancelled),
-            "ended_at": ended_at,
-        }
-    if completion.get("ok"):
-        return {"ok": True, "result": completion.get("result"), "ended_at": ended_at}
-    return {"ok": False, "failure": completion["failure"], "ended_at": ended_at}
 
 
 def register_activity_dispatcher() -> None:

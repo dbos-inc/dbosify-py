@@ -1244,6 +1244,24 @@ class Interpreter(_Runtime):
             }
         return envelope
 
+    async def _signal_queued_activity_cancel(self, exec_state: _ActivityExec) -> None:
+        """Deliver cancellation to a queued activity on its own worker, covering
+        both states it may be in: (1) running an attempt — its step polls the
+        cancel event and unwinds the activity; (2) async-parked after
+        raise_complete_async — its workflow is waiting on the completion topic,
+        so a cancellation marker there wakes it. Whichever applies fires; the
+        other signal is harmlessly ignored. Both are checkpointed (replay-safe).
+        """
+        assert exec_state.queued_dbos_id is not None
+        await DBOS.set_event_async(
+            inbox.activity_cancel_key(exec_state.activity_id), True
+        )
+        await DBOS.send_async(
+            exec_state.queued_dbos_id,
+            inbox.activity_result_envelope(exec_state.activity_id, cancelled=True),
+            inbox.ASYNC_COMPLETE_TOPIC,
+        )
+
     async def _sweep_cancellations(self) -> None:
         """Retire activities and children whose virtual-loop futures were
         cancelled during the drain. Cancellation decisions are deterministic
@@ -1254,9 +1272,9 @@ class Interpreter(_Runtime):
         is handled in ``_request_activity_cancel`` (kept open until confirmed).
 
         Activities (queued path, §6.1.2): the activity runs on another worker, so
-        cancellation sets a checkpointed cancel event on this run; the activity's
-        attempt step polls it and delivers cancellation into the activity (its
-        cleanup runs). ABANDON leaves it running. WAIT keeps the exec open until
+        cancellation is delivered cross-process by ``_signal_queued_activity_cancel``
+        (a cancel event the running attempt polls, plus a marker that wakes an
+        async-parked activity). ABANDON leaves it running. WAIT keeps the exec open until
         the activity confirms via the result step (handled separately below).
 
         Children: non-ABANDON types deliver the child's cooperative-cancel
@@ -1271,9 +1289,7 @@ class Interpreter(_Runtime):
         for seq in wait_seqs:
             exec_state = self._pending_activities.get(seq)
             if exec_state is not None and exec_state.queued_dbos_id is not None:
-                await DBOS.set_event_async(
-                    inbox.activity_cancel_key(exec_state.activity_id), True
-                )
+                await self._signal_queued_activity_cancel(exec_state)
 
         seqs, self._cancelled_activity_seqs = self._cancelled_activity_seqs, []
         for seq in seqs:
@@ -1282,11 +1298,7 @@ class Interpreter(_Runtime):
                 continue
             if exec_state.cancellation_type != 2:  # ABANDON never requests
                 if exec_state.queued_dbos_id is not None:
-                    # Cross-process: set the cancel event the activity's attempt
-                    # step polls (it then unwinds the activity on its worker).
-                    await DBOS.set_event_async(
-                        inbox.activity_cancel_key(exec_state.activity_id), True
-                    )
+                    await self._signal_queued_activity_cancel(exec_state)
                 else:
                     # Local: mark the (possibly threaded, still-running) attempt
                     # so it observes cancellation at its next heartbeat.

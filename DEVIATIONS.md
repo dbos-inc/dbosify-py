@@ -397,7 +397,9 @@ Operational requirement and current scope:
   the interpreter sets a checkpointed cancel event on its run; the activity's
   attempt step polls that event on the other worker and delivers cancellation
   into the running activity (its `except`/`finally` cleanup runs), then reports
-  the attempt cancelled — a cancelled activity is terminal (never retried).
+  the attempt cancelled — a cancelled activity is terminal (never retried). If the
+  activity has async-parked (raise_complete_async), the interpreter also sends a
+  cancellation marker to its completion topic so the parked wait wakes.
   `TRY_CANCEL` resolves the awaiter immediately; `WAIT_CANCELLATION_COMPLETED`
   resolves it only after the activity confirms its unwind via the result step;
   `ABANDON` leaves the activity running. Like the local path and D12, an async
@@ -412,10 +414,14 @@ Operational requirement and current scope:
 - **`raise_complete_async` parks on the queued path.** The activity workflow
   waits on a dedicated completion topic; the task token carries the activity
   workflow id so an `AsyncActivityHandle` (`complete`/`fail`/`report_cancellation`)
-  delivers there. A fail re-runs the activity per the retry policy; the recv
-  times out against the start-to-close budget.
+  delivers there. A `fail` re-runs the activity per the retry policy; a
+  `heartbeat` is skipped (it is not a completion); the recv times out against the
+  start-to-close budget; and a completion / cancellation sets the gone-event so a
+  later completer raises `AsyncActivityCancelledError` instead of sending into the
+  void.
 - **Remaining gap on the queued path:** cross-process heartbeat-*detail*
   forwarding to the workflow side. The in-activity heartbeat-timeout watchdog and
   cross-attempt `info().heartbeat_details` work on the activity worker; only
-  surfacing live details to the workflow (rare) is absent. Documented rather than
-  silently ignored.
+  surfacing live details to the workflow (rare) is absent — a `heartbeat` to an
+  async-parked activity is accepted but its details are dropped. Documented rather
+  than silently ignored.
