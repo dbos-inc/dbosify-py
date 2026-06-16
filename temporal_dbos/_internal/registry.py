@@ -139,6 +139,17 @@ def add_worker_failure_exception_types(
     worker_failure_exception_types = tuple(merged)
 
 
+# Worker-level activity interceptors (Worker(interceptors=...)). The activity
+# attempt step (activities.py) folds these around each attempt (DESIGN §6.8).
+# Set (not merged): one Worker per process owns the interceptor list.
+worker_interceptors: Tuple[Any, ...] = ()
+
+
+def set_worker_interceptors(interceptors: Sequence[Any]) -> None:
+    global worker_interceptors
+    worker_interceptors = tuple(interceptors)
+
+
 def workflow_definition_of(cls: Type[Any]) -> WorkflowDefinition:
     defn = cls.__dict__.get(WORKFLOW_DEFN_ATTR)
     if defn is None:

@@ -92,6 +92,7 @@ def _reset_for_tests() -> None:
     registry._workflows.clear()
     registry._activities.clear()
     registry.worker_failure_exception_types = ()
+    registry.worker_interceptors = ()
     activities_mod._attempt_steps.clear()
     interpreter._init_step = None
     interpreter._child_result_step = None
@@ -107,6 +108,7 @@ def register_worker(
     workflows: Sequence[Type[Any]] = (),
     activities: Sequence[Callable[..., Any]] = (),
     failure_exception_types: Sequence[Type[BaseException]] = (),
+    interceptors: Sequence[Any] = (),
 ) -> None:
     """Register workflow classes and activity functions with this process.
 
@@ -116,6 +118,7 @@ def register_worker(
     """
     if failure_exception_types:
         registry.add_worker_failure_exception_types(failure_exception_types)
+    registry.set_worker_interceptors(interceptors)
     # The generic schedule-fire dispatcher is process-global (§6.7); register
     # it so this worker can run schedules whose action targets it.
     register_schedule_dispatcher()

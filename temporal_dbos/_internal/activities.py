@@ -21,7 +21,7 @@ from dbos import DBOS
 
 from .. import exceptions
 from ..common import RetryPolicy
-from . import inbox, registry
+from . import activity_interceptor, inbox, registry
 from .payloads import FailureEnvelope, serialize_failure
 
 AttemptStep = Callable[
@@ -100,6 +100,48 @@ def retry_decision(
     return delay, exceptions.RetryState.IN_PROGRESS
 
 
+class _RootActivityInbound(activity_interceptor.ActivityInboundInterceptor):
+    """Root of the activity inbound chain: actually invokes the user function.
+
+    Built fresh per attempt. ``init`` installs the (possibly interceptor-
+    wrapped) outbound on the activity context so ``activity.info()`` /
+    ``activity.heartbeat()`` route through it.
+    """
+
+    def __init__(self, ctx: Any, is_async: bool) -> None:
+        # Intentionally not calling super().__init__: this is the chain root,
+        # there is no ``next`` to delegate to.
+        self._ctx = ctx
+        self._is_async = is_async
+
+    def init(self, outbound: activity_interceptor.ActivityOutboundInterceptor) -> None:
+        self._ctx.outbound = outbound
+
+    async def execute_activity(
+        self, input: activity_interceptor.ExecuteActivityInput
+    ) -> Any:
+        if self._is_async:
+            return await input.fn(*input.args)
+        return await asyncio.to_thread(input.fn, *input.args)
+
+
+class _RootActivityOutbound(activity_interceptor.ActivityOutboundInterceptor):
+    """Root of the activity outbound chain: the un-intercepted
+    ``info()``/``heartbeat()`` behavior (defined in ``activity.py``)."""
+
+    def __init__(self, ctx: Any) -> None:
+        # Chain root; no ``next``.
+        self._ctx = ctx
+
+    def info(self) -> Any:
+        return self._ctx.info
+
+    def heartbeat(self, *details: Any) -> None:
+        from .. import activity as activity_api
+
+        activity_api._root_heartbeat(self._ctx, *details)
+
+
 def _make_attempt_step(activity_name: str) -> AttemptStep:
     async def attempt(
         args: List[Any], start_to_close: Optional[float], meta: Dict[str, Any]
@@ -143,10 +185,22 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             activity_api._register_attempt(attempt_key, ctx)
             token = activity_api._current_context.set(ctx)
             try:
-                if defn.is_async:
-                    result = await defn.fn(*decoded_args)
-                else:
-                    result = await asyncio.to_thread(defn.fn, *decoded_args)
+                # Build the activity interceptor chain for this attempt
+                # (DESIGN §6.8): inbound interceptors wrap the invocation,
+                # outbound wraps activity.info()/heartbeat() (installed via
+                # init()). With no configured interceptors this is just the
+                # root, preserving the prior dispatch exactly.
+                impl: activity_interceptor.ActivityInboundInterceptor = (
+                    _RootActivityInbound(ctx, defn.is_async)
+                )
+                for interceptor in reversed(registry.worker_interceptors):
+                    impl = interceptor.intercept_activity(impl)
+                impl.init(_RootActivityOutbound(ctx))
+                result = await impl.execute_activity(
+                    activity_interceptor.ExecuteActivityInput(
+                        fn=defn.fn, args=decoded_args, executor=None, headers={}
+                    )
+                )
             except Exception as err:  # noqa: BLE001 — serialized, not swallowed
                 return {
                     "ok": False,

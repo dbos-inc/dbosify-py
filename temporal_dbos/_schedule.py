@@ -39,6 +39,15 @@ from typing import (
 from ._internal import conversion
 from ._internal import registry as _registry
 from ._internal import schedules as _schedules
+from ._internal.client_interceptor import (
+    BackfillScheduleInput,
+    DeleteScheduleInput,
+    DescribeScheduleInput,
+    PauseScheduleInput,
+    TriggerScheduleInput,
+    UnpauseScheduleInput,
+    UpdateScheduleInput,
+)
 from ._internal.payloads import serialize_retry_policy
 from .common import RetryPolicy
 
@@ -426,6 +435,13 @@ class ScheduleHandle:
         rpc_timeout: Optional[timedelta] = None,
     ) -> ScheduleDescription:
         """Fetch this schedule's description."""
+        return await self._client._impl.describe_schedule(
+            DescribeScheduleInput(
+                id=self.id, rpc_metadata=rpc_metadata, rpc_timeout=rpc_timeout
+            )
+        )
+
+    async def _describe_impl(self, input: DescribeScheduleInput) -> ScheduleDescription:
         row = await self._client._dbos_client.get_schedule_async(self.id)
         if row is None:
             raise RuntimeError(f"Schedule {self.id!r} not found")
@@ -444,8 +460,18 @@ class ScheduleHandle:
         """Update this schedule. The ``updater`` (sync or async) receives the
         current description and returns the new ``ScheduleUpdate`` (or ``None``
         to skip). Implemented as delete-then-recreate (DEVIATIONS D22)."""
+        await self._client._impl.update_schedule(
+            UpdateScheduleInput(
+                id=self.id,
+                updater=updater,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _update_impl(self, input: UpdateScheduleInput) -> None:
         desc = await self.describe()
-        outcome = updater(ScheduleUpdateInput(description=desc))
+        outcome = input.updater(ScheduleUpdateInput(description=desc))
         if inspect.isawaitable(outcome):
             outcome = await outcome
         if outcome is None:
@@ -461,6 +487,16 @@ class ScheduleHandle:
     ) -> None:
         """Pause this schedule (DBOS ``pause_schedule``). ``note`` is accepted
         but not persisted (DEVIATIONS D22)."""
+        await self._client._impl.pause_schedule(
+            PauseScheduleInput(
+                id=self.id,
+                note=note,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _pause_impl(self, input: PauseScheduleInput) -> None:
         await asyncio.to_thread(self._client._dbos_client.pause_schedule, self.id)
 
     async def unpause(
@@ -472,6 +508,16 @@ class ScheduleHandle:
     ) -> None:
         """Unpause this schedule (DBOS ``resume_schedule``). ``note`` is accepted
         but not persisted (DEVIATIONS D22)."""
+        await self._client._impl.unpause_schedule(
+            UnpauseScheduleInput(
+                id=self.id,
+                note=note,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _unpause_impl(self, input: UnpauseScheduleInput) -> None:
         await asyncio.to_thread(self._client._dbos_client.resume_schedule, self.id)
 
     async def trigger(
@@ -484,7 +530,17 @@ class ScheduleHandle:
         """Trigger an immediate action on this schedule. The action runs under
         the schedule's configured overlap policy; a per-call ``overlap`` override
         is accepted only as ``ALLOW_ALL`` (others raise — DEVIATIONS D22)."""
-        require_overlap_override_supported(overlap)
+        await self._client._impl.trigger_schedule(
+            TriggerScheduleInput(
+                id=self.id,
+                overlap=overlap,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _trigger_impl(self, input: TriggerScheduleInput) -> None:
+        require_overlap_override_supported(input.overlap)
         await asyncio.to_thread(self._client._dbos_client.trigger_schedule, self.id)
 
     async def backfill(
@@ -497,11 +553,21 @@ class ScheduleHandle:
         run under the schedule's configured overlap policy; a per-backfill
         ``overlap`` override is accepted only as ``ALLOW_ALL`` (others raise —
         DEVIATIONS D22)."""
-        if not backfill:
+        await self._client._impl.backfill_schedule(
+            BackfillScheduleInput(
+                id=self.id,
+                backfills=list(backfill),
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _backfill_impl(self, input: BackfillScheduleInput) -> None:
+        if not input.backfills:
             raise ValueError("At least one backfill required")
-        for b in backfill:
+        for b in input.backfills:
             require_overlap_override_supported(b.overlap)
-        for b in backfill:
+        for b in input.backfills:
             await asyncio.to_thread(
                 self._client._dbos_client.backfill_schedule,
                 self.id,
@@ -516,6 +582,13 @@ class ScheduleHandle:
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
         """Delete this schedule."""
+        await self._client._impl.delete_schedule(
+            DeleteScheduleInput(
+                id=self.id, rpc_metadata=rpc_metadata, rpc_timeout=rpc_timeout
+            )
+        )
+
+    async def _delete_impl(self, input: DeleteScheduleInput) -> None:
         await self._client._dbos_client.delete_schedule_async(self.id)
 
 

@@ -69,6 +69,30 @@ from ._schedule import (  # noqa: E402
     ScheduleUpdate,
     ScheduleUpdateInput,
 )
+from ._internal.client_interceptor import (
+    BackfillScheduleInput,
+    CancelWorkflowInput,
+    CompleteAsyncActivityInput,
+    CreateScheduleInput,
+    DeleteScheduleInput,
+    DescribeScheduleInput,
+    DescribeWorkflowInput,
+    FailAsyncActivityInput,
+    HeartbeatAsyncActivityInput,
+    Interceptor,
+    ListSchedulesInput,
+    OutboundInterceptor,
+    PauseScheduleInput,
+    QueryWorkflowInput,
+    ReportCancellationAsyncActivityInput,
+    SignalWorkflowInput,
+    StartWorkflowInput,
+    StartWorkflowUpdateInput,
+    TerminateWorkflowInput,
+    TriggerScheduleInput,
+    UnpauseScheduleInput,
+    UpdateScheduleInput,
+)
 from .common import (
     QueryRejectCondition,
     RetryPolicy,
@@ -86,7 +110,29 @@ REPLY_SWEEP_INTERVAL_SECONDS = 1.0
 __all__ = [
     "AsyncActivityCancelledError",
     "AsyncActivityHandle",
+    "BackfillScheduleInput",
+    "CancelWorkflowInput",
     "Client",
+    "CompleteAsyncActivityInput",
+    "CreateScheduleInput",
+    "DeleteScheduleInput",
+    "DescribeScheduleInput",
+    "DescribeWorkflowInput",
+    "FailAsyncActivityInput",
+    "HeartbeatAsyncActivityInput",
+    "Interceptor",
+    "ListSchedulesInput",
+    "OutboundInterceptor",
+    "PauseScheduleInput",
+    "QueryWorkflowInput",
+    "ReportCancellationAsyncActivityInput",
+    "SignalWorkflowInput",
+    "StartWorkflowInput",
+    "StartWorkflowUpdateInput",
+    "TerminateWorkflowInput",
+    "TriggerScheduleInput",
+    "UnpauseScheduleInput",
+    "UpdateScheduleInput",
     "Schedule",
     "ScheduleAction",
     "ScheduleActionExecution",
@@ -281,6 +327,9 @@ class AsyncActivityHandle:
 
     def __init__(self, client: "Client", id_or_token: Any) -> None:
         self._client = client
+        # The original addressing argument, re-used to rebuild this handle at
+        # the root of the outbound chain (DESIGN §6.8).
+        self._id_or_token = id_or_token
         self._workflow_id: Optional[str] = None
         self._run_id: Optional[str] = None
         # On the queued path (§6.1.2) the completion goes to the activity
@@ -343,10 +392,19 @@ class AsyncActivityHandle:
     ) -> None:
         """Complete the activity with a result."""
         _ignore_rpc_options("async activity complete", rpc_metadata, rpc_timeout)
-        value = None if result is _arg_unset else result
+        await self._client._impl.complete_async_activity(
+            CompleteAsyncActivityInput(
+                id_or_token=self._id_or_token,
+                result=None if result is _arg_unset else result,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _complete_impl(self, input: CompleteAsyncActivityInput) -> None:
         await self._send(
             inbox.activity_result_envelope(
-                self._activity_id, result=await conversion.encode_value(value)
+                self._activity_id, result=await conversion.encode_value(input.result)
             )
         )
 
@@ -362,9 +420,20 @@ class AsyncActivityHandle:
         retryable failure schedules another attempt, re-running the
         function)."""
         _ignore_rpc_options("async activity fail", rpc_metadata, rpc_timeout)
+        await self._client._impl.fail_async_activity(
+            FailAsyncActivityInput(
+                id_or_token=self._id_or_token,
+                error=error,
+                last_heartbeat_details=last_heartbeat_details,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _fail_impl(self, input: FailAsyncActivityInput) -> None:
         await self._send(
             inbox.activity_result_envelope(
-                self._activity_id, failure=serialize_failure(error)
+                self._activity_id, failure=serialize_failure(input.error)
             )
         )
 
@@ -376,9 +445,20 @@ class AsyncActivityHandle:
     ) -> None:
         """Send a heartbeat for the activity."""
         _ignore_rpc_options("async activity heartbeat", rpc_metadata, rpc_timeout)
+        await self._client._impl.heartbeat_async_activity(
+            HeartbeatAsyncActivityInput(
+                id_or_token=self._id_or_token,
+                details=details,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _heartbeat_impl(self, input: HeartbeatAsyncActivityInput) -> None:
         await self._send(
             inbox.activity_heartbeat_envelope(
-                self._activity_id, await conversion.encode_values(list(details))
+                self._activity_id,
+                await conversion.encode_values(list(input.details)),
             )
         )
 
@@ -396,6 +476,18 @@ class AsyncActivityHandle:
         _ignore_rpc_options(
             "async activity report_cancellation", rpc_metadata, rpc_timeout
         )
+        await self._client._impl.report_cancellation_async_activity(
+            ReportCancellationAsyncActivityInput(
+                id_or_token=self._id_or_token,
+                details=details,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _report_cancellation_impl(
+        self, input: ReportCancellationAsyncActivityInput
+    ) -> None:
         topic = (
             inbox.ASYNC_COMPLETE_TOPIC
             if self._queued_wf is not None
@@ -624,11 +716,20 @@ class Client:
         dbos_client: DBOSClient,
         *,
         data_converter: DataConverter = DataConverter.default,
+        interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
         self._dbos_client = dbos_client
         self._data_converter = data_converter
         self._default_query_reject_condition = default_workflow_query_reject_condition
+        # Build the outbound interceptor chain: user interceptors fold (in
+        # reverse) over the root that performs the actual DBOS operations
+        # (DESIGN §6.8). Public verbs/handles build the matching *Input and
+        # call ``self._impl.<verb>(input)``.
+        impl: OutboundInterceptor = _ClientOutbound(self)
+        for interceptor in reversed(interceptors):
+            impl = interceptor.intercept_client(impl)
+        self._impl = impl
         # This process encodes start args / decodes results with this
         # converter (a separate worker process decodes args / encodes results
         # with its own — configure both the same, as in Temporal).
@@ -646,12 +747,14 @@ class Client:
         dbos_client: DBOSClient,
         *,
         data_converter: DataConverter = DataConverter.default,
+        interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
         """Create a client from a ``dbos.DBOSClient``."""
         return cls(
             dbos_client,
             data_converter=data_converter,
+            interceptors=interceptors,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
         )
 
@@ -714,13 +817,61 @@ class Client:
             if value is not None:
                 logger.debug("start_workflow: ignoring unsupported option %r", key)
 
+        input = StartWorkflowInput(
+            workflow=_workflow_type_name(workflow),
+            args=_resolve_args(arg, args),
+            id=id,
+            task_queue=task_queue,
+            execution_timeout=execution_timeout,
+            run_timeout=run_timeout,
+            task_timeout=task_timeout,
+            id_reuse_policy=id_reuse_policy,
+            id_conflict_policy=id_conflict_policy,
+            retry_policy=retry_policy,
+            cron_schedule=cron_schedule,
+            memo=memo,
+            search_attributes=search_attributes,
+            start_delay=start_delay,
+            headers={},
+            start_signal=start_signal,
+            start_signal_args=start_signal_args,
+            static_summary=static_summary,
+            static_details=static_details,
+            ret_type=_result_type_for(workflow, result_type),
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+            request_eager_start=request_eager_start,
+            priority=priority,
+            callbacks=[],
+            links=[],
+            request_id=request_id,
+            versioning_override=None,
+        )
+        return await self._impl.start_workflow(input)
+
+    async def _start_workflow_impl(
+        self, input: StartWorkflowInput
+    ) -> "WorkflowHandle":
+        """Root of the ``start_workflow`` outbound chain (DESIGN §6.8): the
+        actual enqueue, reading the (possibly interceptor-modified) input."""
+        workflow_args = input.args
+        type_name = input.workflow
+        result_type = input.ret_type
+        id = input.id
+        task_queue = input.task_queue
+        run_timeout = input.run_timeout
+        retry_policy = input.retry_policy
+        cron_schedule = input.cron_schedule
+        id_conflict_policy = input.id_conflict_policy
+        id_reuse_policy = input.id_reuse_policy
+        start_delay = input.start_delay
+        start_signal = input.start_signal
+        start_signal_args = input.start_signal_args
+
         if not task_queue or not isinstance(task_queue, str):
             # Without this, a None/empty queue name would enqueue a workflow
             # no worker can ever dequeue — a silent black hole.
             raise ValueError("task_queue must be a non-empty string")
-        type_name = _workflow_type_name(workflow)
-        result_type = _result_type_for(workflow, result_type)
-        workflow_args = _resolve_args(arg, args)
         ids.validate_workflow_id(id)
         if start_delay is not None and start_delay < timedelta(0):
             # Matching temporalio's client-side check.
@@ -1037,14 +1188,30 @@ class Client:
         if memo is not None or search_attributes is not None:
             logger.debug("create_schedule: ignoring unsupported memo/search_attributes")
         _ignore_rpc_options("create_schedule", rpc_metadata, rpc_timeout)
+        return await self._impl.create_schedule(
+            CreateScheduleInput(
+                id=id,
+                schedule=schedule,
+                trigger_immediately=trigger_immediately,
+                backfill=backfill,
+                memo=memo,
+                search_attributes=search_attributes,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _create_schedule_impl(
+        self, input: CreateScheduleInput
+    ) -> ScheduleHandle:
         await _schedule.create_schedule_row(
             self,
-            id,
-            schedule,
-            trigger_immediately=trigger_immediately,
-            backfill=backfill,
+            input.id,
+            input.schedule,
+            trigger_immediately=input.trigger_immediately,
+            backfill=input.backfill,
         )
-        return ScheduleHandle(self, id)
+        return ScheduleHandle(self, input.id)
 
     def get_schedule_handle(self, id: str) -> ScheduleHandle:
         """Get a handle for a schedule by id (does not verify existence)."""
@@ -1064,6 +1231,19 @@ class Client:
         if query is not None:
             logger.debug("list_schedules: ignoring unsupported query filter")
         _ignore_rpc_options("list_schedules", rpc_metadata, rpc_timeout)
+        return await self._impl.list_schedules(
+            ListSchedulesInput(
+                page_size=page_size,
+                next_page_token=next_page_token,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                query=query,
+            )
+        )
+
+    async def _list_schedules_impl(
+        self, input: ListSchedulesInput
+    ) -> ScheduleAsyncIterator:
         rows = await self._dbos_client.list_schedules_async()
         page = [
             _schedule._list_description_from_row(row)
@@ -1295,10 +1475,23 @@ class WorkflowHandle:
     ) -> None:
         """Send a signal to the workflow."""
         _ignore_rpc_options("signal", rpc_metadata, None)
-        encoded = await conversion.encode_values(_resolve_args(arg, args))
+        await self._client._impl.signal_workflow(
+            SignalWorkflowInput(
+                id=self._id,
+                run_id=self._run_id,
+                signal=_signal_name(signal),
+                args=_resolve_args(arg, args),
+                headers={},
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _signal_impl(self, input: SignalWorkflowInput) -> None:
+        encoded = await conversion.encode_values(input.args)
         await self._client._dbos_client.send_async(
             await self._target(),
-            inbox.signal_envelope(_signal_name(signal), encoded),
+            inbox.signal_envelope(input.signal, encoded),
             inbox.INBOX_TOPIC,
         )
 
@@ -1318,7 +1511,22 @@ class WorkflowHandle:
         matches ``reject_condition`` (or the client default).
         """
         _ignore_rpc_options("query", rpc_metadata, None)
-        condition = reject_condition or self._client._default_query_reject_condition
+        return await self._client._impl.query_workflow(
+            QueryWorkflowInput(
+                id=self._id,
+                run_id=self._run_id,
+                query=_query_name(query),
+                args=_resolve_args(arg, args),
+                reject_condition=reject_condition,
+                headers={},
+                ret_type=_ref_ret_type(query, result_type),
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _query_impl(self, input: QueryWorkflowInput) -> Any:
+        condition = input.reject_condition or self._client._default_query_reject_condition
         if condition is not None and condition != QueryRejectCondition.NONE:
             # Client-side check (no server arbiter — DEVIATIONS D7 family):
             # the status read and the query send are not atomic.
@@ -1333,12 +1541,12 @@ class WorkflowHandle:
         request_id = str(uuid_mod.uuid4())
         client = self._client._dbos_client
         target = await self._target()
-        timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
+        timeout = input.rpc_timeout.total_seconds() if input.rpc_timeout else 60.0
         await client.send_async(
             target,
             inbox.query_envelope(
-                _query_name(query),
-                await conversion.encode_values(_resolve_args(arg, args)),
+                input.query,
+                await conversion.encode_values(input.args),
                 request_id,
             ),
             inbox.INBOX_TOPIC,
@@ -1352,9 +1560,7 @@ class WorkflowHandle:
                 "require a RUNNING workflow; see README deviations)"
             )
         if reply["status"] == "completed":
-            return await conversion.decode_value(
-                reply["result"], _ref_ret_type(query, result_type)
-            )
+            return await conversion.decode_value(reply["result"], input.ret_type)
         raise WorkflowQueryFailedError(str(deserialize_failure(reply["failure"])))
 
     async def start_update(
@@ -1374,20 +1580,39 @@ class WorkflowHandle:
         :py:class:`WorkflowUpdateFailedError` if the update is rejected.
         """
         _ignore_rpc_options("start_update", rpc_metadata, None)
-        if wait_for_stage not in (
+        return await self._client._impl.start_workflow_update(
+            StartWorkflowUpdateInput(
+                id=self._id,
+                run_id=self._run_id,
+                first_execution_run_id=self._first_execution_run_id,
+                update_id=id,
+                update=_update_name(update),
+                args=_resolve_args(arg, args),
+                wait_for_stage=wait_for_stage,
+                headers={},
+                ret_type=_ref_ret_type(update, result_type),
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _start_update_impl(
+        self, input: StartWorkflowUpdateInput
+    ) -> WorkflowUpdateHandle:
+        if input.wait_for_stage not in (
             WorkflowUpdateStage.ACCEPTED,
             WorkflowUpdateStage.COMPLETED,
         ):
             raise ValueError("Admitted wait stage not supported")
-        update_id = id or str(uuid_mod.uuid4())
+        update_id = input.update_id or str(uuid_mod.uuid4())
         client = self._client._dbos_client
         target = await self._target()
-        timeout = rpc_timeout.total_seconds() if rpc_timeout else 60.0
+        timeout = input.rpc_timeout.total_seconds() if input.rpc_timeout else 60.0
         await client.send_async(
             target,
             inbox.update_envelope(
-                _update_name(update),
-                await conversion.encode_values(_resolve_args(arg, args)),
+                input.update,
+                await conversion.encode_values(input.args),
                 update_id,
             ),
             inbox.INBOX_TOPIC,
@@ -1398,9 +1623,9 @@ class WorkflowHandle:
             update_id,
             self._id,
             workflow_run_id=target,
-            result_type=_ref_ret_type(update, result_type),
+            result_type=input.ret_type,
         )
-        if wait_for_stage == WorkflowUpdateStage.ACCEPTED:
+        if input.wait_for_stage == WorkflowUpdateStage.ACCEPTED:
             acceptance = await self._client._await_reply_event(
                 self._id, target, inbox.update_acceptance_key(update_id), timeout
             )
@@ -1487,6 +1712,18 @@ class WorkflowHandle:
         """Get the current description of this workflow's latest (or bound)
         run."""
         _ignore_rpc_options("describe", rpc_metadata, rpc_timeout)
+        return await self._client._impl.describe_workflow(
+            DescribeWorkflowInput(
+                id=self._id,
+                run_id=self._run_id,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _describe_impl(
+        self, input: DescribeWorkflowInput
+    ) -> WorkflowExecutionDescription:
         dbos_id = await self._target()
         status = await self._client._status_of(dbos_id)
         workflow_type = status.name or ""
@@ -1527,6 +1764,18 @@ class WorkflowHandle:
         client-side, so a tiny race window remains (D7 family).
         """
         _ignore_rpc_options("cancel", rpc_metadata, rpc_timeout)
+        await self._client._impl.cancel_workflow(
+            CancelWorkflowInput(
+                id=self._id,
+                run_id=self._run_id,
+                first_execution_run_id=self._first_execution_run_id,
+                reason=reason,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _cancel_impl(self, input: CancelWorkflowInput) -> None:
         target = await self._target()
         status = await self._client._status_of(target)
         mapped = _status.to_execution_status(status.status, error=status.error)
@@ -1535,7 +1784,7 @@ class WorkflowHandle:
                 f"Workflow run already closed: {target!r} ({mapped.name})"
             )
         await self._client._dbos_client.send_async(
-            target, inbox.cancel_envelope(reason), inbox.INBOX_TOPIC
+            target, inbox.cancel_envelope(input.reason), inbox.INBOX_TOPIC
         )
 
     async def terminate(
@@ -1550,7 +1799,20 @@ class WorkflowHandle:
         are accepted but not stored (DBOS cancellation has no reason field).
         """
         _ignore_rpc_options("terminate", rpc_metadata, rpc_timeout)
-        if args or reason:
+        await self._client._impl.terminate_workflow(
+            TerminateWorkflowInput(
+                id=self._id,
+                run_id=self._run_id,
+                first_execution_run_id=self._first_execution_run_id,
+                args=list(args),
+                reason=reason,
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+            )
+        )
+
+    async def _terminate_impl(self, input: TerminateWorkflowInput) -> None:
+        if input.args or input.reason:
             logger.debug("terminate: reason/details are not stored")
         target = await self._target()
         # Terminate must land on a LIVE run. Two hazards (Temporal's server
@@ -1596,3 +1858,113 @@ class WorkflowHandle:
         raise RuntimeError(
             "terminate did not converge: the workflow kept continuing-as-new"
         )
+
+
+class _ClientOutbound(OutboundInterceptor):
+    """Root of the client outbound interceptor chain (DESIGN §6.8): performs
+    the actual DBOS operations, reading the (possibly interceptor-modified)
+    ``*Input``. Verbs whose work lives on a handle reconstruct the handle from
+    the input's identity and call its ``_<verb>_impl``; the rest delegate to
+    the matching ``Client._<verb>_impl``.
+    """
+
+    def __init__(self, client: "Client") -> None:
+        # Chain root: there is no ``next`` to delegate to — every verb is
+        # overridden — so we intentionally do not call super().__init__.
+        self._client = client
+
+    # --- Workflow calls ---
+
+    async def start_workflow(self, input: StartWorkflowInput) -> "WorkflowHandle":
+        return await self._client._start_workflow_impl(input)
+
+    async def cancel_workflow(self, input: CancelWorkflowInput) -> None:
+        await WorkflowHandle(
+            self._client, input.id, run_id=input.run_id
+        )._cancel_impl(input)
+
+    async def describe_workflow(
+        self, input: DescribeWorkflowInput
+    ) -> "WorkflowExecutionDescription":
+        return await WorkflowHandle(
+            self._client, input.id, run_id=input.run_id
+        )._describe_impl(input)
+
+    async def query_workflow(self, input: QueryWorkflowInput) -> Any:
+        return await WorkflowHandle(
+            self._client, input.id, run_id=input.run_id
+        )._query_impl(input)
+
+    async def signal_workflow(self, input: SignalWorkflowInput) -> None:
+        await WorkflowHandle(
+            self._client, input.id, run_id=input.run_id
+        )._signal_impl(input)
+
+    async def terminate_workflow(self, input: TerminateWorkflowInput) -> None:
+        await WorkflowHandle(
+            self._client, input.id, run_id=input.run_id
+        )._terminate_impl(input)
+
+    async def start_workflow_update(
+        self, input: StartWorkflowUpdateInput
+    ) -> "WorkflowUpdateHandle":
+        return await WorkflowHandle(
+            self._client, input.id, run_id=input.run_id
+        )._start_update_impl(input)
+
+    # --- Async activity calls ---
+
+    async def heartbeat_async_activity(
+        self, input: HeartbeatAsyncActivityInput
+    ) -> None:
+        await AsyncActivityHandle(
+            self._client, input.id_or_token
+        )._heartbeat_impl(input)
+
+    async def complete_async_activity(self, input: CompleteAsyncActivityInput) -> None:
+        await AsyncActivityHandle(
+            self._client, input.id_or_token
+        )._complete_impl(input)
+
+    async def fail_async_activity(self, input: FailAsyncActivityInput) -> None:
+        await AsyncActivityHandle(self._client, input.id_or_token)._fail_impl(input)
+
+    async def report_cancellation_async_activity(
+        self, input: ReportCancellationAsyncActivityInput
+    ) -> None:
+        await AsyncActivityHandle(
+            self._client, input.id_or_token
+        )._report_cancellation_impl(input)
+
+    # --- Schedule calls ---
+
+    async def create_schedule(self, input: CreateScheduleInput) -> "ScheduleHandle":
+        return await self._client._create_schedule_impl(input)
+
+    async def list_schedules(
+        self, input: ListSchedulesInput
+    ) -> "ScheduleAsyncIterator":
+        return await self._client._list_schedules_impl(input)
+
+    async def backfill_schedule(self, input: BackfillScheduleInput) -> None:
+        await ScheduleHandle(self._client, input.id)._backfill_impl(input)
+
+    async def delete_schedule(self, input: DeleteScheduleInput) -> None:
+        await ScheduleHandle(self._client, input.id)._delete_impl(input)
+
+    async def describe_schedule(
+        self, input: DescribeScheduleInput
+    ) -> "ScheduleDescription":
+        return await ScheduleHandle(self._client, input.id)._describe_impl(input)
+
+    async def pause_schedule(self, input: PauseScheduleInput) -> None:
+        await ScheduleHandle(self._client, input.id)._pause_impl(input)
+
+    async def trigger_schedule(self, input: TriggerScheduleInput) -> None:
+        await ScheduleHandle(self._client, input.id)._trigger_impl(input)
+
+    async def unpause_schedule(self, input: UnpauseScheduleInput) -> None:
+        await ScheduleHandle(self._client, input.id)._unpause_impl(input)
+
+    async def update_schedule(self, input: UpdateScheduleInput) -> None:
+        await ScheduleHandle(self._client, input.id)._update_impl(input)
