@@ -22,9 +22,11 @@ from datetime import datetime, timedelta
 from enum import IntEnum
 from random import Random
 from typing import (
+    TYPE_CHECKING,
     Any,
     Awaitable,
     Callable,
+    Dict,
     Iterable,
     Iterator,
     List,
@@ -41,6 +43,10 @@ from typing import (
 )
 
 from ._internal import registry as _registry
+
+if TYPE_CHECKING:
+    from ._internal.workflow_interceptor import WorkflowOutboundInterceptor
+    from .converter import PayloadConverter
 from .common import (
     RetryPolicy,
     SearchAttributes,
@@ -82,6 +88,7 @@ __all__ = [
     "memo",
     "memo_value",
     "now",
+    "payload_converter",
     "query",
     "random",
     "run",
@@ -352,18 +359,22 @@ class ExternalWorkflowHandle:
         self, signal: Any, arg: Any = _arg_unset, *, args: Sequence[Any] = []
     ) -> None:
         """Send a signal to the external workflow."""
-        from ._internal import inbox as _inbox
+        from ._internal.workflow_interceptor import SignalExternalWorkflowInput
 
         name = (
             signal
             if isinstance(signal, str)
             else getattr(signal, _registry.SIGNAL_ATTR)
         )
-        await self._runtime.runtime_send_to_workflow(
-            self._run_id or self._id,
-            _inbox.signal_envelope(str(name), _resolve_args(arg, args)),
-            resolve_chain=self._run_id is None,
+        input = SignalExternalWorkflowInput(
+            signal=str(name),
+            args=_resolve_args(arg, args),
+            namespace="default",
+            workflow_id=self._id,
+            workflow_run_id=self._run_id,
+            headers={},
         )
+        await self._runtime.runtime_outbound().signal_external_workflow(input)
 
     async def cancel(self, *, reason: str = "") -> None:
         """Request cooperative cancellation of the external workflow."""
@@ -516,6 +527,9 @@ class _Runtime:
     def runtime_info(self) -> Info:
         raise NotImplementedError
 
+    def runtime_outbound(self) -> "WorkflowOutboundInterceptor":
+        raise NotImplementedError
+
     def runtime_now(self) -> float:
         raise NotImplementedError
 
@@ -575,6 +589,7 @@ class _Runtime:
         result_type: Optional[type] = None,
         task_queue: Optional[str] = None,
         schedule_to_start_timeout: Optional[timedelta] = None,
+        headers: Optional[Mapping[str, Any]] = None,
     ) -> "ActivityHandle":
         raise NotImplementedError
 
@@ -596,6 +611,7 @@ class _Runtime:
         search_attributes: Optional[
             Union[TypedSearchAttributes, SearchAttributes]
         ] = None,
+        headers: Optional[Mapping[str, Any]] = None,
     ) -> "ChildWorkflowHandle":
         raise NotImplementedError
 
@@ -672,21 +688,23 @@ class ChildWorkflowHandle:
         self, signal: Any, arg: Any = _arg_unset, *, args: Sequence[Any] = []
     ) -> None:
         """Send a signal to the child workflow."""
-        from ._internal import inbox as _inbox
+        from ._internal.workflow_interceptor import SignalChildWorkflowInput
 
         name = (
             signal
             if isinstance(signal, str)
             else getattr(signal, _registry.SIGNAL_ATTR)
         )
-        # Resolve the chain: the child may have continued as new, and the
-        # signal must reach its *current* run (replay-safe: the send is
-        # checkpointed, so resolution happens once).
-        await self._runtime.runtime_send_to_workflow(
-            self._id,
-            _inbox.signal_envelope(str(name), _resolve_args(arg, args)),
-            resolve_chain=True,
+        # The outbound root resolves the chain: the child may have continued as
+        # new, and the signal must reach its *current* run (replay-safe: the
+        # send is checkpointed, so resolution happens once).
+        input = SignalChildWorkflowInput(
+            signal=str(name),
+            args=_resolve_args(arg, args),
+            child_workflow_id=self._id,
+            headers={},
         )
+        await self._runtime.runtime_outbound().signal_child_workflow(input)
 
 
 def _runtime() -> _Runtime:
@@ -717,7 +735,19 @@ def in_workflow() -> bool:
 
 def info() -> Info:
     """Current workflow's info."""
-    return _runtime().runtime_info()
+    return _runtime().runtime_outbound().info()
+
+
+def payload_converter() -> "PayloadConverter":
+    """The active payload converter.
+
+    Use it to encode/decode interceptor header values, mirroring temporalio:
+    ``payload_converter().to_payload(value)`` /
+    ``payload_converter().from_payload(header)``.
+    """
+    from ._internal import conversion
+
+    return conversion.get_converter().payload_converter
 
 
 def all_handlers_finished() -> bool:
@@ -906,23 +936,32 @@ def start_activity(
     for key, value in ignored.items():
         if value is not None:
             logger.debug("start_activity: ignoring unsupported parameter %r", key)
-    return _runtime().runtime_start_activity(
-        _resolve_activity_name(activity),
-        _resolve_args(arg, args),
-        schedule_to_close_timeout=schedule_to_close_timeout,
-        start_to_close_timeout=start_to_close_timeout,
-        retry_policy=retry_policy,
+    from ._internal.workflow_interceptor import StartActivityInput
+
+    input = StartActivityInput(
+        activity=_resolve_activity_name(activity),
+        args=_resolve_args(arg, args),
         activity_id=activity_id,
+        task_queue=task_queue,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        heartbeat_timeout=heartbeat_timeout,
+        retry_policy=retry_policy,
         cancellation_type=int(
             cancellation_type
             if cancellation_type is not None
             else ActivityCancellationType.TRY_CANCEL
         ),
-        heartbeat_timeout=heartbeat_timeout,
-        result_type=result_type,
-        task_queue=task_queue,
-        schedule_to_start_timeout=schedule_to_start_timeout,
+        headers={},
+        disable_eager_execution=False,
+        versioning_intent=versioning_intent,
+        summary=summary,
+        priority=priority,
+        arg_types=None,
+        ret_type=result_type,
     )
+    return _runtime().runtime_outbound().start_activity(input)
 
 
 async def execute_activity(
@@ -1103,6 +1142,9 @@ class ContinueAsNewError(BaseException):
         self._tdb_search_attributes: Optional[
             Union[TypedSearchAttributes, SearchAttributes]
         ] = None
+        # Interceptor headers for the new run, in wire form (set by the outbound
+        # chain root); the chain's carried headers are dropped unless re-injected.
+        self._tdb_headers: Optional[Dict[str, Any]] = None
 
 
 def continue_as_new(
@@ -1131,21 +1173,27 @@ def continue_as_new(
         if value is not None:
             logger.debug("continue_as_new: ignoring unsupported parameter %r", key)
     _warn_on_deprecated_search_attributes(search_attributes)
-    _runtime()  # must be called from workflow code
-    err = ContinueAsNewError("Workflow continued as new")
-    err._tdb_args = _resolve_args(arg, args)
-    err._tdb_workflow = (
-        _resolve_workflow_type(workflow) if workflow is not None else None
-    )
-    err._tdb_task_queue = task_queue
-    # Overrides for the new run; absent, the chain's carried values apply.
-    err._tdb_run_timeout = run_timeout
     if retry_policy is not None:
         retry_policy._validate()
-    err._tdb_retry_policy = retry_policy
-    err._tdb_memo = memo
-    err._tdb_search_attributes = search_attributes
-    raise err
+    from ._internal.workflow_interceptor import ContinueAsNewInput
+
+    input = ContinueAsNewInput(
+        workflow=_resolve_workflow_type(workflow) if workflow is not None else None,
+        args=_resolve_args(arg, args),
+        task_queue=task_queue,
+        # Overrides for the new run; absent, the chain's carried values apply.
+        run_timeout=run_timeout,
+        task_timeout=task_timeout,
+        retry_policy=retry_policy,
+        memo=memo,
+        search_attributes=search_attributes,
+        headers={},
+        versioning_intent=versioning_intent,
+        initial_versioning_behavior=initial_versioning_behavior,
+        arg_types=None,
+    )
+    # Routes through the outbound chain and raises ContinueAsNewError (NoReturn).
+    _runtime().runtime_outbound().continue_as_new(input)
 
 
 def _resolve_workflow_type(workflow: Any) -> str:
@@ -1209,16 +1257,40 @@ async def start_child_workflow(
         if value is not None:
             logger.debug("start_child_workflow: ignoring unsupported option %r", key)
     _warn_on_deprecated_search_attributes(search_attributes)
-    return await _runtime().runtime_start_child_workflow(
-        _resolve_workflow_type(workflow),
-        _resolve_args(arg, args),
-        child_id=id,
+    from ._internal import ids as _ids
+    from ._internal.workflow_interceptor import StartChildWorkflowInput
+
+    # An explicitly-provided id is validated here (an empty/invalid id is a
+    # caller bug — matching client start_workflow); a None id stays auto (the
+    # interpreter derives ``{parent}_{seq}``, README deviation #5). The input's
+    # ``id`` is a non-optional str (temporalio parity), so auto is carried as ""
+    # and the outbound root maps "" back to None.
+    if id is not None:
+        _ids.validate_workflow_id(id)
+    input = StartChildWorkflowInput(
+        workflow=_resolve_workflow_type(workflow),
+        args=_resolve_args(arg, args),
+        id=id or "",
         task_queue=task_queue,
-        parent_close_policy=int(parent_close_policy),
-        cancellation_type=int(cancellation_type),
+        cancellation_type=cancellation_type,
+        parent_close_policy=parent_close_policy,
+        execution_timeout=execution_timeout,
+        run_timeout=run_timeout,
+        task_timeout=task_timeout,
+        id_reuse_policy=id_reuse_policy,
+        retry_policy=retry_policy,
+        cron_schedule=cron_schedule,
         memo=memo,
         search_attributes=search_attributes,
+        headers={},
+        versioning_intent=versioning_intent,
+        static_summary=static_summary,
+        static_details=static_details,
+        priority=priority,
+        arg_types=None,
+        ret_type=result_type,
     )
+    return await _runtime().runtime_outbound().start_child_workflow(input)
 
 
 def get_external_workflow_handle(
@@ -1393,20 +1465,28 @@ def start_local_activity(
     }.items():
         if value is not None:
             logger.debug("start_local_activity: ignoring unsupported parameter %r", key)
-    return _runtime().runtime_start_activity(
-        _resolve_activity_name(activity),
-        _resolve_args(arg, args),
+    from ._internal.workflow_interceptor import StartLocalActivityInput
+
+    input = StartLocalActivityInput(
+        activity=_resolve_activity_name(activity),
+        args=_resolve_args(arg, args),
+        activity_id=activity_id,
         schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
         start_to_close_timeout=start_to_close_timeout,
         retry_policy=retry_policy,
-        activity_id=activity_id,
+        local_retry_threshold=local_retry_threshold,
         cancellation_type=int(
             cancellation_type
             if cancellation_type is not None
             else ActivityCancellationType.TRY_CANCEL
         ),
-        result_type=result_type,
+        headers={},
+        summary=summary,
+        arg_types=None,
+        ret_type=result_type,
     )
+    return _runtime().runtime_outbound().start_local_activity(input)
 
 
 async def execute_local_activity(

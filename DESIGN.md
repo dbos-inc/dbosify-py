@@ -639,11 +639,17 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
 - Interceptors (client `Interceptor/OutboundInterceptor`, worker
   `ActivityInbound/Outbound`, `WorkflowInbound/Outbound`): clean fit — wrap dispatcher entry
   points and client verbs with the same `*Input` dataclasses (copy dataclass definitions
-  from the SDK). **Client + activity done** (`Client(interceptors=)`,
-  `Worker(interceptors=)`; the client outbound chain roots in a `_ClientOutbound`, the
-  activity chain is built per attempt in `_internal/activities.py`); workflow in/outbound
-  is Phase 4. No header-propagation channel yet, so `*Input.headers` is inert until then.
-  See [DEVIATIONS.md](DEVIATIONS.md) D24.
+  from the SDK). **Client + activity + workflow done.** Client outbound roots in a
+  `_ClientOutbound`; the activity chain is built per attempt in `_internal/activities.py`;
+  the workflow chains are built per execution in `_internal/interpreter.py`
+  (`_RootWorkflowInbound`/`_RootWorkflowOutbound`, advertised via the worker
+  `Interceptor.workflow_interceptor_class`). Header-based context propagation works
+  end-to-end: a header set at the client (or on a workflow outbound `*Input`) flows into
+  `ExecuteWorkflowInput`/`Handle*Input` and on to activities, children, and signalled
+  workflows, riding the run meta-envelope (`RunMeta.headers`) and inbox envelopes as
+  payload dicts; `workflow.payload_converter()`/`activity.payload_converter()` encode the
+  values. `handle_query`/`handle_update_validator` are driven synchronously (queries are
+  sync, #11). See [DEVIATIONS.md](DEVIATIONS.md) D24.
 
 ### 6.9 Data conversion
 
@@ -819,7 +825,8 @@ PayloadCodec, per-boundary conversion, and the JSON DBOS serializer that replace
 
 **Phase 4 — Ecosystem & polish.** Time-skipping `WorkflowEnvironment`, `Replayer` over
 DBOS step checkpoints (pairs with `fork_workflow`), `patched()`/versioning, workflow
-interceptors, the `temporalio` alias shim + `python -m temporal_dbos run`, perf work
+interceptors (**done**: inbound/outbound + header propagation, DEVIATIONS D24),
+the `temporalio` alias shim + `python -m temporal_dbos run`, perf work
 (micro-checkpoint batching), signature-parity CI (introspect installed `temporalio` as a
 dev-dep and diff public signatures against ours — this test is the API-drift alarm).
 Final accepted-parameter audit: classify every accepted-and-ignored parameter as

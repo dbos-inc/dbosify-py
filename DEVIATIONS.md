@@ -511,29 +511,51 @@ Operational requirement and current scope:
   async-parked activity is accepted but its details are dropped. Documented rather
   than silently ignored.
 
-### D24. Interceptors cover client and activity, not yet workflow
+### D24. Interceptors: client, activity, and workflow
 
-Client and activity interceptors are supported (DESIGN §6.8): pass
-`Worker(interceptors=[...])` (worker `Interceptor` → `ActivityInbound/Outbound`)
-and `Client(interceptors=[...])` (client `Interceptor` → `OutboundInterceptor`).
-The chains are built exactly as temporalio builds them, and the `*Input`
-dataclasses are copied field-for-field from the SDK so signatures match. Scope
-and edges:
+Client, activity, and workflow interceptors are all supported (DESIGN §6.8):
+pass `Worker(interceptors=[...])` (worker `Interceptor` →
+`ActivityInbound/Outbound` and, via `workflow_interceptor_class`,
+`WorkflowInbound/Outbound`) and `Client(interceptors=[...])` (client
+`Interceptor` → `OutboundInterceptor`). The chains are built exactly as
+temporalio builds them — one workflow chain per execution, rooted in the
+real dispatch — and the `*Input` dataclasses are copied field-for-field from
+the SDK so signatures match. Scope and edges:
 
-- **Workflow inbound/outbound interception is Phase 4.** `execute_workflow`,
-  `handle_signal/query/update`, and the workflow-side outbound (`start_activity`,
-  `start_child_workflow`, `continue_as_new`, …) are not intercepted yet, and the
-  worker `Interceptor` therefore omits `workflow_interceptor_class`. Nexus
-  interception is unsupported (corollary of D1).
-- **No header propagation.** temporal_dbos has no header channel through the
-  workflow, so `ExecuteActivityInput.headers` and every client `*Input.headers`
-  field are present (for parity) but always empty, and an interceptor that sets
-  them changes nothing downstream — header-based context propagation (tracing,
-  baggage) lands with workflow interceptors in Phase 4. Likewise
-  `ExecuteActivityInput.executor` is always `None` (sync activities run via
-  `asyncio.to_thread`, not a user executor). Other copied-but-inert `*Input`
-  fields: `callbacks`, `links`, `request_id`, `versioning_override`, `priority`,
-  `rpc_metadata`/`rpc_timeout`, and `data_converter_override`.
+- **Workflow inbound/outbound interception is supported.** Inbound wraps
+  `execute_workflow`, `handle_signal`, `handle_query`, `handle_update_validator`,
+  and `handle_update_handler`; outbound wraps `start_activity`,
+  `start_local_activity`, `start_child_workflow`, `signal_child_workflow`,
+  `signal_external_workflow`, `continue_as_new`, and `info`. `handle_query` and
+  `handle_update_validator` are driven synchronously (queries are sync —
+  DEVIATIONS #11 — so a `handle_query` override must not `await` anything that
+  parks the loop). Nexus interception is unsupported (corollary of D1), so
+  `start_nexus_operation` and the Nexus inbound interceptor are absent.
+- **Header propagation is supported.** A header set on a client `*Input`
+  (`start_workflow`/`signal`/`query`/`start_workflow_update`) reaches the
+  workflow as `ExecuteWorkflowInput.headers` / the matching `Handle*Input.headers`;
+  a header set on a workflow outbound `*Input` propagates to the activity attempt
+  (`ExecuteActivityInput.headers`), the child run (`ExecuteWorkflowInput.headers`),
+  or the signalled workflow (`HandleSignalInput.headers`). Header *values* are
+  `Payload`s at the boundary, as in temporalio — encode/decode them with
+  `workflow.payload_converter()` / `activity.payload_converter()`. Headers do not
+  auto-carry across `continue_as_new` (the outbound interceptor re-injects them,
+  matching Temporal); cancel-of-external is not a header-carrying verb;
+  schedule-started actions begin with empty headers. A configured `PayloadCodec`
+  *is* applied to header values (like args): the outbound interceptor sets raw
+  `Payload`s on synchronous boundaries (`start_activity`), and the codec runs at
+  the same real-loop points args are encoded (command processing, child start,
+  continue-as-new, the client send), so an encrypting codec protects header
+  values at rest.
+- **Other copied-but-inert `*Input` fields.** `ExecuteActivityInput.executor` is
+  always `None` (sync activities run via `asyncio.to_thread`, not a user
+  executor); `WorkflowInterceptorClassInput.unsafe_extern_functions` is inert
+  (no workflow sandbox, D3); and on the workflow outbound inputs
+  `versioning_intent`, `initial_versioning_behavior`, `priority`,
+  `disable_eager_execution`, and `arg_types`/`ret_type` are carried but not acted
+  on. Client `*Input` carries the same inert set as before: `callbacks`, `links`,
+  `request_id`, `versioning_override`, `priority`, `rpc_metadata`/`rpc_timeout`,
+  and `data_converter_override`.
 - **Worker interceptors come only from `Worker(interceptors=)`.** temporalio also
   pulls in client interceptors that subclass the worker `Interceptor`; a
   temporal_dbos Worker takes a `DBOSConfig`, not a client, so there is no client
