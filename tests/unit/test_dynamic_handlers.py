@@ -3,6 +3,8 @@ descriptions (DESIGN §6.1/§6.8). End-to-end dispatch lives in
 tests/integration/test_dynamic_handlers.py; dynamic *workflows* are rejected
 (DEVIATIONS D25)."""
 
+import collections.abc
+import typing
 from typing import Sequence
 
 import pytest
@@ -146,3 +148,52 @@ def test_payload_converter_exposed() -> None:
 
     assert isinstance(workflow.payload_converter(), PayloadConverter)
     assert isinstance(activity.payload_converter(), PayloadConverter)
+
+
+def test_dynamic_handler_accepts_both_sequence_spellings() -> None:
+    # temporalio accepts the dynamic-handler arg typed as either
+    # typing.Sequence[RawValue] or collections.abc.Sequence[RawValue]
+    # (get_type_hints preserves whichever the user wrote, and the two are not
+    # ==). Both must validate.
+    for seq in (typing.Sequence[RawValue], collections.abc.Sequence[RawValue]):
+
+        @workflow.defn
+        class _W:
+            @workflow.signal(dynamic=True)
+            def s(self, name: str, args: seq) -> None: ...  # type: ignore[valid-type]
+
+            @workflow.run
+            async def run(self) -> None: ...
+
+        defn = registry.workflow_definition_of(_W)
+        assert None in defn.signals
+
+
+def test_dynamic_activity_accepts_both_sequence_spellings() -> None:
+    for seq in (typing.Sequence[RawValue], collections.abc.Sequence[RawValue]):
+
+        @activity.defn(dynamic=True)
+        def _a(args: seq) -> str:  # type: ignore[valid-type]
+            return "ok"
+
+        assert registry.activity_definition_of(_a).dynamic is True
+
+
+def test_dynamic_handler_rejects_wrong_sequence_element() -> None:
+    # Sequence of the wrong element type, or a non-Sequence container, is
+    # still rejected (the fix widens the Sequence spelling, not the element).
+    with pytest.raises(RuntimeError, match="Dynamic signal handler"):
+
+        @workflow.defn
+        class _W:
+            @workflow.signal(dynamic=True)
+            def s(self, name: str, args: typing.List[RawValue]) -> None: ...
+
+            @workflow.run
+            async def run(self) -> None: ...
+
+    with pytest.raises(TypeError, match="Dynamic activity"):
+
+        @activity.defn(dynamic=True)
+        def _a(args: Sequence[int]) -> str:
+            return "x"

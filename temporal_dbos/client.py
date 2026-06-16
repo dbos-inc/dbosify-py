@@ -719,18 +719,30 @@ def _result_type_for(workflow: Any, result_type: Optional[type]) -> Optional[typ
 def _signal_name(signal: Any) -> str:
     if isinstance(signal, str):
         return signal
-    name = getattr(signal, _registry.SIGNAL_ATTR, None)
-    if name is None:
+    # A dynamic handler's marker value is None (vs absent for a non-handler):
+    # it has no name, so it can only be addressed by string.
+    if not hasattr(signal, _registry.SIGNAL_ATTR):
         raise TypeError(f"{signal!r} is not a @workflow.signal method or name")
+    name = getattr(signal, _registry.SIGNAL_ATTR)
+    if name is None:
+        raise TypeError(
+            "Cannot reference a dynamic signal handler by method; pass the "
+            "signal name as a string"
+        )
     return str(name)
 
 
 def _query_name(query: Any) -> str:
     if isinstance(query, str):
         return query
-    name = getattr(query, _registry.QUERY_ATTR, None)
-    if name is None:
+    if not hasattr(query, _registry.QUERY_ATTR):
         raise TypeError(f"{query!r} is not a @workflow.query method or name")
+    name = getattr(query, _registry.QUERY_ATTR)
+    if name is None:
+        raise TypeError(
+            "Cannot reference a dynamic query handler by method; pass the "
+            "query name as a string"
+        )
     return str(name)
 
 

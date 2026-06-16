@@ -7,10 +7,23 @@ execution time. Re-registering a name replaces the definition — that is how
 "fix the bug and redeploy" works for in-process workflow-task retries.
 """
 
+import collections.abc
 import inspect
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Type, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    cast,
+    get_args,
+    get_origin,
+)
 
 logger = logging.getLogger("temporal_dbos")
 
@@ -354,19 +367,28 @@ def _duplicate_handler_msg(kind: str, name: Optional[str]) -> str:
     return f"Multiple {kind} methods found for {name!r}"
 
 
-def _raw_value_sequence_type() -> Any:
-    """``Sequence[RawValue]`` — the required final argument of every dynamic
-    handler/activity. Imported lazily to avoid an import cycle with common."""
+def _is_raw_value_sequence(annotation: Any) -> bool:
+    """Whether ``annotation`` is ``Sequence[RawValue]`` — written either as
+    ``typing.Sequence`` or ``collections.abc.Sequence``. temporalio accepts
+    both spellings, and ``get_type_hints`` preserves whichever the user wrote
+    (the two are not ``==``), so match on origin + args rather than identity."""
     from ..common import RawValue
 
-    return Sequence[RawValue]
+    return get_origin(annotation) is collections.abc.Sequence and get_args(
+        annotation
+    ) == (RawValue,)
 
 
 def _validate_dynamic_handler_sig(kind: str, arg_types: Optional[List[type]]) -> None:
     """A dynamic signal/query/update handler must be
     ``(self, name: str, args: Sequence[RawValue])`` (mirroring temporalio's
     new-style dynamic handler)."""
-    if arg_types != [str, _raw_value_sequence_type()]:
+    if (
+        not arg_types
+        or len(arg_types) != 2
+        or arg_types[0] is not str
+        or not _is_raw_value_sequence(arg_types[1])
+    ):
         raise RuntimeError(
             f"Dynamic {kind} handler must accept (self, name: str, "
             "args: Sequence[RawValue])"
@@ -376,5 +398,5 @@ def _validate_dynamic_handler_sig(kind: str, arg_types: Optional[List[type]]) ->
 def validate_dynamic_activity_sig(arg_types: Optional[List[type]]) -> None:
     """A dynamic activity must accept a single ``Sequence[RawValue]``
     (mirroring temporalio)."""
-    if arg_types != [_raw_value_sequence_type()]:
+    if not arg_types or len(arg_types) != 1 or not _is_raw_value_sequence(arg_types[0]):
         raise TypeError("Dynamic activity must accept a single Sequence[RawValue]")

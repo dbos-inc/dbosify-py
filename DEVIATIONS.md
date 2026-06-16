@@ -589,6 +589,21 @@ Dynamic **signal/query/update handlers** and dynamic **activities** work
   a dynamic handler can convert the `RawValue` payloads it receives, e.g.
   `payload_converter().from_payload(arg.payload, MyType)`.
 
+Edges:
+
+- **Handler `description=` is stored but not surfaced.** temporalio exposes it
+  through a `__temporal_workflow_metadata` query (backing `temporal workflow
+  metadata`); temporal-dbos has no such metadata query, so the description is
+  accepted and kept on the definition but never read. Inert metadata, not a
+  behavior change.
+- **A dynamic activity's durable step is named `act:__dynamic__`** (one shared
+  step), while a registered activity's is `act:{type}`. If an *open* workflow's
+  in-flight activity execution spans a redeploy that flips a type between
+  dynamic-fallback and explicit registration, replay presents a different step
+  name at that checkpoint and DBOS raises a step-mismatch error — the same
+  hazard as any step rename across a redeploy of a running workflow. Completed
+  runs and new runs are unaffected.
+
 **Dynamic workflows (`@workflow.defn(dynamic=True)`) are not supported** and
 raise `NotImplementedError`. temporal-dbos registers one DBOS workflow per
 Temporal type (`wf:{type}`, resolved decision DESIGN §10.1) so that native
