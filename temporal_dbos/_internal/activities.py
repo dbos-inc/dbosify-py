@@ -21,7 +21,7 @@ from dbos import DBOS
 
 from .. import exceptions
 from ..common import RetryPolicy
-from . import registry
+from . import inbox, registry
 from .payloads import FailureEnvelope, serialize_failure
 
 AttemptStep = Callable[
@@ -111,6 +111,19 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
         attempt_started_at = time_mod.time()
         attempt_key = (str(meta.get("workflow_run_id", "")), int(meta.get("seq", -1)))
         heartbeat_timeout = meta.get("heartbeat_timeout")
+        # On the queued path the workflow runs in another process, so it can't
+        # set our in-process cancel Event; instead it sets a checkpointed cancel
+        # event on its run that we poll here (§6.1.2). Reads inside this step are
+        # not recorded as workflow steps, so the polling stays replay-safe.
+        queued = bool(meta.get("queued"))
+        cancel_target = str(meta.get("workflow_run_id", ""))
+        cancel_key = inbox.activity_cancel_key(str(meta.get("activity_id", "")))
+
+        async def _cancel_requested() -> bool:
+            from dbos import DBOS
+
+            return bool(await DBOS.get_event_async(cancel_target, cancel_key, 0))
+
         # The activity context (activity.info()/heartbeat()) rides a
         # contextvar; asyncio.to_thread copies the context, so sync
         # activities see it too. Registering the context lets the
@@ -150,7 +163,10 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             }
 
         async def run_attempt() -> Dict[str, Any]:
-            if heartbeat_timeout is None:
+            # A watchdog loop is needed when there's a heartbeat timeout to
+            # enforce, OR on the queued path to poll for cross-process
+            # cancellation. Otherwise run the activity directly.
+            if heartbeat_timeout is None and not queued:
                 return await call_user_activity()
             # Heartbeat-timeout watchdog (Temporal's liveness contract): an
             # attempt that stops heartbeating for longer than the timeout
@@ -159,7 +175,11 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             # unwinds at its next heartbeat — and abandoned, like
             # start-to-close enforcement.
             task = asyncio.ensure_future(call_user_activity())
-            poll = max(0.05, float(heartbeat_timeout) / 4)
+            poll = (
+                max(0.05, float(heartbeat_timeout) / 4)
+                if heartbeat_timeout is not None
+                else 0.25
+            )
             try:
                 return await _watch(task, poll)
             except asyncio.CancelledError:
@@ -172,25 +192,42 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
         async def _watch(
             task: "asyncio.Task[Dict[str, Any]]", poll: float
         ) -> Dict[str, Any]:
-            assert heartbeat_timeout is not None
             while True:
                 done, _ = await asyncio.wait({task}, timeout=poll)
                 if done:
                     return task.result()
-                stale = time_mod.monotonic() - ctx.last_heartbeat_at
-                if stale > float(heartbeat_timeout):
+                if queued and await _cancel_requested():
+                    # Cross-process cancellation: deliver it into the activity
+                    # (its next heartbeat raises; cancelling the task unwinds an
+                    # awaiting async activity now), let its cleanup run, then
+                    # report the attempt as cancelled.
                     ctx.cancelled.set()
                     task.cancel()
-                    hb_timeout = exceptions.TimeoutError(
-                        "activity Heartbeat timeout",
-                        type=exceptions.TimeoutType.HEARTBEAT,
-                        last_heartbeat_details=list(ctx.last_heartbeat),
-                    )
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    cancelled = exceptions.CancelledError("Activity cancelled")
                     return {
                         "ok": False,
-                        "failure": serialize_failure(hb_timeout),
+                        "failure": serialize_failure(cancelled),
                         "ended_at": time_mod.time(),
                     }
+                if heartbeat_timeout is not None:
+                    stale = time_mod.monotonic() - ctx.last_heartbeat_at
+                    if stale > float(heartbeat_timeout):
+                        ctx.cancelled.set()
+                        task.cancel()
+                        hb_timeout = exceptions.TimeoutError(
+                            "activity Heartbeat timeout",
+                            type=exceptions.TimeoutType.HEARTBEAT,
+                            last_heartbeat_details=list(ctx.last_heartbeat),
+                        )
+                        return {
+                            "ok": False,
+                            "failure": serialize_failure(hb_timeout),
+                            "ended_at": time_mod.time(),
+                        }
 
         try:
             # User exceptions (including user-raised TimeoutError) are

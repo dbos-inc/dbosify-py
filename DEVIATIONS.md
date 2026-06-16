@@ -392,11 +392,23 @@ Operational requirement and current scope:
   attempt. Minor deviation: schedule-to-close elapsed is measured from the first
   attempt's start on the activity worker, so the queue-wait before the first
   attempt is not counted toward it.
+- **Cancellation reaches the activity cross-process.** When a queued activity is
+  cancelled (an explicit `handle.cancel()` or propagated workflow cancellation),
+  the interpreter sets a checkpointed cancel event on its run; the activity's
+  attempt step polls that event on the other worker and delivers cancellation
+  into the running activity (its `except`/`finally` cleanup runs), then reports
+  the attempt cancelled — a cancelled activity is terminal (never retried).
+  `TRY_CANCEL` resolves the awaiter immediately; `WAIT_CANCELLATION_COMPLETED`
+  resolves it only after the activity confirms its unwind via the result step;
+  `ABANDON` leaves the activity running. Like the local path and D12, an async
+  activity is cancelled at its next await (more eagerly than Temporal, which
+  delivers only at `heartbeat()`); a sync activity observes it at its next
+  `heartbeat()`.
 - **Not yet honored on the queued path** (all work on the local/same-queue
-  path): cross-process heartbeat-detail delivery to the workflow (the
-  in-activity heartbeat-timeout watchdog and cross-attempt `info().heartbeat_details`
-  still work on the activity worker), cooperative cancellation reaching the
-  running activity (the workflow stops awaiting, but the activity finishes on
-  its worker), `schedule_to_start_timeout`, and `raise_complete_async` (raises a
-  clear `ActivityError` rather than parking). These are staged follow-on work;
-  until then they are documented here rather than silently ignored.
+  path): cross-process heartbeat-*detail* delivery to the workflow (the
+  in-activity heartbeat-timeout watchdog and cross-attempt
+  `info().heartbeat_details` still work on the activity worker — only forwarding
+  details to the workflow side is absent), `schedule_to_start_timeout`, and
+  `raise_complete_async` (raises a clear `ActivityError` rather than parking).
+  These are staged follow-on work; until then they are documented here rather
+  than silently ignored.

@@ -87,6 +87,11 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         if envelope.get("ok") or envelope.get("async_pending"):
             return envelope
         failure = envelope["failure"]
+        if failure.get("cls") == "CancelledError":
+            # Cancellation is terminal — a cancelled activity is never retried
+            # (Temporal semantics). The interpreter resolves the awaiter as
+            # cancelled (and confirms a WAIT_CANCELLATION_COMPLETED unwind).
+            return envelope
         elapsed = float(envelope.get("ended_at", started_at)) - started_at
         delay, retry_state = activities_mod.retry_decision(
             policy,

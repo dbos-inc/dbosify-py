@@ -96,6 +96,14 @@ def async_activity_gone_key(activity_id: str) -> str:
     return f"__tdb_act_{activity_id}_gone"
 
 
+def activity_cancel_key(activity_id: str) -> str:
+    """Event set on the workflow run when a cross-queue activity is cancelled
+    (§6.1.2): the activity's attempt step on the other worker polls it and, when
+    set, delivers cancellation into the running activity. (The local path uses an
+    in-process threading.Event instead — same process, no event needed.)"""
+    return f"__tdb_act_{activity_id}_cancel"
+
+
 def query_envelope(name: str, args: Sequence[Any], request_id: str) -> Envelope:
     return {
         "kind": "query",
