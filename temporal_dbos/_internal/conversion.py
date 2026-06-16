@@ -15,7 +15,17 @@ its args, so the decode side always receives payload dicts.
 import base64
 import inspect
 import json
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, get_type_hints
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    get_type_hints,
+)
 
 from ..converter import DataConverter, Payload
 
@@ -131,6 +141,36 @@ def decode_value_sync(value: Any, type_hint: Optional[type] = None) -> Any:
     payload = _payload_from_dict(value)
     hints = [type_hint] if type_hint is not None else None
     return _active_converter.payload_converter.from_payloads([payload], hints)[0]
+
+
+# ---------------------------------------------------------------------------
+# Headers (interceptor header-propagation channel, DEVIATIONS D24).
+#
+# At the interceptor boundary a header value is a :py:class:`Payload` (as in
+# temporalio — the user encodes/decodes it with ``workflow.payload_converter``/
+# ``activity.payload_converter``). On the wire (run meta, inbox envelopes,
+# activity step meta) it is the same small payload dict every other value uses,
+# so it checkpoints as JSON. No codec runs on header bytes: the user already
+# produced the Payload, so these are pure (sync) shape conversions.
+# ---------------------------------------------------------------------------
+
+
+def encode_headers(headers: Optional[Mapping[str, Payload]]) -> Dict[str, Any]:
+    """Convert boundary headers (str -> Payload) to wire form (str -> payload
+    dict). Empty/None maps to ``{}``."""
+    if not headers:
+        return {}
+    return {
+        key: _payload_to_dict(value, inline_json=True) for key, value in headers.items()
+    }
+
+
+def decode_headers(wire: Optional[Mapping[str, Any]]) -> Dict[str, Payload]:
+    """Convert wire-form headers (str -> payload dict) back to boundary headers
+    (str -> Payload). Empty/None maps to ``{}``."""
+    if not wire:
+        return {}
+    return {key: _payload_from_dict(value) for key, value in wire.items()}
 
 
 def type_hints_from_func(

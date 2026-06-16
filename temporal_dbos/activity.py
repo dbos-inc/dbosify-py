@@ -21,6 +21,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -37,6 +38,9 @@ from typing import (
 from . import exceptions
 from ._internal import registry as _registry
 
+if TYPE_CHECKING:
+    from .converter import PayloadConverter
+
 __all__ = [
     "Info",
     "defn",
@@ -45,9 +49,23 @@ __all__ = [
     "info",
     "is_cancelled",
     "logger",
+    "payload_converter",
     "raise_complete_async",
     "wait_for_cancelled_sync",
 ]
+
+
+def payload_converter() -> "PayloadConverter":
+    """The active payload converter.
+
+    Use it to encode/decode interceptor header values, mirroring temporalio:
+    ``payload_converter().to_payload(value)`` /
+    ``payload_converter().from_payload(header)``.
+    """
+    from ._internal import conversion
+
+    return conversion.get_converter().payload_converter
+
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 

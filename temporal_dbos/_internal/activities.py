@@ -182,6 +182,7 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
             from . import conversion
 
             decoded_args = await conversion.decode_values(args, defn.arg_types)
+            headers = conversion.decode_headers(meta.get("headers"))
             activity_api._register_attempt(attempt_key, ctx)
             token = activity_api._current_context.set(ctx)
             try:
@@ -198,7 +199,7 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
                 impl.init(_RootActivityOutbound(ctx))
                 result = await impl.execute_activity(
                     activity_interceptor.ExecuteActivityInput(
-                        fn=defn.fn, args=decoded_args, executor=None, headers={}
+                        fn=defn.fn, args=decoded_args, executor=None, headers=headers
                     )
                 )
             except Exception as err:  # noqa: BLE001 — serialized, not swallowed

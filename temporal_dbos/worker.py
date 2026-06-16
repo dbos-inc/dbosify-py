@@ -36,13 +36,41 @@ from ._internal.activity_interceptor import (
     Interceptor,
 )
 from ._internal.serializer import TEMPORAL_SERIALIZER
+from ._internal.workflow_interceptor import (
+    ContinueAsNewInput,
+    ExecuteWorkflowInput,
+    HandleQueryInput,
+    HandleSignalInput,
+    HandleUpdateInput,
+    SignalChildWorkflowInput,
+    SignalExternalWorkflowInput,
+    StartActivityInput,
+    StartChildWorkflowInput,
+    StartLocalActivityInput,
+    WorkflowInboundInterceptor,
+    WorkflowInterceptorClassInput,
+    WorkflowOutboundInterceptor,
+)
 from .converter import DataConverter
 
 __all__ = [
     "ActivityInboundInterceptor",
     "ActivityOutboundInterceptor",
+    "ContinueAsNewInput",
     "ExecuteActivityInput",
+    "ExecuteWorkflowInput",
+    "HandleQueryInput",
+    "HandleSignalInput",
+    "HandleUpdateInput",
     "Interceptor",
+    "SignalChildWorkflowInput",
+    "SignalExternalWorkflowInput",
+    "StartActivityInput",
+    "StartChildWorkflowInput",
+    "StartLocalActivityInput",
+    "WorkflowInboundInterceptor",
+    "WorkflowInterceptorClassInput",
+    "WorkflowOutboundInterceptor",
     "Worker",
 ]
 

@@ -976,6 +976,9 @@ class Client:
         # deprecated-dict-form warning is emitted once, at this chokepoint.
         _warn_on_deprecated_search_attributes(search_attributes)
         meta.attributes = await _attributes.encode_attributes(memo, search_attributes)
+        # Interceptor headers (set by a client interceptor's start_workflow) ride
+        # into the run as ExecuteWorkflowInput.headers (DEVIATIONS D24).
+        meta.headers = conversion.encode_headers(input.headers) or None
 
         current = await self._current_run(id)
         run_index = 0
@@ -1037,7 +1040,9 @@ class Client:
             await self._dbos_client.send_async(
                 dbos_id,
                 inbox.signal_envelope(
-                    start_signal, await conversion.encode_values(start_signal_args)
+                    start_signal,
+                    await conversion.encode_values(start_signal_args),
+                    headers=conversion.encode_headers(input.headers),
                 ),
                 inbox.INBOX_TOPIC,
             )
@@ -1559,7 +1564,9 @@ class WorkflowHandle:
         encoded = await conversion.encode_values(input.args)
         await self._client._dbos_client.send_async(
             await self._target(),
-            inbox.signal_envelope(input.signal, encoded),
+            inbox.signal_envelope(
+                input.signal, encoded, headers=conversion.encode_headers(input.headers)
+            ),
             inbox.INBOX_TOPIC,
         )
 
@@ -1621,6 +1628,7 @@ class WorkflowHandle:
                 input.query,
                 await conversion.encode_values(input.args),
                 request_id,
+                headers=conversion.encode_headers(input.headers),
             ),
             inbox.INBOX_TOPIC,
         )
@@ -1687,6 +1695,7 @@ class WorkflowHandle:
                 input.update,
                 await conversion.encode_values(input.args),
                 update_id,
+                headers=conversion.encode_headers(input.headers),
             ),
             inbox.INBOX_TOPIC,
             idempotency_key=update_id,
