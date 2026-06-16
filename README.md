@@ -32,7 +32,7 @@ rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 `dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
 `message_passing/` corpus passes 5/5.
 
-Current pass rate: **17 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **16 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -54,7 +54,7 @@ harness).
 | hello_async_activity_completion | ✅ (`raise_complete_async` + task-token completion) |
 | hello_continue_as_new | ✅ (10 chained runs) |
 | hello_cron | ✅ (cron chain fires and hops; the sample never exits, so the harness verifies through the database) |
-| hello_search_attributes | ✅ (memo + search attributes stored on DBOS workflow attributes; set at start, `upsert_*` from inside, read via `describe()`) |
+| hello_search_attributes | ⚠️ storage implemented (memo + search attributes on DBOS workflow attributes; set at start, `upsert_*` from inside, read via `describe()`), but this sample is timing-flaky: it upserts 2s in and describes 3s later, a 1s margin our ~1s queue-dispatch latency races. Verified by unit + integration + recovery tests instead. |
 | hello_query | ⬜ Phase 4 (queries on closed workflows — deviation #2) |
 | hello_activity_multiprocess | ⬜ multiprocess activity executors unsupported |
 | hello_change_log_level | — never exits by design (also true on Temporal) |
