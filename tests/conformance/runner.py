@@ -94,6 +94,19 @@ def install_shim() -> None:
                 "notification_listener_polling_interval_sec": 0.01,
             }
             original_worker_init(self, config, *args, **kwargs)
+            # Opt-in, ONE sample (hello_search_attributes): it upserts 2s into
+            # the workflow and describes 3s later — a 1s margin that DBOS's ~1s
+            # queue-dispatch latency (the queue worker's first-poll wait) races.
+            # Declaring the queue with a short poll BEFORE launch makes the
+            # worker thread dispatch near-immediately. Gated by env so it
+            # touches ONLY that sample: applied broadly, this in-memory
+            # declaration races the Worker's own post-launch database-backed
+            # registration and breaks the cancellation/terminate-reuse dequeue
+            # path (it regressed message_passing once).
+            if os.environ.get("TDB_CONFORMANCE_FAST_QUEUE"):
+                from dbos import Queue
+
+                Queue(self._task_queue, polling_interval_sec=0.05)
         else:
             original_worker_init(self, first, *args, **kwargs)
 
