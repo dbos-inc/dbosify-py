@@ -925,6 +925,8 @@ class Client:
         start_delay = input.start_delay
         start_signal = input.start_signal
         start_signal_args = input.start_signal_args
+        memo = input.memo
+        search_attributes = input.search_attributes
 
         if not task_queue or not isinstance(task_queue, str):
             # Without this, a None/empty queue name would enqueue a workflow
