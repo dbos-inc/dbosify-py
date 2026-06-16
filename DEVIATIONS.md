@@ -338,12 +338,24 @@ temporalio; these edges differ:
   scheduled action that continues-as-new or retries isn't tracked across the
   hop. `BUFFER_ONE`/`BUFFER_ALL` (durable start-after-completion queueing) raise
   `NotImplementedError` at `create_schedule`.
+- **Per-call overlap override is not applied.** `ScheduleHandle.trigger(overlap=)`
+  and `ScheduleBackfill.overlap` can't be threaded through DBOS's
+  trigger/backfill, so trigger/backfill always run under the schedule's
+  *configured* overlap policy. Only `None` (use the schedule's policy) and
+  `ALLOW_ALL` are accepted; any other per-call override raises
+  `NotImplementedError` rather than being silently ignored.
 - **`update` is delete-then-recreate.** DBOS has no in-place schedule update, so
-  `ScheduleHandle.update` (and a `pause`/`unpause` carrying a `note`) deletes and
-  re-creates the row — which resets `last_fired_at`.
+  `ScheduleHandle.update` deletes and re-creates the row — which resets
+  `last_fired_at`. `pause`/`unpause` use DBOS `pause_schedule`/`resume_schedule`
+  directly and accept a `note` but do **not** persist it (DBOS only flips
+  status; the stored `state.note` is unchanged).
 - **Schedule history/metadata is partial.** `ScheduleInfo.next_action_times` is
   computed from the compiled cron; `recent_actions`/`running_actions`/action
-  counts are empty and `created_at` is synthesized (DBOS does not track schedule
-  history). `memo`/`search_attributes` on a schedule are accepted and ignored;
-  `list_schedules` returns all temporal-dbos schedules (the visibility `query`
-  filter is ignored).
+  counts are empty, `created_at` reflects the row's creation time, and
+  `last_updated_at` is always `None` (DBOS does not track schedule history).
+  A schedule's `memo`/`search_attributes`, and the action's
+  `memo`/`static_summary`/`static_details`/`priority`, are accepted and not
+  stored; the action's `execution_timeout`/`task_timeout` are accepted but not
+  applied (only `run_timeout` maps to a DBOS per-run timeout, as in
+  `start_workflow` — see D-note #14). `list_schedules` returns all temporal-dbos
+  schedules (the visibility `query` filter is ignored).

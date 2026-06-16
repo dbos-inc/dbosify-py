@@ -207,12 +207,13 @@ async def test_pause_and_unpause() -> None:
         await handle.pause(note="paused now")
         desc = await handle.describe()
         assert desc.schedule.state.paused is True
-        assert desc.schedule.state.note == "paused now"
+        # The pause note is accepted but not persisted (D22); the creation note
+        # is unchanged.
+        assert desc.schedule.state.note == "a note"
 
-        await handle.unpause(note="back on")
+        await handle.unpause()
         desc = await handle.describe()
         assert desc.schedule.state.paused is False
-        assert desc.schedule.state.note == "back on"
         await handle.delete()
 
 
@@ -341,6 +342,7 @@ async def test_overlap_terminate_other_terminates_running() -> None:
 
 
 async def test_buffer_overlap_rejected() -> None:
+    # BUFFER_* is unsupported as a schedule policy.
     async with _env() as client:
         with pytest.raises(NotImplementedError):
             await client.create_schedule(
@@ -349,3 +351,16 @@ async def test_buffer_overlap_rejected() -> None:
                     ScheduleOverlapPolicy.BUFFER_ONE, action_id="ov-buffer-wf"
                 ),
             )
+
+
+async def test_trigger_overlap_override_rejected_except_allow_all() -> None:
+    # A per-call overlap override is only accepted as ALLOW_ALL (D22); any other
+    # value raises rather than being silently ignored. ALLOW_ALL is accepted and
+    # the action still fires (under the schedule's configured policy).
+    async with _env() as client:
+        handle = await client.create_schedule("ov-override", _interval_schedule())
+        with pytest.raises(NotImplementedError):
+            await handle.trigger(overlap=ScheduleOverlapPolicy.SKIP)
+        await handle.trigger(overlap=ScheduleOverlapPolicy.ALLOW_ALL)
+        assert await _wait_for_action(client) == "Hello, World!"
+        await handle.delete()

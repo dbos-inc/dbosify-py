@@ -19,6 +19,7 @@ from temporal_dbos._schedule import (
     ScheduleState,
     _schedule_from_context,
     compile_spec,
+    require_overlap_override_supported,
     require_supported_overlap,
     serialize_schedule_context,
 )
@@ -195,6 +196,25 @@ def test_prev_fire_time_grid() -> None:
     before = datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc)
     prev = schedules.prev_fire_time("*/1 * * * *", before)
     assert prev == datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("override", [None, ScheduleOverlapPolicy.ALLOW_ALL])
+def test_overlap_override_allows_none_and_allow_all(override: object) -> None:
+    require_overlap_override_supported(override)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        ScheduleOverlapPolicy.SKIP,
+        ScheduleOverlapPolicy.CANCEL_OTHER,
+        ScheduleOverlapPolicy.TERMINATE_OTHER,
+        ScheduleOverlapPolicy.BUFFER_ONE,
+    ],
+)
+def test_overlap_override_rejects_others(override: ScheduleOverlapPolicy) -> None:
+    with pytest.raises(NotImplementedError):
+        require_overlap_override_supported(override)
 
 
 def test_prev_fire_time_timezone() -> None:

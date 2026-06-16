@@ -459,9 +459,8 @@ class ScheduleHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Pause this schedule."""
-        if note is not None:
-            await _rewrite_note(self._client, self.id, note)
+        """Pause this schedule (DBOS ``pause_schedule``). ``note`` is accepted
+        but not persisted (DEVIATIONS D22)."""
         await asyncio.to_thread(self._client._dbos_client.pause_schedule, self.id)
 
     async def unpause(
@@ -471,9 +470,8 @@ class ScheduleHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Unpause this schedule."""
-        if note is not None:
-            await _rewrite_note(self._client, self.id, note)
+        """Unpause this schedule (DBOS ``resume_schedule``). ``note`` is accepted
+        but not persisted (DEVIATIONS D22)."""
         await asyncio.to_thread(self._client._dbos_client.resume_schedule, self.id)
 
     async def trigger(
@@ -483,8 +481,10 @@ class ScheduleHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Trigger an immediate action on this schedule."""
-        require_supported_overlap(overlap)
+        """Trigger an immediate action on this schedule. The action runs under
+        the schedule's configured overlap policy; a per-call ``overlap`` override
+        is accepted only as ``ALLOW_ALL`` (others raise — DEVIATIONS D22)."""
+        require_overlap_override_supported(overlap)
         await asyncio.to_thread(self._client._dbos_client.trigger_schedule, self.id)
 
     async def backfill(
@@ -493,11 +493,14 @@ class ScheduleHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Backfill this schedule over the given time periods."""
+        """Backfill this schedule over the given time periods. Backfilled actions
+        run under the schedule's configured overlap policy; a per-backfill
+        ``overlap`` override is accepted only as ``ALLOW_ALL`` (others raise —
+        DEVIATIONS D22)."""
         if not backfill:
             raise ValueError("At least one backfill required")
         for b in backfill:
-            require_supported_overlap(b.overlap)
+            require_overlap_override_supported(b.overlap)
         for b in backfill:
             await asyncio.to_thread(
                 self._client._dbos_client.backfill_schedule,
@@ -813,6 +816,23 @@ def require_supported_overlap(overlap: Optional[ScheduleOverlapPolicy]) -> None:
         )
 
 
+def require_overlap_override_supported(
+    overlap: Optional[ScheduleOverlapPolicy],
+) -> None:
+    """Reject a per-call (trigger/backfill) overlap override we don't honor
+    (DEVIATIONS D22). A per-call override can't be threaded through DBOS's
+    trigger/backfill, so only ``None`` (use the schedule's configured policy)
+    and ``ALLOW_ALL`` (the least-restrictive, no-op case) are accepted; any
+    other value raises rather than being silently ignored."""
+    if overlap is not None and overlap != ScheduleOverlapPolicy.ALLOW_ALL:
+        raise NotImplementedError(
+            "temporal-dbos does not honor a per-call ScheduleOverlapPolicy "
+            f"override of {overlap!r} on trigger/backfill (DEVIATIONS D22); the "
+            "schedule's configured overlap policy applies. Only None or "
+            "ALLOW_ALL are accepted."
+        )
+
+
 async def create_schedule_row(
     client: "Client",
     id: str,
@@ -828,7 +848,7 @@ async def create_schedule_row(
         )
     require_supported_overlap(schedule.policy.overlap)
     for b in backfill:
-        require_supported_overlap(b.overlap)
+        require_overlap_override_supported(b.overlap)
     from ._internal import ids as _ids
 
     _ids.validate_workflow_id(schedule.action.id)
@@ -861,12 +881,3 @@ async def create_schedule_row(
 async def _replace_schedule(client: "Client", id: str, schedule: Schedule) -> None:
     await client._dbos_client.delete_schedule_async(id)
     await create_schedule_row(client, id, schedule)
-
-
-async def _rewrite_note(client: "Client", id: str, note: str) -> None:
-    row = await client._dbos_client.get_schedule_async(id)
-    if row is None:
-        return
-    schedule = _schedule_from_context(row["context"])
-    schedule.state.note = note
-    await _replace_schedule(client, id, schedule)

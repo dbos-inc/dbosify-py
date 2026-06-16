@@ -24,10 +24,13 @@ One non-pre-converted value reaches this serializer: a scheduled workflow's
 ``fired_at`` ``datetime``, which DBOS injects as the first argument of every
 schedule fire (``__temporal_schedule_fire``) and serializes through the
 configured serializer with no type-hint coercion (that path is portable-JSON
-only). So ``datetime`` is round-tripped here via a tagged marker. User
-datetimes never reach this point raw — the conversion layer already turned
-them into ISO strings inside their payload dicts — so the marker is ours
-alone.
+only). We encode it as a plain ISO-8601 **string** (via ``default`` below) and
+do NOT reconstruct it on decode — the schedule-fire dispatcher coerces its
+``fired_at`` argument back to a datetime itself. Reconstructing here would mean
+a global ``object_hook`` over every decoded value, which could mis-cast a user
+payload that happens to match the marker shape; emitting a bare string keeps
+decode lossless for all user data (user datetimes are already ISO strings in
+their payload dicts by the time they reach this serializer).
 """
 
 import json
@@ -44,21 +47,13 @@ from .payloads import (
 
 SERIALIZER_NAME = "temporal_dbos_json"
 
-# Marker key for a tagged datetime (see module docstring). Distinctive enough
-# that no user payload dict collides with it.
-_DT_MARKER = "__tdb_datetime__"
-
 
 def _json_default(value: Any) -> Any:
+    # The only raw datetime reaching us is a schedule fire's ``fired_at``; emit
+    # an ISO string (the dispatcher parses it). Anything else is a real bug.
     if isinstance(value, datetime):
-        return {_DT_MARKER: value.isoformat()}
+        return value.isoformat()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
-
-
-def _object_hook(obj: dict[str, Any]) -> Any:
-    if len(obj) == 1 and _DT_MARKER in obj:
-        return datetime.fromisoformat(obj[_DT_MARKER])
-    return obj
 
 
 def _exc_to_dict(exc: BaseException) -> dict[str, Any]:
@@ -101,7 +96,7 @@ class TemporalDBOSSerializer(Serializer):
     def deserialize(self, serialized_data: str) -> Any:
         if serialized_data is None:
             return None
-        obj = json.loads(serialized_data, object_hook=_object_hook)
+        obj = json.loads(serialized_data)
         if "e" in obj:
             return _dict_to_exc(obj["e"])
         return obj["v"]

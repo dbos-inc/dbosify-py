@@ -414,7 +414,7 @@ def register_schedule_dispatcher() -> None:
     if _schedule_dispatcher_registered:
         return
 
-    async def fire(fired_at: datetime, context: Dict[str, Any]) -> None:
+    async def fire(fired_at: Union[str, datetime], context: Dict[str, Any]) -> None:
         await _schedule_fire(fired_at, context)
 
     fire.__name__ = fire.__qualname__ = SCHEDULE_FIRE_NAME
@@ -422,13 +422,19 @@ def register_schedule_dispatcher() -> None:
     _schedule_dispatcher_registered = True
 
 
-def _to_aware_utc(dt: datetime) -> datetime:
+def _to_aware_utc(dt: Union[str, datetime]) -> datetime:
+    # ``fired_at`` arrives as an ISO string (the JSON serializer emits datetimes
+    # as strings; see serializer.py) or, in tests, a real datetime.
+    if isinstance(dt, str):
+        dt = datetime.fromisoformat(dt)
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
 
-async def _schedule_fire(fired_at: datetime, context: Dict[str, Any]) -> None:
+async def _schedule_fire(
+    fired_at: Union[str, datetime], context: Dict[str, Any]
+) -> None:
     fired_at = _to_aware_utc(fired_at)
     spec = context.get("spec", {})
     start_at = spec.get("start_at")
