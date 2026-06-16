@@ -51,6 +51,11 @@ class RunMeta:
     run_timeout: Optional[float] = None
     last_completion: Optional[Dict[str, Any]] = None
     last_failure: Optional[FailureEnvelope] = None
+    # The encoded DBOS-attributes dict (memo + search attributes, see
+    # _internal/attributes.py). Carried into the run for in-workflow info()/
+    # memo() and forward across chain hops; the durable searchable copy lives in
+    # the DBOS attributes column.
+    attributes: Optional[Dict[str, Any]] = None
 
     def is_empty(self) -> bool:
         return (
@@ -60,6 +65,7 @@ class RunMeta:
             and self.run_timeout is None
             and self.last_completion is None
             and self.last_failure is None
+            and self.attributes is None
         )
 
     def carried_forward(self) -> "RunMeta":
@@ -72,6 +78,7 @@ class RunMeta:
             run_timeout=self.run_timeout,
             last_completion=self.last_completion,
             last_failure=self.last_failure,
+            attributes=self.attributes,
         )
 
 
@@ -90,6 +97,7 @@ def wrap_input(args: Sequence[Any], meta: Optional[RunMeta] = None) -> Any:
             "run_timeout": meta.run_timeout,
             "last_completion": meta.last_completion,
             "last_failure": meta.last_failure,
+            "attributes": meta.attributes,
         },
     }
 
@@ -104,6 +112,7 @@ def unwrap_input(payload: Any) -> Tuple[List[Any], RunMeta]:
             run_timeout=raw.get("run_timeout"),
             last_completion=raw.get("last_completion"),
             last_failure=raw.get("last_failure"),
+            attributes=raw.get("attributes"),
         )
     return list(payload), RunMeta()
 

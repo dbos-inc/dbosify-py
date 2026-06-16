@@ -32,7 +32,7 @@ rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 `dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
 `message_passing/` corpus passes 5/5.
 
-Current pass rate: **16 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **17 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -54,7 +54,7 @@ harness).
 | hello_async_activity_completion | ✅ (`raise_complete_async` + task-token completion) |
 | hello_continue_as_new | ✅ (10 chained runs) |
 | hello_cron | ✅ (cron chain fires and hops; the sample never exits, so the harness verifies through the database) |
-| hello_search_attributes | ⬜ Phase 3 (search attributes) |
+| hello_search_attributes | ✅ (memo + search attributes on DBOS workflow attributes; set at start, `upsert_*` from inside, read via `describe()`). The sample upserts 2s in and describes 3s later, so its worker opts into near-immediate queue dispatch in the harness — scoped to this one sample (see `tests/conformance/runner.py`). |
 | hello_query | ⬜ Phase 4 (queries on closed workflows — deviation #2) |
 | hello_activity_multiprocess | ⬜ multiprocess activity executors unsupported |
 | hello_change_log_level | — never exits by design (also true on Temporal) |
@@ -103,7 +103,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 1 | No Temporal server/UI/CLI; no non-Python clients. Operate via DBOS tooling. |
 | 2 | Queries hit Postgres and (v1) require a RUNNING workflow. |
 | 3 | No workflow sandbox: determinism violations surface at recovery/replay as `NondeterminismError`, not at development time. |
-| 4 | Visibility query language: documented subset; custom search attributes stored but not indexed. |
+| 4 | Memo + search attributes are stored on DBOS workflow attributes (JSONB, GIN-indexed) — set at start, `upsert_*` from inside a workflow, read via `describe()`/`info()`. Search attributes are stored untyped (no cluster-side registration) and the visibility query language (`list_workflows(query=...)`/`count_workflows`) is not wired yet. See [DEVIATIONS.md](DEVIATIONS.md) D15. |
 | 5 | Default child-workflow IDs are derived from the parent, not random UUIDs. |
 | 6 | `FAIL` id-conflict policy has a small TOCTOU window in v1. |
 | 7 | Different latency/throughput profile: every effect is a Postgres write. Benchmarks will be published. |

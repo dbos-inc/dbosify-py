@@ -17,7 +17,7 @@ import inspect
 import logging
 import uuid as uuid_mod
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import IntEnum
 from random import Random
@@ -41,7 +41,13 @@ from typing import (
 )
 
 from ._internal import registry as _registry
-from .common import RetryPolicy
+from .common import (
+    RetryPolicy,
+    SearchAttributes,
+    SearchAttributeUpdate,
+    TypedSearchAttributes,
+    _warn_on_deprecated_search_attributes,
+)
 
 __all__ = [
     "ActivityCancellationType",
@@ -73,6 +79,8 @@ __all__ = [
     "init",
     "logger",
     "LoggerAdapter",
+    "memo",
+    "memo_value",
     "now",
     "query",
     "random",
@@ -87,6 +95,8 @@ __all__ = [
     "time",
     "time_ns",
     "unsafe",
+    "upsert_memo",
+    "upsert_search_attributes",
     "UnfinishedSignalHandlersWarning",
     "UnfinishedUpdateHandlersWarning",
     "update",
@@ -466,8 +476,15 @@ class Info:
     retry_policy: Optional[RetryPolicy] = None
     run_id: str = ""
     run_timeout: Optional[timedelta] = None
+    search_attributes: SearchAttributes = field(default_factory=dict)
+    """Search attributes for the workflow.
+
+    .. deprecated::
+        Use :py:attr:`typed_search_attributes` instead.
+    """
     start_time: datetime = datetime.fromtimestamp(0)
     task_queue: str = ""
+    typed_search_attributes: TypedSearchAttributes = TypedSearchAttributes.empty
     workflow_id: str = ""
     workflow_type: str = ""
 
@@ -529,6 +546,21 @@ class _Runtime:
     def runtime_last_failure(self) -> Optional[BaseException]:
         raise NotImplementedError
 
+    def runtime_memo(self) -> Mapping[str, Any]:
+        raise NotImplementedError
+
+    def runtime_memo_value(self, key: str, *, type_hint: Optional[type] = None) -> Any:
+        raise NotImplementedError
+
+    def runtime_upsert_memo(self, updates: Mapping[str, Any]) -> None:
+        raise NotImplementedError
+
+    def runtime_upsert_search_attributes(
+        self,
+        attributes: Union[SearchAttributes, Sequence[SearchAttributeUpdate[Any]]],
+    ) -> None:
+        raise NotImplementedError
+
     def runtime_start_activity(
         self,
         activity_name: str,
@@ -560,6 +592,10 @@ class _Runtime:
         task_queue: Optional[str],
         parent_close_policy: int,
         cancellation_type: int,
+        memo: Optional[Mapping[str, Any]] = None,
+        search_attributes: Optional[
+            Union[TypedSearchAttributes, SearchAttributes]
+        ] = None,
     ) -> "ChildWorkflowHandle":
         raise NotImplementedError
 
@@ -717,6 +753,49 @@ def get_last_failure() -> Optional[BaseException]:
     """The failure of this chain's previous run, if it failed — what a
     workflow-retry attempt (or the cron run after a failure) sees."""
     return _runtime().runtime_last_failure()
+
+
+def memo() -> Mapping[str, Any]:
+    """Current workflow's memo values, converted without type hints."""
+    return _runtime().runtime_memo()
+
+
+def memo_value(
+    key: str, default: Any = _arg_unset, *, type_hint: Optional[type] = None
+) -> Any:
+    """Memo value for the given key, optionally rebuilt to ``type_hint``.
+
+    Raises ``KeyError`` if the key is absent and no ``default`` is given.
+    """
+    # Check presence first, so a KeyError raised while converting the value to
+    # ``type_hint`` propagates instead of being misread as a missing key and
+    # silently swallowed into ``default``.
+    runtime = _runtime()
+    if key not in runtime.runtime_memo():
+        if default is _arg_unset:
+            raise KeyError(f"Memo does not have a value for key {key}")
+        return default
+    return runtime.runtime_memo_value(key, type_hint=type_hint)
+
+
+def upsert_memo(updates: Mapping[str, Any]) -> None:
+    """Add, modify, and/or remove memo values, with upsert semantics. A value
+    of ``None`` removes that key."""
+    _runtime().runtime_upsert_memo(updates)
+
+
+def upsert_search_attributes(
+    attributes: Union[SearchAttributes, Sequence[SearchAttributeUpdate[Any]]],
+) -> None:
+    """Upsert search attributes for this workflow.
+
+    Args:
+        attributes: A sequence of updates (created via ``value_set`` /
+            ``value_unset`` on search-attribute keys). The dictionary form is
+            DEPRECATED.
+    """
+    _warn_on_deprecated_search_attributes(attributes)
+    _runtime().runtime_upsert_search_attributes(attributes)
 
 
 def now() -> datetime:
@@ -1020,6 +1099,10 @@ class ContinueAsNewError(BaseException):
         self._tdb_task_queue: Optional[str] = None
         self._tdb_run_timeout: Optional[timedelta] = None
         self._tdb_retry_policy: Optional[RetryPolicy] = None
+        self._tdb_memo: Optional[Mapping[str, Any]] = None
+        self._tdb_search_attributes: Optional[
+            Union[TypedSearchAttributes, SearchAttributes]
+        ] = None
 
 
 def continue_as_new(
@@ -1042,13 +1125,12 @@ def continue_as_new(
     """
     for key, value in {
         "task_timeout": task_timeout,
-        "memo": memo,
-        "search_attributes": search_attributes,
         "versioning_intent": versioning_intent,
         "initial_versioning_behavior": initial_versioning_behavior,
     }.items():
         if value is not None:
             logger.debug("continue_as_new: ignoring unsupported parameter %r", key)
+    _warn_on_deprecated_search_attributes(search_attributes)
     _runtime()  # must be called from workflow code
     err = ContinueAsNewError("Workflow continued as new")
     err._tdb_args = _resolve_args(arg, args)
@@ -1061,6 +1143,8 @@ def continue_as_new(
     if retry_policy is not None:
         retry_policy._validate()
     err._tdb_retry_policy = retry_policy
+    err._tdb_memo = memo
+    err._tdb_search_attributes = search_attributes
     raise err
 
 
@@ -1117,8 +1201,6 @@ async def start_child_workflow(
         "id_reuse_policy": id_reuse_policy,
         "retry_policy": retry_policy,
         "cron_schedule": cron_schedule or None,
-        "memo": memo,
-        "search_attributes": search_attributes,
         "versioning_intent": versioning_intent,
         "static_summary": static_summary,
         "static_details": static_details,
@@ -1126,6 +1208,7 @@ async def start_child_workflow(
     }.items():
         if value is not None:
             logger.debug("start_child_workflow: ignoring unsupported option %r", key)
+    _warn_on_deprecated_search_attributes(search_attributes)
     return await _runtime().runtime_start_child_workflow(
         _resolve_workflow_type(workflow),
         _resolve_args(arg, args),
@@ -1133,6 +1216,8 @@ async def start_child_workflow(
         task_queue=task_queue,
         parent_close_policy=int(parent_close_policy),
         cancellation_type=int(cancellation_type),
+        memo=memo,
+        search_attributes=search_attributes,
     )
 
 

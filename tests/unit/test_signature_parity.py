@@ -95,9 +95,7 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "priority",
         "raw_memo",
         "root",
-        "search_attributes",
         "task_timeout",
-        "typed_search_attributes",
         "workflow_start_time",
     },
     "activity.Info.__init__": {
@@ -121,8 +119,6 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "raw_info",
         "root_id",
         "root_run_id",
-        "search_attributes",
-        "typed_search_attributes",
     },
     "client.WorkflowExecutionDescription.__init__": {
         "execution_time",
@@ -133,8 +129,6 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "raw_info",
         "root_id",
         "root_run_id",
-        "search_attributes",
-        "typed_search_attributes",
     },
     "client.WorkflowHandle.__init__": {
         "start_workflow_response",
