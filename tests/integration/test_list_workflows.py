@@ -10,7 +10,7 @@ no kill-and-recover test is warranted here (cf. CLAUDE.md).
 """
 
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, List
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pytest
 from dbos import DBOSClient
@@ -20,6 +20,7 @@ from temporal_dbos.client import (
     Client,
     WorkflowExecution,
     WorkflowExecutionAsyncIterator,
+    WorkflowExecutionCount,
     WorkflowExecutionStatus,
     WorkflowFailureError,
 )
@@ -254,6 +255,89 @@ async def test_count_workflows() -> None:
 
         await holder.signal(Holder.finish)
         await holder.result()
+
+
+def _groups(count: WorkflowExecutionCount) -> Dict[Any, Optional[int]]:
+    return {g.group_values[0]: g.count for g in count.groups}
+
+
+async def test_count_group_by_execution_status_splits_error_bucket() -> None:
+    # The server-side aggregate groups by DBOS status, which lumps Failed/
+    # Canceled/TimedOut/ContinuedAsNew under "ERROR"; count_workflows splits
+    # that bucket by the recorded marker, so Failed and Canceled appear apart.
+    async with _env() as client:
+        for i in range(3):
+            await client.execute_workflow(
+                Completer.run, str(i), id=f"c{i}", task_queue=TASK_QUEUE
+            )
+        with pytest.raises(WorkflowFailureError):
+            await client.execute_workflow(Failer.run, id="f1", task_queue=TASK_QUEUE)
+        cancelled = await client.start_workflow(
+            Holder.run, id="x1", task_queue=TASK_QUEUE
+        )
+        await cancelled.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await cancelled.result()
+        running = await client.start_workflow(
+            Holder.run, id="h1", task_queue=TASK_QUEUE
+        )
+
+        count = await client.count_workflows("GROUP BY ExecutionStatus")
+        groups = _groups(count)
+        assert groups.get("Completed") == 3
+        assert groups.get("Failed") == 1
+        assert groups.get("Canceled") == 1
+        assert groups.get("Running") == 1
+        assert count.count == 6
+
+        await running.signal(Holder.finish)
+        await running.result()
+
+
+async def test_count_group_by_workflow_type() -> None:
+    async with _env() as client:
+        for i in range(2):
+            await client.execute_workflow(
+                Completer.run, str(i), id=f"c{i}", task_queue=TASK_QUEUE
+            )
+        holder = await client.start_workflow(Holder.run, id="h1", task_queue=TASK_QUEUE)
+
+        count = await client.count_workflows("GROUP BY WorkflowType")
+        groups = _groups(count)
+        assert groups.get("Completer") == 2
+        assert groups.get("Holder") == 1
+        assert count.count == 3
+
+        await holder.signal(Holder.finish)
+        await holder.result()
+
+
+async def test_count_search_attribute_scan_fallback() -> None:
+    # A search-attribute filter can't go through the aggregate operator, so this
+    # exercises the scan fallback path.
+    async with _env() as client:
+        await client.execute_workflow(
+            Completer.run,
+            "a",
+            id="c1",
+            task_queue=TASK_QUEUE,
+            search_attributes=_sa("vip"),
+        )
+        await client.execute_workflow(
+            Completer.run,
+            "b",
+            id="c2",
+            task_queue=TASK_QUEUE,
+            search_attributes=_sa("vip"),
+        )
+        await client.execute_workflow(
+            Completer.run,
+            "c",
+            id="c3",
+            task_queue=TASK_QUEUE,
+            search_attributes=_sa("no"),
+        )
+        assert (await client.count_workflows("CustomKeyword = 'vip'")).count == 2
 
 
 async def test_limit() -> None:

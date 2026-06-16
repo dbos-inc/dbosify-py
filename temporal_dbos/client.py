@@ -1210,36 +1210,133 @@ class Client:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> WorkflowExecutionCount:
-        """Count workflows matching a visibility ``query``.
+        """Count workflows matching a visibility ``query``, optionally grouped by
+        a trailing ``GROUP BY ExecutionStatus`` / ``GROUP BY WorkflowType``.
 
-        DEVIATION: DBOS has no count primitive, so this scans matching rows in
-        pages and sums them — O(matches), not a server-side aggregate. ``groups``
-        is always empty (no group-by support).
+        Uses DBOS's server-side ``get_workflow_aggregates`` (``COUNT`` +
+        ``GROUP BY``) when the query's filters are expressible there. Queries
+        that filter by exact ``WorkflowId``, a search attribute, or an
+        ERROR-family ``ExecutionStatus`` (which DBOS lumps under ``ERROR``)
+        fall back to a row scan; ``GROUP BY ExecutionStatus`` always splits the
+        aggregate's ``ERROR`` bucket into Failed/Canceled/TimedOut/ContinuedAsNew
+        with a small targeted scan of just the error rows.
         """
         _ignore_rpc_options("count_workflows", rpc_metadata, rpc_timeout)
         parsed = _visibility.parse_query(query)
-        filters = parsed.to_dbos_filters()
         post_filter = parsed.post_filter()
-        scan_page = 1000
+        sys_db: Any = getattr(self._dbos_client, "_sys_db", None)
+        use_aggregate = (
+            sys_db is not None and parsed.aggregate_eligible() and post_filter is None
+        )
+
+        # --- no GROUP BY: a single total -------------------------------------
+        if parsed.group_by is None:
+            if use_aggregate:
+                rows = await self._count_aggregate(
+                    sys_db, "group_by_status", parsed.aggregate_filter_kwargs()
+                )
+                total = sum(r["count"] or 0 for r in rows)
+            else:
+                scanned = await self._scan_rows(
+                    parsed.to_dbos_filters(), load_output=post_filter is not None
+                )
+                total = (
+                    sum(1 for r in scanned if post_filter(r))
+                    if post_filter is not None
+                    else len(scanned)
+                )
+            return WorkflowExecutionCount(count=total, groups=[])
+
+        # --- GROUP BY ExecutionStatus | WorkflowType -------------------------
+        tallies: Dict[str, int] = {}
+
+        def bump(key: str, n: int) -> None:
+            tallies[key] = tallies.get(key, 0) + n
+
+        if parsed.group_by == "WorkflowType":
+            if use_aggregate:
+                for r in await self._count_aggregate(
+                    sys_db, "group_by_name", parsed.aggregate_filter_kwargs()
+                ):
+                    name = r["group"].get("name") or ""
+                    bump(name[3:] if name.startswith("wf:") else name, r["count"] or 0)
+            else:
+                for row in await self._scan_rows(
+                    parsed.to_dbos_filters(), load_output=True
+                ):
+                    if post_filter is not None and not post_filter(row):
+                        continue
+                    name = row.name or ""
+                    bump(name[3:] if name.startswith("wf:") else name, 1)
+        else:  # ExecutionStatus
+            if use_aggregate:
+                error_count = 0
+                for r in await self._count_aggregate(
+                    sys_db, "group_by_status", parsed.aggregate_filter_kwargs()
+                ):
+                    dbos_status = r["group"].get("status")
+                    if dbos_status == "ERROR":
+                        error_count += r["count"] or 0
+                        continue
+                    temporal = _status.to_execution_status(dbos_status)
+                    bump(_visibility.TEMPORAL_STATUS_NAME[temporal], r["count"] or 0)
+                if error_count:
+                    # Split the lumped ERROR bucket by recorded marker — a
+                    # scan, but bounded to just the error rows.
+                    err_filters = dict(parsed.aggregate_filter_kwargs())
+                    err_filters["status"] = ["ERROR"]
+                    for row in await self._scan_rows(err_filters, load_output=True):
+                        temporal = _status.to_execution_status(
+                            row.status, error=row.error
+                        )
+                        bump(_visibility.TEMPORAL_STATUS_NAME[temporal], 1)
+            else:
+                for row in await self._scan_rows(
+                    parsed.to_dbos_filters(), load_output=True
+                ):
+                    if post_filter is not None and not post_filter(row):
+                        continue
+                    temporal = _status.to_execution_status(row.status, error=row.error)
+                    bump(_visibility.TEMPORAL_STATUS_NAME[temporal], 1)
+
+        groups = [
+            WorkflowExecutionCountAggregationGroup(count=c, group_values=[v])
+            for v, c in sorted(tallies.items())
+        ]
+        return WorkflowExecutionCount(count=sum(tallies.values()), groups=groups)
+
+    async def _count_aggregate(
+        self, sys_db: Any, group_flag: str, filter_kwargs: Mapping[str, Any]
+    ) -> List[Any]:
+        """One ``get_workflow_aggregates`` COUNT call grouped by ``group_flag``
+        (run off-loop since the operator is synchronous)."""
+        return await asyncio.to_thread(
+            lambda: sys_db.get_workflow_aggregates(
+                select_count=True, **{group_flag: True}, **filter_kwargs
+            )
+        )
+
+    async def _scan_rows(
+        self, filters: Mapping[str, Any], *, load_output: bool
+    ) -> List[WorkflowStatus]:
+        """All workflow rows matching ``filters``, paged (the count fallback for
+        filters DBOS's aggregate operator can't express)."""
+        out: List[WorkflowStatus] = []
         offset = 0
-        total = 0
+        page_size = 1000
         while True:
-            rows = await self._dbos_client.list_workflows_async(
+            page = await self._dbos_client.list_workflows_async(
                 load_input=False,
-                load_output=post_filter is not None,
-                limit=scan_page,
+                load_output=load_output,
+                limit=page_size,
                 offset=offset,
                 **filters,
             )
-            total += (
-                sum(1 for r in rows if post_filter(r))
-                if post_filter is not None
-                else len(rows)
-            )
-            offset += len(rows)
-            if len(rows) < scan_page:
+            out.extend(page)
+            offset += len(page)
+            if len(page) < page_size:
                 break
-        return WorkflowExecutionCount(count=total, groups=[])
+        return out
 
     async def start_update_with_start_workflow(
         self,

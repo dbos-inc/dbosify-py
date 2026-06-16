@@ -241,3 +241,56 @@ def test_and_inside_quoted_value_is_not_a_conjunction() -> None:
 def test_unsupported_constructs_rejected(query: str) -> None:
     with pytest.raises(VisibilityQueryError):
         parse_query(query)
+
+
+# --- GROUP BY + aggregate eligibility -----------------------------------------
+
+
+def test_group_by_execution_status() -> None:
+    q = parse_query("GROUP BY ExecutionStatus")
+    assert q.group_by == "ExecutionStatus"
+
+
+def test_group_by_workflow_type_with_filters() -> None:
+    q = parse_query("ExecutionStatus = 'Completed' GROUP BY WorkflowType")
+    assert q.group_by == "WorkflowType"
+    assert q.to_dbos_filters()["status"] == ["SUCCESS"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "GROUP ExecutionStatus",  # missing BY
+        "GROUP BY",  # missing field
+        "GROUP BY StartTime",  # not a groupable field
+        "GROUP BY CustomKeyword",  # search attribute not groupable
+        "GROUP BY ExecutionStatus AND WorkflowType = 'X'",  # not final
+        "GROUP BY ExecutionStatus GROUP BY WorkflowType",  # two group-bys
+    ],
+)
+def test_bad_group_by_rejected(query: str) -> None:
+    with pytest.raises(VisibilityQueryError):
+        parse_query(query)
+
+
+def test_aggregate_eligible_for_plain_filters() -> None:
+    assert parse_query("WorkflowType = 'A'").aggregate_eligible() is True
+    assert parse_query("ExecutionStatus = 'Completed'").aggregate_eligible() is True
+    assert parse_query("WorkflowId STARTS_WITH 'o'").aggregate_eligible() is True
+
+
+def test_aggregate_not_eligible_for_sa_id_or_negation() -> None:
+    assert parse_query("CustomKeyword = 'x'").aggregate_eligible() is False
+    assert parse_query("WorkflowId = 'exact'").aggregate_eligible() is False
+    assert parse_query("WorkflowType != 'X'").aggregate_eligible() is False
+
+
+def test_aggregate_filter_kwargs_shape() -> None:
+    kwargs = parse_query(
+        "WorkflowType = 'A' AND ExecutionStatus = 'Completed' "
+        "AND WorkflowId STARTS_WITH 'o'"
+    ).aggregate_filter_kwargs()
+    assert kwargs["name"] == ["wf:A"]
+    assert kwargs["status"] == ["SUCCESS"]
+    # workflow_id_prefix is wrapped in a list for get_workflow_aggregates.
+    assert kwargs["workflow_id_prefix"] == ["o"]

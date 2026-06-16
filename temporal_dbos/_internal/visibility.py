@@ -73,11 +73,24 @@ _TEMPORAL_TO_DBOS: Dict[WorkflowExecutionStatus, Tuple[str, ...]] = {
     WorkflowExecutionStatus.CONTINUED_AS_NEW: ("ERROR",),
 }
 
+# Canonical Temporal status name (the spelling that appears in a count's
+# group_values), keyed by our enum.
+TEMPORAL_STATUS_NAME: Dict[WorkflowExecutionStatus, str] = {
+    WorkflowExecutionStatus.RUNNING: "Running",
+    WorkflowExecutionStatus.COMPLETED: "Completed",
+    WorkflowExecutionStatus.FAILED: "Failed",
+    WorkflowExecutionStatus.CANCELED: "Canceled",
+    WorkflowExecutionStatus.TERMINATED: "Terminated",
+    WorkflowExecutionStatus.CONTINUED_AS_NEW: "ContinuedAsNew",
+    WorkflowExecutionStatus.TIMED_OUT: "TimedOut",
+}
+
 _SUPPORTED = (
     "Supported visibility subset: WorkflowType (= != IN), "
     "WorkflowId (= STARTS_WITH), ExecutionStatus (= IN), "
     "StartTime/CloseTime (> >= < <= =), <SearchAttribute> (=), "
-    "joined by AND."
+    "joined by AND, with an optional trailing "
+    "GROUP BY ExecutionStatus|WorkflowType (count_workflows only)."
 )
 
 
@@ -161,6 +174,9 @@ class VisibilityQuery:
     close_time_hi: Optional[datetime] = None
     # custom search attributes: name -> JSON scalar for ``@>`` containment.
     search_attributes: Dict[str, Any] = field(default_factory=dict)
+    # Trailing ``GROUP BY`` (count_workflows only): canonical field name
+    # ("ExecutionStatus" or "WorkflowType"), or None.
+    group_by: Optional[str] = None
 
     def to_dbos_filters(self) -> Dict[str, Any]:
         """Kwargs for ``DBOSClient.list_workflows_async`` enforcing everything
@@ -222,6 +238,38 @@ class VisibilityQuery:
             return True
 
         return predicate
+
+    def aggregate_eligible(self) -> bool:
+        """Whether this query's *filters* can be expressed by the server-side
+        ``get_workflow_aggregates`` operator. It has no exact-id, no JSONB
+        search-attribute, and no name-``!=`` predicate, so those force a scan.
+        (An ERROR-family ``ExecutionStatus`` restriction also needs the marker,
+        i.e. a non-None :meth:`post_filter`; callers check that separately.)"""
+        return (
+            not self.search_attributes
+            and self.workflow_ids is None
+            and not self.type_not_in
+        )
+
+    def aggregate_filter_kwargs(self) -> Dict[str, Any]:
+        """The subset of :meth:`to_dbos_filters` that ``get_workflow_aggregates``
+        accepts as filters (it takes ``workflow_id_prefix`` as a list)."""
+        f = self.to_dbos_filters()
+        kwargs: Dict[str, Any] = {
+            key: f[key]
+            for key in (
+                "name",
+                "status",
+                "start_time",
+                "end_time",
+                "completed_after",
+                "completed_before",
+            )
+            if key in f
+        }
+        if "workflow_id_prefix" in f:
+            kwargs["workflow_id_prefix"] = [f["workflow_id_prefix"]]
+        return kwargs
 
 
 # --- parser -------------------------------------------------------------------
@@ -344,8 +392,32 @@ def parse_query(query: Optional[str]) -> VisibilityQuery:
         return VisibilityQueryError(msg + " " + _SUPPORTED)
 
     while i < n:
-        # field
         tok = tokens[i]
+        # Trailing GROUP BY <field> (count_workflows only) — terminal.
+        if tok.kind == "ident" and str(tok.value).upper() == "GROUP":
+            i += 1
+            if (
+                i >= n
+                or tokens[i].kind != "ident"
+                or str(tokens[i].value).upper() != "BY"
+            ):
+                raise fail("Expected 'BY' after GROUP.")
+            i += 1
+            if i >= n or tokens[i].kind != "ident":
+                raise fail("GROUP BY requires a field name.")
+            gb_canon = _SYSTEM_FIELDS.get(str(tokens[i].value).lower())
+            if gb_canon not in ("ExecutionStatus", "WorkflowType"):
+                raise fail(
+                    "GROUP BY supports only ExecutionStatus or WorkflowType, got "
+                    f"{tokens[i].value!r}."
+                )
+            i += 1
+            q.group_by = gb_canon
+            if i != n:
+                raise fail("GROUP BY must be the final clause.")
+            break
+
+        # field
         if tok.kind != "ident":
             raise fail(f"Expected a field name, got {tok.value!r}.")
         upper = str(tok.value).upper()
@@ -416,6 +488,8 @@ def parse_query(query: Optional[str]) -> VisibilityQuery:
                 if i >= n:
                     raise fail("Trailing AND with no clause.")
                 continue
+            if conj.kind == "ident" and str(conj.value).upper() == "GROUP":
+                continue  # GROUP BY is handled at the loop top
             if conj.kind == "ident" and str(conj.value).upper() == "OR":
                 raise fail("OR is not supported; only AND.")
             raise fail(f"Expected AND or end of query, got {conj.value!r}.")
