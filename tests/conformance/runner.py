@@ -94,6 +94,16 @@ def install_shim() -> None:
                 "notification_listener_polling_interval_sec": 0.01,
             }
             original_worker_init(self, config, *args, **kwargs)
+            # Near-immediate queue dispatch for low-latency conformance. The
+            # default 1s queue poll (and the queue worker's first-poll wait
+            # before any dequeue) adds ~1s before an enqueued workflow starts,
+            # which fixed-time samples (hello_search_attributes upserts 2s in
+            # and describes 3s later) race against. Declaring the queue with a
+            # short interval *before* launch makes the worker thread start at
+            # that interval. Mirrors the lowered notification poll above.
+            from dbos import Queue
+
+            Queue(self._task_queue, polling_interval_sec=0.05)
         else:
             original_worker_init(self, first, *args, **kwargs)
 

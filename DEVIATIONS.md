@@ -261,12 +261,35 @@ our checkpoint ledger grows without limit, and any
 `is_continue_as_new_suggested()` signal (Phase 3) will be a configurable
 threshold, not a server-enforced cap.
 
-### D15. Visibility is a documented subset
+### D15. Memo + search attributes: stored and exposed, untyped, not yet queryable
 
-`list_workflows` supports a documented subset of Temporal's visibility
-query language, mapped onto DBOS filters; custom search attributes are
-(post-Phase 3) stored but not indexed or queryable. The full query language
-is not planned. Similarly, history *byte size* is not tracked:
+Memo and search attributes are stored on DBOS's native workflow `attributes`
+(a JSONB column with a GIN index) under reserved `memo`/`search_attributes`
+keys. They are set at start (`Client.start_workflow(memo=, search_attributes=)`),
+carried to child workflows (explicitly — children do not inherit the parent's,
+as in Temporal) and across continue-as-new (carried unless overridden),
+upserted from inside a workflow (`workflow.upsert_memo` /
+`workflow.upsert_search_attributes`, recorded as a checkpointed
+`update_workflow_attributes` step so they survive recovery), and read back via
+`WorkflowExecutionDescription.memo()`/`.typed_search_attributes` and
+`workflow.info()`. Memo values round-trip through the `DataConverter` (so a
+`PayloadCodec` encrypts them at rest); search-attribute values are stored as
+plain JSON scalars (datetime as ISO-8601, keyword-list as a JSON array) so the
+JSONB index can see them.
+
+Deviations from Temporal:
+- Search attributes are stored **untyped** — there is no cluster-side
+  attribute registry, so any name/type is accepted and the typed key carries
+  its own type (`SearchAttributeKey.for_keyword(...)` etc.); the deprecated
+  untyped-dict form is also accepted, with the key type guessed as temporalio
+  does.
+- The **visibility query language** is not wired yet: `Client.list_workflows`
+  / `count_workflows` and the `"CustomKeyword='foo' AND ..."` query string are
+  not implemented (Phase 3 remaining). The attributes are GIN-indexed, so a
+  future implementation maps query equality predicates onto JSONB `@>`
+  containment. The full query language is not planned.
+
+Similarly, history *byte size* is not tracked:
 `workflow.info().get_current_history_size()` always returns 0 — use
 `is_continue_as_new_suggested()` / `get_current_history_length()` (the
 checkpoint count) for continue-as-new decisions.

@@ -105,8 +105,12 @@ EXPECTATIONS = {
         timeout=10,
     ),
     "hello_search_attributes": Expectation(
-        xfail="search-attribute storage + describe() exposure is Phase 3",
-        timeout=10,
+        # Starts with an (untyped) search attribute, upserts it from inside the
+        # workflow, and reads both values back via describe(). The post-upsert
+        # value only appears once the in-workflow upsert has durably written
+        # the DBOS attributes column.
+        expect_output="Second search attribute values:  ['new-value']",
+        timeout=30,
     ),
     "hello_signal": Expectation(expect_output="Result:"),
     "hello_update": Expectation(expect_output="Workflow Result:"),

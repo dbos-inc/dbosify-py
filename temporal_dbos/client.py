@@ -14,15 +14,27 @@ import inspect
 import json
 import logging
 import uuid as uuid_mod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import IntEnum
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Type, Union
+from typing import (
+    Any,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+    Type,
+    Union,
+    overload,
+)
 
 from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
 from dbos._error import DBOSAwaitedWorkflowCancelledError
 
 from . import _schedule, exceptions
+from ._internal import attributes as _attributes
 from ._internal import conversion, ids, inbox
 from ._internal import registry as _registry
 from ._internal import schedules as _schedules
@@ -72,6 +84,8 @@ from ._schedule import (  # noqa: E402
 from .common import (
     QueryRejectCondition,
     RetryPolicy,
+    SearchAttributes,
+    TypedSearchAttributes,
     WorkflowIDConflictPolicy,
     WorkflowIDReusePolicy,
 )
@@ -493,10 +507,57 @@ class WorkflowExecution:
     id: str = ""
     parent_id: Optional[str] = None
     run_id: str = ""
+    search_attributes: SearchAttributes = field(default_factory=dict)
+    """Search attributes for the workflow.
+
+    .. deprecated::
+        Use :py:attr:`typed_search_attributes` instead.
+    """
     start_time: Optional[datetime] = None
     status: Optional[WorkflowExecutionStatus] = None
     task_queue: Optional[str] = None
+    typed_search_attributes: TypedSearchAttributes = TypedSearchAttributes.empty
+    """Search attributes for the workflow."""
     workflow_type: str = ""
+    # The stored (converter-encoded) memo, decoded lazily by ``memo()`` /
+    # ``memo_value()`` — matches temporalio, where memo decode is async. Not a
+    # constructor parameter (temporalio reads memo from ``raw_info`` instead);
+    # describe() sets it via object.__setattr__ on the frozen instance.
+    _encoded_memo: Mapping[str, Any] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
+
+    async def memo(self) -> Mapping[str, Any]:
+        """Workflow's memo values, converted without type hints."""
+        return await _attributes.decode_memo(self._encoded_memo)
+
+    @overload
+    async def memo_value(
+        self, key: str, *, type_hint: Optional[type] = None
+    ) -> Any: ...
+
+    @overload
+    async def memo_value(
+        self, key: str, default: Any, *, type_hint: Optional[type] = None
+    ) -> Any: ...
+
+    async def memo_value(
+        self,
+        key: str,
+        default: Any = _arg_unset,
+        *,
+        type_hint: Optional[type] = None,
+    ) -> Any:
+        """Memo value for the given key, optionally rebuilt to ``type_hint``.
+
+        Raises ``KeyError`` if the key is absent and no ``default`` is given.
+        """
+        encoded = self._encoded_memo.get(key, _arg_unset)
+        if encoded is _arg_unset:
+            if default is _arg_unset:
+                raise KeyError(f"Memo does not have a value for key {key}")
+            return default
+        return await conversion.decode_value(encoded, type_hint)
 
 
 @dataclass(frozen=True)
@@ -700,8 +761,6 @@ class Client:
         for key, value in {
             "execution_timeout": execution_timeout,
             "task_timeout": task_timeout,
-            "memo": memo,
-            "search_attributes": search_attributes,
             "static_summary": static_summary,
             "static_details": static_details,
             "rpc_metadata": rpc_metadata or None,
@@ -758,6 +817,11 @@ class Client:
                 )
             )
 
+        # Memo + search attributes ride in the run envelope (for in-workflow
+        # info()/memo() and chain propagation) and in the DBOS attributes column
+        # (the durable, queryable copy that describe() reads).
+        meta.attributes = await _attributes.encode_attributes(memo, search_attributes)
+
         current = await self._current_run(id)
         run_index = 0
         if current is not None:
@@ -808,6 +872,8 @@ class Client:
             options["workflow_timeout"] = run_timeout.total_seconds()
         if start_delay is not None:
             options["delay_seconds"] = start_delay.total_seconds()
+        if meta.attributes is not None:
+            options["attributes"] = meta.attributes
         await self._dbos_client.enqueue_async(
             options, wrap_input(await conversion.encode_values(workflow_args), meta)
         )
@@ -1492,7 +1558,11 @@ class WorkflowHandle:
         workflow_type = status.name or ""
         if workflow_type.startswith("wf:"):
             workflow_type = workflow_type[3:]
-        return WorkflowExecutionDescription(
+        stored_attrs = status.attributes or {}
+        typed_sa = _attributes.decode_search_attributes(
+            stored_attrs.get(_attributes.SEARCH_ATTRIBUTES_KEY, {})
+        )
+        description = WorkflowExecutionDescription(
             id=self._id,
             run_id=status.workflow_id,
             workflow_type=workflow_type,
@@ -1500,6 +1570,8 @@ class WorkflowHandle:
             status=_status.to_execution_status(status.status, error=status.error),
             start_time=_to_datetime(status.created_at),
             close_time=_to_datetime(status.completed_at),
+            search_attributes=_attributes.typed_to_untyped(typed_sa),
+            typed_search_attributes=typed_sa,
             # A same-chain DBOS parent link is a continuation
             # (continue-as-new), not a parent (Info.continued_run_id
             # territory); only cross-chain links are real parents.
@@ -1511,6 +1583,10 @@ class WorkflowHandle:
                 else None
             ),
         )
+        object.__setattr__(
+            description, "_encoded_memo", stored_attrs.get(_attributes.MEMO_KEY, {})
+        )
+        return description
 
     async def cancel(
         self,

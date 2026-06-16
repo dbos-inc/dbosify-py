@@ -34,6 +34,7 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, Sequence, Typ
 from dbos import (
     DBOS,
     SetEnqueueOptions,
+    SetWorkflowAttributes,
     SetWorkflowID,
     SetWorkflowTimeout,
     WorkflowHandle,
@@ -378,7 +379,15 @@ async def _enqueue_next_run(
         if meta.run_timeout is not None
         else nullcontext()
     )
-    with SetWorkflowID(new_run_id), timeout_ctx, delay_ctx:
+    # Carry the chain's memo + search attributes onto the next run's DBOS
+    # attributes column (describe()/visibility); the envelope already carries
+    # them for the next run's in-workflow info().
+    attrs_ctx = (
+        SetWorkflowAttributes(meta.attributes)
+        if meta.attributes is not None
+        else nullcontext()
+    )
+    with SetWorkflowID(new_run_id), timeout_ctx, delay_ctx, attrs_ctx:
         if queue is not None:
             await queue.enqueue_async(dispatch_fn, payload)
         else:
