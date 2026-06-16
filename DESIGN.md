@@ -66,8 +66,9 @@ Two levels of drop-in:
 
 1. **`temporal_dbos` package** mirroring `temporalio`'s module layout exactly:
    `temporal_dbos.workflow`, `.activity`, `.client`, `.worker`, `.common`, `.exceptions`,
-   `.converter`, `.testing`, `.contrib.pydantic`. Migration = change the import root.
-   This is the primary, supported mode.
+   `.converter`, `.testing`. Migration = change the import root. This is the primary,
+   supported mode. (`temporalio.contrib.pydantic` is **not** mirrored — see §6.9; configure
+   a custom `DataConverter` for pydantic support.)
 2. **Alias shim** for zero-change runs: `temporal_dbos.install()` (and a
    `python -m temporal_dbos run app.py` runner) registers a meta-path finder that serves
    `temporalio.*` imports from `temporal_dbos.*`. It must refuse to install if the real
@@ -93,8 +94,6 @@ temporal_dbos/
     types.py               # mirrored from temporalio.types as needed
     testing/
         __init__.py        # WorkflowEnvironment, ActivityEnvironment
-    contrib/
-        pydantic.py
     runner.py              # python -m temporal_dbos run
     _shim.py               # temporalio alias meta-path finder
     _internal/
@@ -341,10 +340,18 @@ Signatures must mirror `temporalio` 1.28 exactly (copy from the local checkout, 
 
 #### 6.1.1 `workflow.defn / run / signal / query / update / init`
 Registration populates `_internal/registry.py` keyed by workflow type name (default:
-unqualified class name; `name=` override; `dynamic=True` → catch-all entry receiving
-`Sequence[RawValue]`). Validate at decoration time like temporalio does (exactly one
-`@workflow.run`, async, etc. — copy their error messages where reasonable). `sandboxed=`
-is accepted and ignored.
+unqualified class name; `name=` override). **Dynamic *workflows*
+(`@workflow.defn(dynamic=True)`) are not supported and raise `NotImplementedError`:**
+a catch-all workflow has no per-type `wf:{type}` DBOS registration to dispatch to,
+which conflicts with the one-workflow-per-type model (§10.1, DEVIATIONS D25); the
+`dynamic` parameter is accepted only for signature parity. Dynamic *signal/query/update
+handlers* (`dynamic=True` → a single catch-all per category, invoked as
+`(self, name, Sequence[RawValue])` when no exact handler matches), `description=` handler
+metadata, and dynamic *activities* (§6.1.2) **are** supported — with
+`workflow.payload_converter()` / `activity.payload_converter()` exposed so a dynamic
+handler can convert its `RawValue` args. Validate at decoration time like temporalio does
+(exactly one `@workflow.run`, async, the dynamic-handler signature, etc. — copy their
+error messages where reasonable). `sandboxed=` is accepted and ignored.
 
 #### 6.1.2 Activities: `@activity.defn`, `execute_activity`, `start_activity`, local activities
 Two execution paths, chosen automatically:
@@ -649,7 +656,9 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
 
 Mirror `temporalio.converter`: `DataConverter(payload_converter_class, payload_codec,
 failure_converter_class)`, `CompositePayloadConverter`, `JSONPlainPayloadConverter`
-(dataclasses, enums, UUID, datetime; pydantic via `contrib.pydantic`), `PayloadCodec`
+(dataclasses, enums, UUID, datetime; pydantic models are **not** supported out of the
+box — `contrib.pydantic` is not provided, configure a custom `DataConverter` for them),
+`PayloadCodec`
 (async encode/decode of byte payloads — encryption/compression). Implementation: an adapter
 that turns the configured `DataConverter` into a DBOS custom `Serializer`
 (`dbos` exposes a `Serializer` protocol and `DBOSPortableJSONSerializer`), applied to
@@ -792,7 +801,9 @@ the full ScheduleHandle surface **done** — the samples-python `schedules/` cor
 8/8, DEVIATIONS D22), continue-as-new
 (done: chain hops, carryover, follow_runs, child chains; flipped
 `hello_continue_as_new` and `safe_message_handlers` — `message_passing/` is 5/5),
-dynamic workflows/handlers + handler descriptions,
+dynamic *signal/query/update* handlers + handler descriptions + dynamic activities
+(**done**; dynamic *workflows* are out of scope — rejected with a clear
+`NotImplementedError`, DEVIATIONS D25 / §10.1),
 workflow retry policies (done: attempt counts, backoff, non-retryable types,
 follow-on-failure, last-failure threading; the run input grew a meta-envelope that
 carries per-run chain state — the same envelope later carries memo/search attributes),
@@ -814,7 +825,8 @@ activity inbound/outbound, DEVIATIONS D24; workflow in/outbound is Phase 4), the
 data-conversion pipeline
 (**done**: default JSON conversion — moved from Phase 1 — plus custom DataConverters +
 PayloadCodec, per-boundary conversion, and the JSON DBOS serializer that replaces pickle;
-`contrib.pydantic` remains), memo/search-attribute storage. **Exit:** `samples-python` `schedules/`,
+`contrib.pydantic` is out of scope — not provided, configure a custom DataConverter for
+pydantic), memo/search-attribute storage. **Exit:** `samples-python` `schedules/`,
 `activity_worker/`, expanded conformance matrix published in README.
 
 **Phase 4 — Ecosystem & polish.** Time-skipping `WorkflowEnvironment`, `Replayer` over
