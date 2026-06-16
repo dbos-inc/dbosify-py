@@ -639,7 +639,11 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
 - Interceptors (client `Interceptor/OutboundInterceptor`, worker
   `ActivityInbound/Outbound`, `WorkflowInbound/Outbound`): clean fit — wrap dispatcher entry
   points and client verbs with the same `*Input` dataclasses (copy dataclass definitions
-  from the SDK). Phase 3 for client+activity, Phase 4 for workflow in/outbound.
+  from the SDK). **Client + activity done** (`Client(interceptors=)`,
+  `Worker(interceptors=)`; the client outbound chain roots in a `_ClientOutbound`, the
+  activity chain is built per attempt in `_internal/activities.py`); workflow in/outbound
+  is Phase 4. No header-propagation channel yet, so `*Input.headers` is inert until then.
+  See [DEVIATIONS.md](DEVIATIONS.md) D24.
 
 ### 6.9 Data conversion
 
@@ -805,7 +809,9 @@ fires, no clock reads), and completers notified of workflow-side cancellation
 via a checkpointed gone-event their heartbeat/complete polls
 (AsyncActivityCancelledError) — flipped `hello_cancellation` and
 `hello_async_activity_completion`, hello 15/19), `list_workflows` query parser +
-`count_workflows`, client + activity interceptors, the data-conversion pipeline
+`count_workflows`, client + activity interceptors (**done**: client outbound +
+activity inbound/outbound, DEVIATIONS D24; workflow in/outbound is Phase 4), the
+data-conversion pipeline
 (**done**: default JSON conversion — moved from Phase 1 — plus custom DataConverters +
 PayloadCodec, per-boundary conversion, and the JSON DBOS serializer that replaces pickle;
 `contrib.pydantic` remains), memo/search-attribute storage. **Exit:** `samples-python` `schedules/`,

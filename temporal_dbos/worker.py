@@ -29,10 +29,22 @@ from dbos import DBOS, DBOSConfig
 
 from ._internal import conversion
 from ._internal import dispatcher as _dispatcher
+from ._internal.activity_interceptor import (
+    ActivityInboundInterceptor,
+    ActivityOutboundInterceptor,
+    ExecuteActivityInput,
+    Interceptor,
+)
 from ._internal.serializer import TEMPORAL_SERIALIZER
 from .converter import DataConverter
 
-__all__ = ["Worker"]
+__all__ = [
+    "ActivityInboundInterceptor",
+    "ActivityOutboundInterceptor",
+    "ExecuteActivityInput",
+    "Interceptor",
+    "Worker",
+]
 
 logger = logging.getLogger("temporal_dbos.worker")
 
@@ -68,6 +80,7 @@ class Worker:
         graceful_shutdown_timeout: timedelta = timedelta(),
         workflow_failure_exception_types: Sequence[Type[BaseException]] = [],
         data_converter: DataConverter = DataConverter.default,
+        interceptors: Sequence[Interceptor] = [],
         **unsupported: Any,
     ) -> None:
         """Create the process's worker. Registration (workflow types,
@@ -107,6 +120,7 @@ class Worker:
             workflows=workflows,
             activities=activities,
             failure_exception_types=workflow_failure_exception_types,
+            interceptors=interceptors,
         )
         # The task queue is a database-backed DBOS queue; this process
         # dequeues only from its declared listen set (plus DBOS's internal
