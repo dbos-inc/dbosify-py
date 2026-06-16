@@ -2504,6 +2504,12 @@ class Interpreter(_Runtime):
                     headers=conversion.decode_headers(envelope.get("headers")),
                 )
             )
+        except asyncio.CancelledError:
+            # Never swallow cancellation as a query failure: queries are driven
+            # synchronously so this is unreachable in practice, but if a query
+            # interceptor ever suspended, the cancel must propagate, not become
+            # a "failed" reply.
+            raise
         except BaseException as err:  # noqa: BLE001
             self._reply(reply_key, status="failed", failure=err)
             return
