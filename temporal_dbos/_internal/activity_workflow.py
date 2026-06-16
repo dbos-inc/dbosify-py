@@ -19,42 +19,86 @@ activity lifecycle on its own worker.
 """
 
 import logging
-from typing import Any, Dict
+import time as time_mod
+from typing import Any, Callable, Dict, Optional
 
 from dbos import DBOS
 
+from ..common import RetryPolicy
 from . import activities as activities_mod
 from . import registry
+from .payloads import deserialize_retry_policy
 
 logger = logging.getLogger("temporal_dbos.activity_workflow")
 
 ACTIVITY_DISPATCH_NAME = "__temporal_activity"
 
 _activity_dispatcher_registered = False
+_started_at_step: Optional[Callable[[], Any]] = None
+
+
+def _activity_started_at() -> Any:
+    """A step that records the activity workflow's start wall-clock, once, so
+    the retry loop measures schedule-to-close elapsed deterministically (the
+    recorded value replays identically — no live clock read in the loop)."""
+    global _started_at_step
+    if _started_at_step is None:
+
+        @DBOS.step(name="__tdb_activity_started_at")
+        async def started_at() -> float:
+            return time_mod.time()
+
+        _started_at_step = started_at
+    return _started_at_step()
 
 
 async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Run one attempt of a queued activity and return its envelope.
+    """Run a queued activity to a terminal outcome and return its envelope.
 
-    The payload mirrors the interpreter's local-path attempt call
-    (``_launch_attempt``): the activity type, its already-encoded args, the
-    per-attempt ``start_to_close``, and the ``meta`` dict that backs
-    ``activity.info()`` on this worker. The single-attempt step
-    (``activities._make_attempt_step``) already returns a fully-formed envelope
-    — ``{"ok", "result"|"failure", "ended_at", ...}`` — with user exceptions
-    serialized inside it, so this workflow never raises on a user failure; it
-    just returns the envelope as its DBOS output.
+    Design A: the activity workflow owns the full retry loop on its own worker,
+    so attempt counting, backoff (durable ``DBOS.sleep_async`` — a crash
+    mid-backoff resumes at the right attempt), and the schedule-to-close budget
+    all live here, reusing ``activities.retry_decision`` (shared with the local
+    path). The single-attempt step (``activities._make_attempt_step``) returns a
+    fully-formed envelope with user exceptions serialized inside it, so this
+    workflow never raises on a user failure; it returns the terminal envelope as
+    its DBOS output (with ``retry_state`` stamped in when retries are exhausted).
     """
     activity_name = payload["activity_name"]
     args = payload["args"]
     start_to_close = payload.get("start_to_close")
-    meta = payload["meta"]
+    schedule_to_close = payload.get("schedule_to_close")
+    serialized_policy = payload.get("retry_policy")
+    policy = (
+        deserialize_retry_policy(serialized_policy)
+        if serialized_policy is not None
+        else RetryPolicy()
+    )
+    meta = dict(payload["meta"])
     # ``attempt_step_for`` raises a clear KeyError if the activity type is not
     # registered with *this* worker — the correct failure for a task_queue
     # pointed at a worker that doesn't host the activity.
     step_fn = activities_mod.attempt_step_for(activity_name)
-    envelope: Dict[str, Any] = await step_fn(args, start_to_close, meta)
-    return envelope
+    started_at = await _activity_started_at()
+    attempt = int(meta.get("attempt", 1))
+    while True:
+        meta["attempt"] = attempt
+        envelope: Dict[str, Any] = await step_fn(args, start_to_close, meta)
+        if envelope.get("ok") or envelope.get("async_pending"):
+            return envelope
+        failure = envelope["failure"]
+        elapsed = float(envelope.get("ended_at", started_at)) - started_at
+        delay, retry_state = activities_mod.retry_decision(
+            policy,
+            attempt,
+            failure,
+            elapsed=elapsed,
+            schedule_to_close=schedule_to_close,
+        )
+        if delay is None:
+            return {**envelope, "retry_state": int(retry_state)}
+        await DBOS.sleep_async(delay)
+        attempt += 1
 
 
 def register_activity_dispatcher() -> None:

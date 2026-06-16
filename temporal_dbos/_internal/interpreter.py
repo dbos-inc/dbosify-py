@@ -81,6 +81,7 @@ from .payloads import (
     RunMeta,
     deserialize_failure,
     deserialize_retry_policy,
+    serialize_retry_policy,
     wrap_input,
 )
 from .registry import WorkflowDefinition
@@ -1345,9 +1346,7 @@ class Interpreter(_Runtime):
         of spawning a twin. (No collision with the ``--r{n}`` run-chain suffix:
         ``ids.parse_run`` only treats a pure-digit ``--r`` suffix as a run.)
         """
-        from contextlib import nullcontext
-
-        from dbos import SetWorkflowID, SetWorkflowTimeout
+        from dbos import SetWorkflowID
 
         from . import registry
 
@@ -1370,6 +1369,11 @@ class Interpreter(_Runtime):
             "activity_name": exec_state.activity_name,
             "args": exec_state.args,  # already encoded in _process_commands
             "start_to_close": exec_state.start_to_close,
+            "schedule_to_close": exec_state.schedule_to_close,
+            # The activity workflow owns the retry loop (Design A); schedule_to_close
+            # gates retries there, not via SetWorkflowTimeout — matching the local
+            # path, where it bounds the retry sequence, not an in-flight attempt.
+            "retry_policy": serialize_retry_policy(exec_state.retry_policy),
             "meta": meta,
         }
         try:
@@ -1380,14 +1384,7 @@ class Interpreter(_Runtime):
                     f"Task queue {exec_state.task_queue!r} is not registered "
                     "(no worker has declared it)"
                 )
-            # schedule_to_close caps the whole queued execution, including the
-            # queue wait — map it to the activity workflow's timeout (§6.1.2).
-            timeout_ctx = (
-                SetWorkflowTimeout(exec_state.schedule_to_close)
-                if exec_state.schedule_to_close is not None
-                else nullcontext()
-            )
-            with SetWorkflowID(activity_dbos_id), timeout_ctx:
+            with SetWorkflowID(activity_dbos_id):
                 await queue.enqueue_async(dispatch_fn, payload)
         except Exception as err:  # noqa: BLE001 — surface as an ActivityError
             self._pending_activities.pop(seq, None)
@@ -1589,6 +1586,14 @@ class Interpreter(_Runtime):
             return
         failure: FailureEnvelope = envelope["failure"]
         exec_state.last_failure = failure
+        # The activity workflow ran the retry loop and stamped the terminal
+        # retry_state into the envelope when it gave up.
+        retry_state_value = envelope.get("retry_state")
+        retry_state = (
+            exceptions.RetryState(retry_state_value)
+            if retry_state_value is not None
+            else None
+        )
         error = exceptions.ActivityError(
             "Activity task failed",
             scheduled_event_id=0,
@@ -1596,7 +1601,7 @@ class Interpreter(_Runtime):
             identity="",
             activity_type=exec_state.activity_name,
             activity_id=exec_state.activity_id,
-            retry_state=exceptions.RetryState.MAXIMUM_ATTEMPTS_REACHED,
+            retry_state=retry_state,
         )
         error.__cause__ = deserialize_failure(failure)
         exec_state.future.set_exception(error)
@@ -1676,37 +1681,21 @@ class Interpreter(_Runtime):
     def _retry_decision(
         self, exec_state: _ActivityExec, failure: FailureEnvelope
     ) -> Tuple[Optional[float], exceptions.RetryState]:
-        """Returns (backoff delay before next attempt, or None to give up;
-        retry state to report when giving up).
-        """
-        policy = exec_state.retry_policy
-        if failure.get("non_retryable"):
-            return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
-        failure_type = failure.get("type") or failure["cls"]
-        if policy.non_retryable_error_types and failure_type in set(
-            policy.non_retryable_error_types
-        ):
-            return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
-        if policy.maximum_attempts and exec_state.attempt >= policy.maximum_attempts:
-            return None, exceptions.RetryState.MAXIMUM_ATTEMPTS_REACHED
-        override = failure.get("next_retry_delay")
-        if override is not None:
-            delay = float(override)
-        else:
-            delay = policy.initial_interval.total_seconds() * (
-                policy.backoff_coefficient ** (exec_state.attempt - 1)
-            )
-            maximum = (
-                policy.maximum_interval.total_seconds()
-                if policy.maximum_interval
-                else policy.initial_interval.total_seconds() * 100
-            )
-            delay = min(delay, maximum)
-        if exec_state.schedule_to_close is not None:
-            elapsed = self._vloop.time() - exec_state.scheduled_at
-            if elapsed + delay >= exec_state.schedule_to_close:
-                return None, exceptions.RetryState.TIMEOUT
-        return delay, exceptions.RetryState.IN_PROGRESS
+        """The local path's retry decision: elapsed comes from virtual time;
+        the policy logic itself lives in the shared ``activities.retry_decision``
+        (the queued path uses it too)."""
+        elapsed = (
+            self._vloop.time() - exec_state.scheduled_at
+            if exec_state.schedule_to_close is not None
+            else None
+        )
+        return activities_mod.retry_decision(
+            exec_state.retry_policy,
+            exec_state.attempt,
+            failure,
+            elapsed=elapsed,
+            schedule_to_close=exec_state.schedule_to_close,
+        )
 
     # ------------------------------------------------------------------
     # Inbox routing

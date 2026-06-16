@@ -15,13 +15,14 @@ to advance the workflow's virtual clock deterministically.
 
 import asyncio
 import time as time_mod
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from dbos import DBOS
 
 from .. import exceptions
+from ..common import RetryPolicy
 from . import registry
-from .payloads import serialize_failure
+from .payloads import FailureEnvelope, serialize_failure
 
 AttemptStep = Callable[
     [List[Any], Optional[float], Dict[str, Any]], Coroutine[Any, Any, Dict[str, Any]]
@@ -51,6 +52,52 @@ def attempt_step_for(activity_name: str) -> AttemptStep:
             f"Registered types: {sorted(_attempt_steps)}"
         )
     return step
+
+
+def retry_decision(
+    policy: RetryPolicy,
+    attempt: int,
+    failure: FailureEnvelope,
+    *,
+    elapsed: Optional[float],
+    schedule_to_close: Optional[float],
+) -> Tuple[Optional[float], exceptions.RetryState]:
+    """The activity retry decision (DESIGN §6.1.2), clock-independent so both
+    execution paths share it: the local path (interpreter, virtual time) and the
+    queued path (the ``__temporal_activity`` workflow, recorded-timestamp time).
+
+    Returns ``(backoff delay before the next attempt, or None to give up;
+    the retry state to report when giving up)``. ``elapsed`` is the time since
+    the activity was scheduled; pass it (with ``schedule_to_close``) so the
+    schedule-to-close budget gates retries — like Temporal, it bounds the retry
+    sequence, not an in-flight attempt (``start_to_close`` bounds that).
+    """
+    if failure.get("non_retryable"):
+        return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
+    failure_type = failure.get("type") or failure["cls"]
+    if policy.non_retryable_error_types and failure_type in set(
+        policy.non_retryable_error_types
+    ):
+        return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
+    if policy.maximum_attempts and attempt >= policy.maximum_attempts:
+        return None, exceptions.RetryState.MAXIMUM_ATTEMPTS_REACHED
+    override = failure.get("next_retry_delay")
+    if override is not None:
+        delay = float(override)
+    else:
+        delay = policy.initial_interval.total_seconds() * (
+            policy.backoff_coefficient ** (attempt - 1)
+        )
+        maximum = (
+            policy.maximum_interval.total_seconds()
+            if policy.maximum_interval
+            else policy.initial_interval.total_seconds() * 100
+        )
+        delay = min(delay, maximum)
+    if schedule_to_close is not None and elapsed is not None:
+        if elapsed + delay >= schedule_to_close:
+            return None, exceptions.RetryState.TIMEOUT
+    return delay, exceptions.RetryState.IN_PROGRESS
 
 
 def _make_attempt_step(activity_name: str) -> AttemptStep:

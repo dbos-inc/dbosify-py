@@ -381,14 +381,22 @@ Operational requirement and current scope:
   workflow worker's enqueue. Pin `DBOS__APPVERSION` to the same value across all
   workers that dispatch activities to one another. (Temporal coordinates on the
   task queue alone; this version pin is the DBOS-backed analogue.)
-- **The queued path is single-attempt in this release.** It enforces
-  `start_to_close_timeout` (per attempt) and `schedule_to_close_timeout` (mapped
-  to the activity workflow's `SetWorkflowTimeout`), and the heartbeat-timeout
-  watchdog runs on the activity worker. Not yet honored on the *queued* path
-  (all work on the local/same-queue path): `retry_policy` (the activity runs
-  once, then `ActivityError`), cross-process heartbeat-detail delivery to the
-  workflow, cooperative cancellation reaching the running activity (the workflow
-  stops awaiting, but the activity finishes on its worker),
-  `schedule_to_start_timeout`, and `raise_complete_async` (raises a clear
-  `ActivityError` rather than parking). These are staged follow-on work; until
-  then they are documented here rather than silently ignored.
+- **The activity workflow owns the full retry loop** (Design A): the queued
+  path honors `retry_policy` (backoff, `maximum_attempts`, `non_retryable_error_types`,
+  `ApplicationError(non_retryable=...)`, `next_retry_delay`), `start_to_close_timeout`
+  (per attempt), and `schedule_to_close_timeout` — the last via the same
+  `activities.retry_decision` the local path uses, so it bounds the *retry
+  sequence* (checked between attempts), not an in-flight attempt
+  (`start_to_close` bounds that), exactly as on the local path. Backoff is a
+  durable `DBOS.sleep_async`, so a crash mid-backoff resumes at the right
+  attempt. Minor deviation: schedule-to-close elapsed is measured from the first
+  attempt's start on the activity worker, so the queue-wait before the first
+  attempt is not counted toward it.
+- **Not yet honored on the queued path** (all work on the local/same-queue
+  path): cross-process heartbeat-detail delivery to the workflow (the
+  in-activity heartbeat-timeout watchdog and cross-attempt `info().heartbeat_details`
+  still work on the activity worker), cooperative cancellation reaching the
+  running activity (the workflow stops awaiting, but the activity finishes on
+  its worker), `schedule_to_start_timeout`, and `raise_complete_async` (raises a
+  clear `ActivityError` rather than parking). These are staged follow-on work;
+  until then they are documented here rather than silently ignored.
