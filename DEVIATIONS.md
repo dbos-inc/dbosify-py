@@ -813,3 +813,27 @@ written for it. Two consequences:
   a status read, and no UI consuming it). `static_summary` / `static_details`
   passed at start are likewise accepted but not surfaced (consistent with
   memo/search-attribute exposure limits, D15).
+
+
+### D31. Random seed is fixed per run; reseed callbacks never fire
+
+`workflow.random()` / `uuid4()` derive from a per-execution seed checkpointed
+once at run start (DESIGN §4.2). `workflow.random_seed()` returns that seed and
+`workflow.new_random()` returns a `Random` seeded from it. Temporal can update a
+workflow's seed mid-run (a `RandomSeedUpdated` history event), which is what
+`register_random_seed_callback` exists to react to; temporal-dbos never changes
+the seed within a run, so the seed is stable for the run's lifetime and any
+callback registered via `register_random_seed_callback` (including the one
+`new_random` installs) is stored but **never invoked**. Code that relies only on
+the returned `Random` staying valid works unchanged; code that depends on the
+callback firing does not apply here.
+
+
+### D32. Activity cancellation details are not tracked
+
+`activity.cancellation_details()` always returns `None` and
+`activity.ActivityCancellationDetails` is accepted only for parity. temporal-dbos
+delivers activity cancellation cooperatively (D26) — observed via
+`activity.is_cancelled()` / `wait_for_cancelled()` / `heartbeat()` — and does not
+record *why* an activity was cancelled (not-found / paused / reset / timed-out /
+worker-shutdown), so the structured reason temporalio surfaces is unavailable.

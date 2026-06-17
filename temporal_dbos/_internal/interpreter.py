@@ -84,8 +84,12 @@ from ..workflow import (
     Info,
     NondeterminismError,
     ParentInfo,
+    ReadOnlyContextError,
+    RootInfo,
     UnfinishedSignalHandlersWarning,
     UnfinishedUpdateHandlersWarning,
+    UpdateInfo,
+    _current_update_info,
     _Runtime,
 )
 from . import activities as activities_mod
@@ -854,6 +858,12 @@ class Interpreter(_Runtime):
         # not surfaced to describe()/list in v1, DEVIATIONS D30).
         self._current_details: str = ""
         self._random = Random(0)
+        # The deterministic random seed (checkpointed once at run start), exposed
+        # via workflow.random_seed(); fixed for the run's lifetime.
+        self._seed: int = 0
+        # workflow.register_random_seed_callback() callbacks — stored, never
+        # invoked (the seed never changes mid-run, DEVIATIONS D31).
+        self._random_seed_callbacks: List[Callable[[int], None]] = []
         self._workflow_id = ""
         self._start_time = 0.0
         # ("ok", result) | ("failure", exc) | ("task_failure", exc)
@@ -940,7 +950,8 @@ class Interpreter(_Runtime):
         init = await _workflow_init_step()
         self._start_time = float(init["start_time"])
         self._vloop.time_seconds = self._start_time
-        self._random.seed(init["seed"])
+        self._seed = int(init["seed"])
+        self._random.seed(self._seed)
 
         # Rebuild the typed run arguments from their payloads (deterministic,
         # so re-decoding each run/replay is replay-safe).
@@ -1345,7 +1356,7 @@ class Interpreter(_Runtime):
 
     def _assert_not_read_only(self, what: str) -> None:
         if self._read_only:
-            raise RuntimeError(
+            raise ReadOnlyContextError(
                 f"Cannot {what} in a read-only context (query or update validator)"
             )
 
@@ -1696,10 +1707,16 @@ class Interpreter(_Runtime):
             # Encode headers here (real loop) — child.headers held raw Payloads
             # from the sync outbound root, and a codec is async.
             child_headers = await conversion.encode_headers(child.headers)
-            child_meta = (
-                RunMeta(attributes=child_attrs, headers=child_headers or None)
-                if child_attrs is not None or child_headers
-                else None
+            # The child's root is our root if we have one, else us (we are the
+            # top of the child's tree) — surfaced as the child's info().root.
+            child_root = self._meta.root or {
+                "workflow_id": ids.parse_run(self._workflow_id)[0],
+                "run_id": self._workflow_id,
+            }
+            child_meta = RunMeta(
+                attributes=child_attrs,
+                headers=child_headers or None,
+                root=child_root,
             )
             child_payload = wrap_input(child_args, child_meta)
             attrs_ctx = (
@@ -2648,16 +2665,22 @@ class Interpreter(_Runtime):
             def run_validator() -> None:
                 # Routed through the inbound chain; the root sets the read-only,
                 # against-current-state context (a rejected update must leave no
-                # trace in workflow state).
+                # trace in workflow state). current_update_info() resolves here.
                 assert self._inbound is not None
-                self._inbound.handle_update_validator(
-                    _wfi.HandleUpdateInput(
-                        id=self._workflow_id,
-                        update=envelope["name"],
-                        args=envelope["args"],
-                        headers=update_headers,
-                    )
+                token = _current_update_info.set(
+                    UpdateInfo(id=envelope["update_id"], name=envelope["name"])
                 )
+                try:
+                    self._inbound.handle_update_validator(
+                        _wfi.HandleUpdateInput(
+                            id=self._workflow_id,
+                            update=envelope["name"],
+                            args=envelope["args"],
+                            headers=update_headers,
+                        )
+                    )
+                finally:
+                    _current_update_info.reset(token)
 
             # The verdict is a checkpoint: the validator runs exactly once,
             # at first delivery; replay reads the recorded verdict.
@@ -2683,6 +2706,7 @@ class Interpreter(_Runtime):
                 envelope["args"],
                 reply_key,
                 update_headers,
+                envelope["update_id"],
             ),
             kind="update",
             # A dynamic handler has no name of its own; label it by the
@@ -2698,7 +2722,10 @@ class Interpreter(_Runtime):
         args: Sequence[Any],
         reply_key: str,
         headers: Mapping[str, Any],
+        update_id: str,
     ) -> None:
+        # current_update_info() resolves to this update for the handler's life.
+        _current_update_info.set(UpdateInfo(id=update_id, name=name))
         try:
             assert self._inbound is not None
             result = await self._inbound.handle_update_handler(
@@ -2800,6 +2827,16 @@ class Interpreter(_Runtime):
             if self._parent_run_id is not None
             else None
         )
+        # Root of this run's tree, threaded in via the child-start meta-envelope
+        # (§6.6); None for a top-level workflow (itself the root).
+        root = (
+            RootInfo(
+                run_id=self._meta.root["run_id"],
+                workflow_id=self._meta.root["workflow_id"],
+            )
+            if self._meta.root is not None
+            else None
+        )
         start_time = datetime.fromtimestamp(self._start_time)
         return Info(
             attempt=self._meta.attempt,
@@ -2811,6 +2848,7 @@ class Interpreter(_Runtime):
             headers=self._headers,
             namespace="default",
             parent=parent,
+            root=root,
             retry_policy=(
                 deserialize_retry_policy(self._meta.retry_policy)
                 if self._meta.retry_policy is not None
@@ -2890,6 +2928,18 @@ class Interpreter(_Runtime):
 
     def runtime_random(self) -> Random:
         return self._random
+
+    def runtime_random_seed(self) -> int:
+        return self._seed
+
+    def runtime_register_random_seed_callback(
+        self, callback: Callable[[int], None]
+    ) -> None:
+        # Stored for parity; never invoked — our seed is fixed per run.
+        self._random_seed_callbacks.append(callback)
+
+    def runtime_instance(self) -> Any:
+        return self._instance
 
     async def runtime_start_child_workflow(
         self,

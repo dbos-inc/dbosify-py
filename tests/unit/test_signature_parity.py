@@ -113,11 +113,10 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
 # temporalio parameters not accepted, recorded exactly. qualname -> parameter
 # names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # no-analog timeouts (exec/task, unenforced); protobuf raw_memo; root not held
+    # no-analog timeouts (exec/task, unenforced); protobuf raw_memo
     "workflow.Info.__init__": {
         "execution_timeout",
         "raw_memo",
-        "root",
         "task_timeout",
     },
     # no event-log history_length; protobuf raw_info; transitive root not held

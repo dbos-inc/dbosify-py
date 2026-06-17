@@ -13,6 +13,7 @@ from the running loop and delegates.
 """
 
 import asyncio
+import contextvars
 import inspect
 import logging
 import uuid as uuid_mod
@@ -74,9 +75,12 @@ __all__ = [
     "cancellation_reason",
     "continue_as_new",
     "ContinueAsNewError",
+    "current_update_info",
     "defn",
     "deprecate_patch",
     "get_current_details",
+    "instance",
+    "new_random",
     "NondeterminismError",
     "execute_activity",
     "execute_activity_method",
@@ -102,6 +106,10 @@ __all__ = [
     "payload_converter",
     "query",
     "random",
+    "random_seed",
+    "ReadOnlyContextError",
+    "register_random_seed_callback",
+    "RootInfo",
     "run",
     "set_current_details",
     "signal",
@@ -119,6 +127,7 @@ __all__ = [
     "UnfinishedSignalHandlersWarning",
     "UnfinishedUpdateHandlersWarning",
     "update",
+    "UpdateInfo",
     "uuid4",
     "wait",
     "wait_condition",
@@ -191,6 +200,12 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 _CT = TypeVar("_CT", bound=type)
 
 _arg_unset = object()
+
+# The update currently being handled, surfaced by current_update_info(). Set by
+# the interpreter around an update validator/handler (see _internal/interpreter.py).
+_current_update_info: "contextvars.ContextVar[UpdateInfo]" = contextvars.ContextVar(
+    "__temporal_dbos_current_update_info"
+)
 
 
 class HandlerUnfinishedPolicy(IntEnum):
@@ -582,6 +597,27 @@ class ParentInfo:
 
 
 @dataclass(frozen=True)
+class RootInfo:
+    """Information about the root workflow of this run's tree, mirroring
+    ``temporalio.workflow.RootInfo``. Present on :py:attr:`Info.root` only for
+    descendants (a child/grandchild started cross-chain); ``None`` for a
+    top-level workflow, which is itself the root."""
+
+    run_id: str
+    workflow_id: str
+
+
+@dataclass(frozen=True)
+class UpdateInfo:
+    """Information about a workflow update in progress, mirroring
+    ``temporalio.workflow.UpdateInfo``. Retrieved via
+    :py:func:`current_update_info` inside an update handler/validator."""
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
 class Info:
     """Information about the running workflow (Phase 0 subset of
     temporalio's ``workflow.Info``).
@@ -602,6 +638,9 @@ class Info:
     namespace: str = "default"
     # The parent workflow, when started cross-chain as a child; None otherwise.
     parent: Optional[ParentInfo] = None
+    # The root workflow of this run's tree; None for a top-level workflow (which
+    # is itself the root). Threaded through child starts (§6.6).
+    root: Optional[RootInfo] = None
     # Priority is accepted-and-inert (DBOS queues are FIFO); always the default
     # instance, which is what temporalio returns for an unset priority.
     priority: Priority = Priority.default
@@ -685,6 +724,17 @@ class _Runtime:
         raise NotImplementedError
 
     def runtime_random(self) -> Random:
+        raise NotImplementedError
+
+    def runtime_random_seed(self) -> int:
+        raise NotImplementedError
+
+    def runtime_register_random_seed_callback(
+        self, callback: Callable[[int], None]
+    ) -> None:
+        raise NotImplementedError
+
+    def runtime_instance(self) -> Any:
         raise NotImplementedError
 
     def runtime_is_replaying(self) -> bool:
@@ -1041,6 +1091,43 @@ def random() -> Random:
     return _runtime().runtime_random()
 
 
+def random_seed() -> int:
+    """The seed of this workflow's deterministic random number generator
+    (checkpointed once per run), mirroring ``temporalio.workflow.random_seed``."""
+    return _runtime().runtime_random_seed()
+
+
+def register_random_seed_callback(callback: Callable[[int], None]) -> None:
+    """Register a callback invoked when the workflow's random seed changes,
+    mirroring ``temporalio.workflow.register_random_seed_callback``. In
+    temporal-dbos the seed is fixed for a run's lifetime (it never changes
+    mid-run), so the callback is stored but never invoked (DEVIATIONS D31)."""
+    _runtime().runtime_register_random_seed_callback(callback)
+
+
+def new_random() -> Random:
+    """A new ``Random`` seeded from the current workflow seed and registered to
+    reseed when the workflow seed changes, mirroring
+    ``temporalio.workflow.new_random``. (The reseed never fires here — see
+    :py:func:`register_random_seed_callback`.)"""
+    auto_random = Random(random_seed())
+    register_random_seed_callback(auto_random.seed)
+    return auto_random
+
+
+def instance() -> Any:
+    """The currently running workflow instance (``self``), mirroring
+    ``temporalio.workflow.instance``."""
+    return _runtime().runtime_instance()
+
+
+def current_update_info() -> Optional[UpdateInfo]:
+    """Info about the update currently being handled (id + name), or ``None``
+    when not inside an update handler/validator, mirroring
+    ``temporalio.workflow.current_update_info``."""
+    return _current_update_info.get(None)
+
+
 def uuid4() -> uuid_mod.UUID:
     """Deterministic UUID v4 derived from the workflow's random seed."""
     return uuid_mod.UUID(bytes=random().getrandbits(128).to_bytes(16, "big"), version=4)
@@ -1375,6 +1462,16 @@ class ContinueAsNewError(BaseException):
 class NondeterminismError(exceptions.TemporalError):
     """Error thrown during replay when workflow code diverges from the
     recorded history (mirrors ``temporalio.workflow.NondeterminismError``)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class ReadOnlyContextError(exceptions.TemporalError):
+    """Raised when workflow code attempts a state-mutating operation from a
+    read-only context (a query handler or update validator), mirroring
+    ``temporalio.workflow.ReadOnlyContextError``."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message)

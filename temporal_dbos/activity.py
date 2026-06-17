@@ -48,7 +48,9 @@ if TYPE_CHECKING:
 _EPOCH = datetime.fromtimestamp(0, timezone.utc)
 
 __all__ = [
+    "ActivityCancellationDetails",
     "Info",
+    "cancellation_details",
     "client",
     "defn",
     "heartbeat",
@@ -60,6 +62,7 @@ __all__ = [
     "payload_converter",
     "raise_complete_async",
     "shield_thread_cancel_exception",
+    "wait_for_cancelled",
     "wait_for_cancelled_sync",
     "wait_for_worker_shutdown",
     "wait_for_worker_shutdown_sync",
@@ -192,6 +195,21 @@ class Info:
     retry_policy: Optional[RetryPolicy] = None
     # Run ID of this activity; None for workflow-dispatched activities (all ours).
     activity_run_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ActivityCancellationDetails:
+    """The reasons for an activity's cancellation, mirroring
+    ``temporalio.activity.ActivityCancellationDetails``. Accepted for parity;
+    temporal-dbos never populates it (DEVIATIONS D32), so
+    :py:func:`cancellation_details` always returns ``None``."""
+
+    not_found: bool = False
+    cancel_requested: bool = False
+    paused: bool = False
+    reset: bool = False
+    timed_out: bool = False
+    worker_shutdown: bool = False
 
 
 @dataclass
@@ -463,12 +481,36 @@ def is_cancelled() -> bool:
     return _context().cancelled.is_set()
 
 
+async def wait_for_cancelled() -> None:
+    """Asynchronously wait for this activity to get a cancellation request,
+    mirroring ``temporalio.activity.wait_for_cancelled``.
+
+    Raises:
+        RuntimeError: When not in an activity.
+    """
+    import asyncio
+
+    event = _context().cancelled
+    # Poll the (threading) cancelled event without parking a pool thread; the
+    # poll cadence matches wait_for_worker_shutdown (a rare, terminal signal).
+    while not event.is_set():
+        await asyncio.sleep(_WORKER_SHUTDOWN_POLL_SECONDS)
+
+
 def wait_for_cancelled_sync(
     timeout: Optional[Union[timedelta, float]] = None,
 ) -> None:
     """Synchronously block until the activity is cancelled."""
     seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
     _context().cancelled.wait(seconds)
+
+
+def cancellation_details() -> Optional["ActivityCancellationDetails"]:
+    """The reasons for this activity's cancellation, mirroring
+    ``temporalio.activity.cancellation_details``. **DEVIATION (D32):**
+    temporal-dbos delivers cancellation cooperatively (D26) and does not track
+    *why* an activity was cancelled, so this always returns ``None``."""
+    return None
 
 
 def is_worker_shutdown() -> bool:
