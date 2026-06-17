@@ -60,7 +60,11 @@ MODULE_PAIRS = {
 # ``test_supported_params_explicitly_accepted`` (EXPLICITLY_ACCEPTED_PARAMS).
 DELIBERATE_DEVIATIONS: Dict[str, str] = {
     "client.Client.__init__": "wraps a dbos.DBOSClient (DESIGN §5, revised)",
-    "client.Client.connect": "takes dbos.DBOSClient instead of target_host",
+    "client.Client.connect": "takes system_database_url + namespace and builds the DBOSClient",
+    "client.Client.close": (
+        "DBOS extension: connect() builds a DBOSClient (a DB connection pool) "
+        "that close()/async-with disposes; temporalio's gRPC Client has no close"
+    ),
     "worker.Worker.__init__": "takes dbos.DBOSConfig; one worker per process",
     "worker.Worker.namespace": (
         "DBOS extension: our Worker takes a namespace (mapped to its own DBOS "

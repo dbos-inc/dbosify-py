@@ -66,7 +66,11 @@ from ._internal.client_interceptor import (
     UnpauseScheduleInput,
     UpdateScheduleInput,
 )
-from ._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
+from ._internal.namespaces import (
+    DEFAULT_NAMESPACE,
+    namespace_from_schema,
+    namespace_schema,
+)
 from ._internal.payloads import (
     RunMeta,
     SerializedContinueAsNew,
@@ -1045,37 +1049,39 @@ class WorkflowExecutionAsyncIterator:
 
 
 class Client:
-    """Client for accessing temporal-dbos, wrapping a ``dbos.DBOSClient``.
+    """Client for accessing temporal-dbos.
 
-    The DBOSClient carries the connection (database URL, system schema), so
-    namespacing rides on its ``dbos_system_schema``. Construct directly or
-    via the async :py:meth:`connect` (kept for temporalio shape).
+    Use :py:meth:`connect` — ``Client.connect(system_database_url,
+    namespace=...)`` builds the underlying ``dbos.DBOSClient`` pointed at the
+    namespace's schema (DEVIATIONS D1), so you state the namespace once and
+    never touch ``dbos_system_schema``. For full control of the DBOSClient
+    (custom engine/pool), build it yourself and use the constructor, where the
+    DBOSClient's schema *is* the namespace.
     """
 
     def __init__(
         self,
         dbos_client: DBOSClient,
         *,
-        namespace: str = DEFAULT_NAMESPACE,
         data_converter: DataConverter = DataConverter.default,
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
+        """Low-level constructor over a caller-built ``dbos.DBOSClient``. The
+        client's **namespace is its DBOSClient's schema** (DEVIATIONS D1) — the
+        single source of truth — so build the DBOSClient with
+        ``dbos_system_schema=namespace_schema(<namespace>)``, or just use
+        :py:meth:`connect`, which takes a namespace and builds the DBOSClient
+        for you. The caller owns this DBOSClient's lifecycle.
+        """
         self._dbos_client = dbos_client
-        self._namespace = namespace
-        # The namespace owns the DBOS system schema (DEVIATIONS D1), and the
-        # DBOSClient carries the schema — so it must have been built for this
-        # namespace's schema. Otherwise its operations would target a different
-        # namespace, and (since SystemSchema is process-global) would clobber a
-        # Worker's schema in the same process.
-        expected_schema = namespace_schema(namespace)
-        actual_schema = dbos_client._sys_db.schema
-        if actual_schema != expected_schema:
-            raise ValueError(
-                f"DBOSClient system schema {actual_schema!r} does not match "
-                f"namespace {namespace!r}; build the DBOSClient with "
-                f"dbos_system_schema={expected_schema!r}"
-            )
+        # The DBOSClient's schema *is* the namespace (no separate, redundant
+        # namespace argument to keep in sync). Raises if it isn't a temporal
+        # namespace schema.
+        self._namespace = namespace_from_schema(dbos_client._sys_db.schema)
+        # connect() flips this for the DBOSClient it builds, so close() disposes
+        # it; a caller-supplied DBOSClient (this path) is the caller's to close.
+        self._owns_dbos_client = False
         self._data_converter = data_converter
         self._default_query_reject_condition = default_workflow_query_reject_condition
         # Build the outbound interceptor chain: user interceptors fold (in
@@ -1105,22 +1111,49 @@ class Client:
     @classmethod
     async def connect(
         cls,
-        dbos_client: DBOSClient,
+        system_database_url: str,
         *,
         namespace: str = DEFAULT_NAMESPACE,
         data_converter: DataConverter = DataConverter.default,
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
-        """Create a client from a ``dbos.DBOSClient``. ``namespace`` must match
-        the schema the ``DBOSClient`` was built with (DEVIATIONS D1)."""
-        return cls(
+        """Connect to ``system_database_url`` in ``namespace`` (DEVIATIONS D1).
+
+        Builds the underlying ``dbos.DBOSClient`` for you — pointed at the
+        namespace's schema, with the JSON serializer — so the namespace is
+        stated exactly once and you never touch ``dbos_system_schema``. The
+        returned client owns that DBOSClient; :py:meth:`close` (or
+        ``async with``) disposes it. For full control over the DBOSClient
+        (custom engine/pool), build it yourself and use the constructor.
+        """
+        dbos_client = await asyncio.to_thread(
+            DBOSClient,
+            system_database_url=system_database_url,
+            dbos_system_schema=namespace_schema(namespace),
+            serializer=TEMPORAL_SERIALIZER,
+        )
+        client = cls(
             dbos_client,
-            namespace=namespace,
             data_converter=data_converter,
             interceptors=interceptors,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
         )
+        client._owns_dbos_client = True
+        return client
+
+    async def close(self) -> None:
+        """Dispose the underlying DBOSClient if this client built it (via
+        :py:meth:`connect`). A no-op for a caller-supplied DBOSClient — that one
+        is the caller's to close."""
+        if self._owns_dbos_client:
+            await asyncio.to_thread(self._dbos_client.destroy)
+
+    async def __aenter__(self) -> "Client":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.close()
 
     # ------------------------------------------------------------------
     # Workflow start

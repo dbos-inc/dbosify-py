@@ -30,11 +30,16 @@ workflows in different namespaces are isolated: the same workflow id can exist
 independently in two namespaces, and `list`/`describe` in one never sees the
 other. No namespace is privileged — `default` maps to `temporal_default`, not
 the bare `dbos` schema. A `Worker` derives its `dbos_system_schema` from its
-`namespace` (it owns the runtime); a `Client` is told its `namespace` and
-checks the `DBOSClient` was built with the matching schema. Because DBOS's
-launched runtime and its `SystemSchema` are process-global, **a process serves
-one namespace** — different namespaces mean different worker processes /
-`DBOSClient`\\ s, mirroring Temporal (a worker polls one namespace). This is
+`namespace` (it owns the runtime). `Client.connect(system_database_url,
+namespace=...)` builds the `DBOSClient` pointed at that namespace's schema, so
+the namespace is stated once; the low-level `Client(dbos_client)` instead reads
+its namespace back from the `DBOSClient`'s schema (the single source of truth).
+Because DBOS's launched runtime is process-global, **a worker process serves
+one namespace** (a worker polls one namespace, as in Temporal). Clients are
+likewise one-namespace-per-process *today* only because DBOS's `SystemSchema`
+is a process-global mutable (so a second client's schema would clobber the
+first); that is being lifted upstream (dbos-transact-py #728, per-engine schema
+isolation), after which multiple namespaced clients can coexist in a process. This is
 cheap schema-level isolation, not an authorization boundary: Postgres security
 still applies to the database as a whole, and a client with the connection
 string can point at any namespace's schema.

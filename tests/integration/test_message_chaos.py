@@ -94,7 +94,7 @@ async def test_sigkill_with_updates_in_flight(tmp_path: Path) -> None:
     try:
         first.wait_for_line("STARTED", timeout=60)
         dbos_client = DBOSClient(system_database_url=system_database_url())
-        client = await Client.connect(dbos_client)
+        client = Client(dbos_client)
         handle = client.get_workflow_handle(wf_id)
         # Both updates reach ACCEPTED (validator passed, acceptance event
         # durable, handler parked on `release`), with a signal in between.

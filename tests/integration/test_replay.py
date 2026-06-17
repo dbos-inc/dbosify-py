@@ -171,7 +171,7 @@ async def test_replay_clean_no_failure() -> None:
     async with _worker():
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ReplayWf.run, "hi", id="rp-clean", task_queue=TASK_QUEUE
             )
@@ -194,7 +194,7 @@ async def test_replay_patched_workflow_clean() -> None:
     async with _worker(PatchedReplayWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 PatchedReplayWf.run, "hi", id="rp-patched", task_queue=TASK_QUEUE
             )
@@ -213,7 +213,7 @@ async def test_replay_reordered_activity_diverges() -> None:
     async with _worker():
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ReplayWf.run, "hi", id="rp-reorder", task_queue=TASK_QUEUE
             )
@@ -236,7 +236,7 @@ async def test_replay_added_trailing_activity_is_guarded() -> None:
     async with _worker():
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ReplayWf.run, "hi", id="rp-extra", task_queue=TASK_QUEUE
             )
@@ -258,7 +258,7 @@ async def test_replay_early_finish_diverges() -> None:
     async with _worker():
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ReplayWf.run, "hi", id="rp-skip", task_queue=TASK_QUEUE
             )
@@ -278,7 +278,7 @@ async def test_recorded_failure_replays_as_pass() -> None:
     async with _worker(FailWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 FailWf.run, id="rp-fail", task_queue=TASK_QUEUE
             )
@@ -300,7 +300,7 @@ async def test_replay_timer_and_signal_clean() -> None:
     async with _worker(TimerSignalWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 TimerSignalWf.run, "hi", id="rp-timer", task_queue=TASK_QUEUE
             )
@@ -318,7 +318,7 @@ async def test_replay_with_child_workflow_clean() -> None:
     async with _worker(ParentWf, ChildWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ParentWf.run, "hi", id="rp-parent", task_queue=TASK_QUEUE
             )
@@ -339,7 +339,7 @@ async def test_query_on_closed_workflow_rehydrates() -> None:
     async with _worker(GreetingWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 GreetingWf.run, "World", id="rp-query", task_queue=TASK_QUEUE
             )
@@ -369,7 +369,7 @@ async def test_replay_canceled_workflow_replays_as_pass() -> None:
     async with _worker(TimerSignalWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 TimerSignalWf.run, "hi", id="rp-cancel", task_queue=TASK_QUEUE
             )
@@ -412,7 +412,7 @@ async def test_query_on_missing_workflow_raises_query_failed() -> None:
     async with _worker(GreetingWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = client.get_workflow_handle("rp-does-not-exist")
             # A missing run is a query failure, not a bare RuntimeError.
             with pytest.raises(WorkflowQueryFailedError):
@@ -425,7 +425,7 @@ async def test_query_on_terminated_workflow_fails_clearly() -> None:
     async with _worker(TimerSignalWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 TimerSignalWf.run, "hi", id="rp-term", task_queue=TASK_QUEUE
             )
@@ -449,7 +449,7 @@ async def test_replay_terminated_workflow_is_rejected() -> None:
     async with _worker(TimerSignalWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 TimerSignalWf.run, "hi", id="rp-term-replay", task_queue=TASK_QUEUE
             )
@@ -477,7 +477,7 @@ async def test_query_on_closed_with_changed_code_fails_clearly() -> None:
     async with _worker(GreetingWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 GreetingWf.run, "World", id="rp-changed", task_queue=TASK_QUEUE
             )
@@ -499,7 +499,7 @@ async def test_replay_workflows_aggregates_failures_by_run_id() -> None:
     async with _worker():
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             histories: List[WorkflowHistory] = []
             for i in range(2):
                 handle = await client.start_workflow(

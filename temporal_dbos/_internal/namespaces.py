@@ -16,6 +16,7 @@ schema. Different namespaces therefore mean different worker processes /
 """
 
 import re
+from typing import Optional
 
 # Default namespace, matching Temporal.
 DEFAULT_NAMESPACE = "default"
@@ -50,3 +51,24 @@ def namespace_schema(namespace: str) -> str:
             f"{_SCHEMA_PREFIX}<namespace>)"
         )
     return f"{_SCHEMA_PREFIX}{namespace}"
+
+
+def namespace_from_schema(schema: Optional[str]) -> str:
+    """The namespace whose DBOS system schema is ``schema`` — the inverse of
+    :func:`namespace_schema`. Used by the low-level ``Client(dbos_client)``
+    path, where the DBOSClient's schema is the single source of truth.
+
+    Raises ``ValueError`` if ``schema`` isn't a temporal namespace schema
+    (``temporal_<namespace>``) — e.g. a bare ``dbos`` schema (or ``None``, as on
+    SQLite) has no namespace.
+    """
+    if schema is not None and schema.startswith(_SCHEMA_PREFIX):
+        namespace = schema[len(_SCHEMA_PREFIX) :]
+        if _NAMESPACE_RE.match(namespace) and len(namespace) <= _MAX_NAMESPACE_LEN:
+            return namespace
+    raise ValueError(
+        f"DBOS system schema {schema!r} is not a temporal namespace schema "
+        f"({_SCHEMA_PREFIX}<namespace>); build the DBOSClient with "
+        "dbos_system_schema=namespace_schema(<namespace>), or use "
+        "Client.connect(system_database_url, namespace=...) which does it for you"
+    )

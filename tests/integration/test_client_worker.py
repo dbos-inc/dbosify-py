@@ -183,7 +183,7 @@ async def _env() -> AsyncIterator[Client]:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            yield await Client.connect(dbos_client)
+            yield Client(dbos_client)
         finally:
             dbos_client.destroy()
 
@@ -483,7 +483,7 @@ async def test_query_reject_condition() -> None:
         assert exc_info.value.status == WorkflowExecutionStatus.COMPLETED
 
         # The client-level default applies when the call passes nothing.
-        strict_client = await Client.connect(
+        strict_client = Client(
             client._dbos_client,
             default_workflow_query_reject_condition=QueryRejectCondition.NOT_OPEN,
         )

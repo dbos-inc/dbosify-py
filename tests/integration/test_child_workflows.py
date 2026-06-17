@@ -210,7 +210,7 @@ async def _env() -> AsyncIterator[Client]:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            yield await Client.connect(dbos_client)
+            yield Client(dbos_client)
         finally:
             dbos_client.destroy()
 

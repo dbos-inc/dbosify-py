@@ -91,7 +91,7 @@ async def run_workflow_worker(workflow_id: str) -> None:
     ):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 RetryCrossQueueWorkflow.run,
                 "Temporal",
