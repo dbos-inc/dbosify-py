@@ -2826,7 +2826,7 @@ class Interpreter(_Runtime):
             return False
         return ctx.function_id < self._replay_horizon
 
-    def _patch(self, id: str, *, deprecated: bool) -> bool:
+    def _patch(self, id: str) -> bool:
         """Shared patched()/deprecate_patch() logic (DESIGN §6.8).
 
         Returns whether the *newer* code path should run, mirroring temporalio:
@@ -2836,6 +2836,11 @@ class Interpreter(_Runtime):
         itself — so an old in-flight run that never had the call keeps its
         checkpoint sequence and replays the old path. When the newer path is
         taken, a marker write is queued (command order) for durable persistence.
+
+        ``deprecate_patch`` shares this exact path: it too records the marker on
+        the newer path (so concurrent old runs keep their checkpoint positions);
+        unlike temporalio we don't tag the marker as deprecated, since our scan
+        only needs the id.
         """
         self._assert_not_read_only("use patched/deprecate_patch")
         use = self._patches_memoized.get(id)
@@ -2850,10 +2855,10 @@ class Interpreter(_Runtime):
         return use
 
     def runtime_patched(self, id: str) -> bool:
-        return self._patch(id, deprecated=False)
+        return self._patch(id)
 
     def runtime_deprecate_patch(self, id: str) -> None:
-        self._patch(id, deprecated=True)
+        self._patch(id)
 
     def runtime_history_length(self) -> int:
         ctx = get_local_dbos_context()

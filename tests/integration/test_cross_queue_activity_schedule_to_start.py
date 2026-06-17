@@ -16,14 +16,12 @@ from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "cross_queue_sts_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
-APP_VERSION = "tdb-xq-sts"
 
 
 def _env(vmid: str) -> "dict[str, str]":
     return {
         "PYTHONPATH": str(REPO_ROOT),
         "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
-        "DBOS__APPVERSION": APP_VERSION,
         "DBOS__VMID": vmid,
     }
 

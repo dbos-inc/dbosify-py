@@ -462,13 +462,14 @@ either the workflow worker or the activity worker resumes correctly.
 
 Operational requirement and current scope:
 
-- **Cooperating workers must share a DBOS application version.** DBOS scopes
-  queue dequeuing by application version, and a workflow worker and an
-  activity-only worker register different function sets — so their
-  auto-computed versions differ and the activity worker would never dequeue the
-  workflow worker's enqueue. Pin `DBOS__APPVERSION` to the same value across all
-  workers that dispatch activities to one another. (Temporal coordinates on the
-  task queue alone; this version pin is the DBOS-backed analogue.)
+- **Cooperating workers share a DBOS application version automatically.** DBOS
+  scopes queue dequeuing by application version, and a workflow worker and an
+  activity-only worker register different function sets — so DBOS's
+  auto-computed (code-hash) versions would differ and the activity worker would
+  never dequeue the workflow worker's enqueue. The Worker pins a stable default
+  version (`worker.DEFAULT_APP_VERSION`, D27) so all workers agree out of the
+  box; no per-worker version configuration is needed. (Temporal coordinates on
+  the task queue alone; this version pin is the DBOS-backed analogue.)
 - **The activity workflow owns the full retry loop** (Design A): the queued
   path honors `retry_policy` (backoff, `maximum_attempts`, `non_retryable_error_types`,
   `ApplicationError(non_retryable=...)`, `next_retry_delay`), `start_to_close_timeout`
@@ -655,6 +656,21 @@ it is `async` and assumes function-id == sequential code position, which our
 virtual-loop/command-queue interpreter decouples, and enabling it pins
 `GlobalParams.app_version` to `"PATCHING_ENABLED"` (app version scopes queue
 dequeuing — see the cross-queue notes in D23).
+
+**Stable default app version (required for patching to mean anything).** DBOS
+scopes both workflow recovery and queue dequeuing by `application_version`, which
+it otherwise auto-computes from a hash of the registered code. So a genuine
+redeploy — exactly the situation `patched()` exists for — would change the
+version and strand every in-flight workflow under the old one: a new-code worker
+would neither recover nor re-dequeue it, and the pre-patch runs `patched()` is
+meant to serve would never run again. The Worker therefore pins a stable default
+(`worker.DEFAULT_APP_VERSION`, currently `"0.1"`) unless the caller sets
+`application_version` in the `DBOSConfig` (set it to `None` to opt into DBOS's
+code-hash auto-versioning). This also lets cooperating workers that register
+different function sets agree on a version with no setup (D23). The override is
+config-only — there is no `DBOS__APPVERSION` special-casing. Distinct apps
+sharing one database should set `application_version` explicitly to keep their
+versions apart.
 
 Edges and gaps:
 
