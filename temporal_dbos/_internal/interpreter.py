@@ -423,15 +423,23 @@ def _schedule_occurrences(schedule_name: str, before_epoch: int, limit: int) -> 
             )
             occ: List[int] = []
             for f in firings:
-                args = (f.input or {}).get("args") if f.input else None
-                if not args:
+                # Defensive: this returns every firing tagged with the schedule
+                # name, and list_workflows hands back a raw (non-dict) input for
+                # any row it can't deserialize. Skip anything that doesn't parse
+                # as our ``(fired_at, context)`` firing input rather than failing
+                # the whole fire on one bad row.
+                try:
+                    args = f.input.get("args") if isinstance(f.input, dict) else None
+                    if not args:
+                        continue
+                    fired_at = args[0]
+                    if isinstance(fired_at, str):
+                        fired_at = datetime.fromisoformat(fired_at)
+                    if fired_at.tzinfo is None:
+                        fired_at = fired_at.replace(tzinfo=timezone.utc)
+                    ts = int(fired_at.timestamp())
+                except (AttributeError, TypeError, ValueError, KeyError, IndexError):
                     continue
-                fired_at = args[0]
-                if isinstance(fired_at, str):
-                    fired_at = datetime.fromisoformat(fired_at)
-                if fired_at.tzinfo is None:
-                    fired_at = fired_at.replace(tzinfo=timezone.utc)
-                ts = int(fired_at.timestamp())
                 if ts < before_epoch:
                     occ.append(ts)
             occ.sort(reverse=True)
