@@ -110,43 +110,26 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
     ),
 }
 
-# temporalio parameters not accepted yet, recorded exactly. qualname ->
-# parameter names. Implementing a parameter requires deleting it here.
+# temporalio parameters not accepted, recorded exactly. qualname -> parameter
+# names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # Dynamic signal/query/update handlers + handler descriptions are now
-    # supported (so signal/query/update have no missing params). Dynamic
-    # *workflows* are intentionally rejected, not absent: workflow.defn still
-    # accepts ``dynamic`` (raising NotImplementedError, DEVIATIONS D25), so it
-    # is not listed here. activity.defn now accepts ``no_thread_cancel_exception``
-    # too (rejected when False, DEVIATIONS D26). versioning_behavior is
-    # accepted-and-inert: worker deployment versioning has no DBOS analog
-    # (DEVIATIONS D28) — patched()/deprecate_patch() cover in-code branching.
+    # worker-deployment versioning has no DBOS analog (D28); patched() branches
     "workflow.defn": {"versioning_behavior"},
-    # Residual deviations only (the rest are now populated from real run data):
-    #  - execution_timeout / task_timeout: accepted at start but not honored
-    #    (only run_timeout is), and no DBOS analog — surfacing them would imply
-    #    enforcement we don't provide.
-    #  - raw_memo: temporalio's is the raw protobuf payload map; we have no
-    #    protobuf (corollary of D1). Decoded memo is available via memo().
-    #  - root: the transitive root of the parent tree; we hold only the
-    #    immediate parent link, not a walked/propagated root.
+    # no-analog timeouts (exec/task, unenforced); protobuf raw_memo; root not held
     "workflow.Info.__init__": {
         "execution_timeout",
         "raw_memo",
         "root",
         "task_timeout",
     },
-    # activity.Info is now fully populated (timeouts/retry/priority/namespace/
-    # timestamps all carried through), so it has no missing parameters.
+    # no event-log history_length; protobuf raw_info; transitive root not held
     "client.WorkflowExecution.__init__": {
-        # history_length: no Temporal-style event log (DBOS step checkpoints
-        # are a different model). raw_info: protobuf, absent (corollary of D1).
-        # root_id/root_run_id: transitive root not held (only the parent link).
         "history_length",
         "raw_info",
         "root_id",
         "root_run_id",
     },
+    # as WorkflowExecution, plus protobuf raw_description
     "client.WorkflowExecutionDescription.__init__": {
         "history_length",
         "raw_description",
@@ -154,56 +137,49 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "root_id",
         "root_run_id",
     },
+    # gRPC start-response object, no analog
     "client.WorkflowHandle.__init__": {
         "start_workflow_response",
     },
-    # We have no archival tier; fetch_history reads DBOS step checkpoints.
+    # no archival tier; fetch_history reads DBOS step checkpoints
     "client.WorkflowHandle.fetch_history": {"skip_archival"},
-    # Callbacks/links/stack_level are gRPC-era plumbing. versioning_override is
-    # a worker-deployment-versioning pin (temporalio.common.VersioningOverride);
-    # like versioning_behavior it has no DBOS analog (D27/D28) — patched()
-    # covers in-code branching. It changes dispatch behavior, so it is rejected
-    # (TypeError) rather than silently accepted.
+    # gRPC-era callbacks/links/stack_level; versioning_override: no DBOS analog (D27/D28)
     "client.Client.start_workflow": {
         "callbacks",
         "links",
         "stack_level",
         "versioning_override",
     },
+    # versioning_override: no DBOS worker-versioning analog (D27/D28)
     "client.Client.execute_workflow": {"versioning_override"},
+    # gRPC-era stack_level; versioning_override: no DBOS analog (D27/D28)
     "client.WithStartWorkflowOperation.__init__": {
         "stack_level",
         "versioning_override",
     },
-    # ActivityCancellationDetails (the cancel reason: not-found / timed-out /
-    # paused / worker-shutdown) is not implemented — the type and
-    # ``activity.cancellation_details()`` are absent
+    # ActivityCancellationDetails (the cancel reason) not implemented
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
-    # We have no protobuf Failure to mutate in place, so the failure converter
-    # *returns* the failure envelope instead of filling a passed-in `failure`.
+    # no protobuf Failure to fill in place; we return the failure envelope instead
     "converter.FailureConverter.to_failure": {"failure"},
+    # no protobuf Failure to fill in place; we return the failure envelope instead
     "converter.DefaultFailureConverter.to_failure": {"failure"},
+    # no protobuf Failure to fill in place; we return the failure envelope instead
     "converter.DataConverter.encode_failure": {"failure"},
-    # External storage and payload-size limits are not implemented (DESIGN §6.9
-    # scope); proto/search-attribute helpers are intentionally absent.
+    # external storage + payload-size limits not implemented (DESIGN §6.9)
     "converter.DataConverter.__init__": {"external_storage", "payload_limits"},
-    # Schedules (DESIGN §6.7). The action's typed/untyped search attributes are
-    # now applied to the workflows it starts (alongside memo); headers
-    # (interceptor headers on scheduled starts) and raw_info (protobuf) remain
-    # absent.
+    # interceptor headers on scheduled starts not propagated; protobuf raw_info
     "client.ScheduleActionStartWorkflow.__init__": {
         "headers",
         "raw_info",
     },
-    # The schedule *entity's* own search attributes: we don't model schedules as
-    # searchable entities, so they aren't stored/exposed. data_converter (a
-    # decode handle) and raw_* (protobuf) likewise have no analog.
+    # schedules aren't searchable entities (own SAs); no converter handle; protobuf raw
     "client.ScheduleDescription.__init__": {
         "data_converter",
         "raw_description",
         "search_attributes",
         "typed_search_attributes",
     },
+    # as ScheduleDescription; protobuf raw_entry
     "client.ScheduleListDescription.__init__": {
         "data_converter",
         "raw_entry",
