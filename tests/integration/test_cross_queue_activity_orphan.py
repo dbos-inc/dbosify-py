@@ -18,7 +18,6 @@ from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "cross_queue_orphan_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
-APP_VERSION = "tdb-xq-orphan"
 
 
 def _env(vmid: str, effects: Path) -> "dict[str, str]":
@@ -26,7 +25,6 @@ def _env(vmid: str, effects: Path) -> "dict[str, str]":
         "PYTHONPATH": str(REPO_ROOT),
         "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
         "TDB_TEST_EFFECTS": str(effects),
-        "DBOS__APPVERSION": APP_VERSION,
         "DBOS__VMID": vmid,
     }
 

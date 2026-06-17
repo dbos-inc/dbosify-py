@@ -34,12 +34,9 @@ def test_activity_worker_cross_queue() -> None:
     base_env = {
         "PYTHONPATH": str(REPO_ROOT),
         "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
-        # Cooperating workers must share a DBOS application version: DBOS scopes
-        # queue dequeuing by app version, and the two workers register different
-        # function sets (so their auto-computed versions would differ and the
-        # activity worker would never dequeue the workflow worker's
-        # __temporal_activity enqueue). See DEVIATIONS.
-        "DBOS__APPVERSION": "tdb-activity-worker-conformance",
+        # Cooperating workers register different function sets but share the
+        # Worker's pinned default DBOS app version, so the activity worker
+        # dequeues the workflow worker's __temporal_activity enqueue.
     }
 
     # Distinct executor ids so each worker only ever recovers its own queue's

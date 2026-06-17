@@ -26,17 +26,12 @@ from tests.harness import PythonProcess
 WORKER = Path(__file__).parent / "cross_queue_recovery_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
 
-# Shared app version (DBOS scopes queue dequeuing by it; cooperating workers
-# that register different function sets must pin the same value).
-APP_VERSION = "tdb-xq-recovery"
-
 
 def _env(vmid: str, effects: Path) -> "dict[str, str]":
     return {
         "PYTHONPATH": str(REPO_ROOT),
         "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
         "TDB_TEST_EFFECTS": str(effects),
-        "DBOS__APPVERSION": APP_VERSION,
         "DBOS__VMID": vmid,
     }
 

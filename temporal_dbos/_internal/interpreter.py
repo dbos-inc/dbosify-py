@@ -162,6 +162,14 @@ _activity_result_step: Optional[Callable[[str], Any]] = None
 _update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
 _safe_status_step: Optional[Callable[[str], Any]] = None
 _safe_status_list_step: Optional[Callable[[List[str]], Any]] = None
+_patch_step: Optional[Callable[[str], Any]] = None
+
+# The DBOS step name for a workflow.patched()/deprecate_patch() marker. The
+# step's recorded output is the patch id, so a recovering run rebuilds the set
+# of recorded patch ids by scanning its step list for this name (see
+# Interpreter.execute). Mirrors temporalio's SetPatchMarker, but keyed by id
+# (set membership), not by position — robust to code that shifts checkpoints.
+PATCH_STEP_NAME = "__tdb_patch"
 
 
 def _workflow_init_step() -> Any:
@@ -382,6 +390,24 @@ def _safe_status_list(dbos_ids: List[str]) -> Any:
 
         _safe_status_list_step = safe_status_list_step
     return _safe_status_list_step(dbos_ids)
+
+
+def _patch_marker(patch_id: str) -> Any:
+    """Record a ``workflow.patched()`` marker as a checkpointed step whose
+    output is the patch id. Claimed at a deterministic position (command order,
+    awaited inline in ``_process_commands`` — same model as the ``send`` /
+    ``attributes`` commands), so replay reads the id back, and the next run's
+    step-list scan rediscovers it. The body never re-runs on replay.
+    """
+    global _patch_step
+    if _patch_step is None:
+
+        @DBOS.step(name=PATCH_STEP_NAME)
+        async def patch_step(patch_id: str) -> str:
+            return patch_id
+
+        _patch_step = patch_step
+    return _patch_step(patch_id)
 
 
 class _TimerHandle(asyncio.TimerHandle):
@@ -790,6 +816,13 @@ class Interpreter(_Runtime):
         self._own_queue_name: Optional[str] = None
         self._own_queue_resolved = False
         self._replay_horizon = 0
+        # workflow.patched()/deprecate_patch() state (DESIGN §6.8). Patch ids
+        # whose marker exists in recorded history (rebuilt from the step list at
+        # execute() start); the per-id decision memo (one decision per id per
+        # run, like temporalio); and markers queued for durable write this turn.
+        self._patches_recorded: Set[str] = set()
+        self._patches_memoized: Dict[str, bool] = {}
+        self._pending_patches: Dict[int, str] = {}
         # Set when a rehydrate (query-on-closed replay) scratch run is told to
         # stop serving queries and complete (see _serve loop in execute()).
         self._rehydrate_stop = False
@@ -856,6 +889,16 @@ class Interpreter(_Runtime):
             None, DBOS.list_workflow_steps, self._workflow_id
         )
         self._replay_horizon = max((step["function_id"] for step in steps), default=0)
+
+        # Rebuild the set of patch ids whose marker is in recorded history, by
+        # id (set membership), not by position — so patched() returns the same
+        # verdict on replay regardless of checkpoint shifts (DESIGN §6.8). Each
+        # marker step's recorded output is its patch id.
+        self._patches_recorded = {
+            step["output"]
+            for step in steps
+            if step["function_name"] == PATCH_STEP_NAME and step["output"] is not None
+        }
 
         # continued_run_id: DBOS threads parent_workflow_id automatically for
         # in-workflow starts, and our continue-as-new enqueue runs inside the
@@ -1565,6 +1608,17 @@ class Interpreter(_Runtime):
                 )
                 self._check_replay_horizon()
                 await DBOS.update_workflow_attributes_async(self._workflow_id, encoded)
+            elif kind == "patch":
+                # A patched()/deprecate_patch() call took the newer path: persist
+                # its marker durably so future replays rediscover it. Awaited
+                # inline (like "send"/"attributes") so the marker step claims its
+                # function_id at this deterministic position; replay reads the id
+                # back without re-running the body. A replay scratch run that
+                # tries to write a marker past the horizon means the replayed code
+                # diverged (it patched where the recording didn't).
+                patch_id = self._pending_patches.pop(seq)
+                self._check_replay_horizon()
+                await _patch_marker(patch_id)
         return progressed
 
     async def _start_child(self, child: _ChildExec) -> None:
@@ -2887,6 +2941,40 @@ class Interpreter(_Runtime):
         if ctx is None:
             return False
         return ctx.function_id < self._replay_horizon
+
+    def _patch(self, id: str) -> bool:
+        """Shared patched()/deprecate_patch() logic (DESIGN §6.8).
+
+        Returns whether the *newer* code path should run, mirroring temporalio:
+        true on first (non-replaying) execution or when this patch's marker is
+        already in recorded history; false when replaying history that predates
+        the patch. The decision is memoized per id and claims no function_id
+        itself — so an old in-flight run that never had the call keeps its
+        checkpoint sequence and replays the old path. When the newer path is
+        taken, a marker write is queued (command order) for durable persistence.
+
+        ``deprecate_patch`` shares this exact path: it too records the marker on
+        the newer path (so concurrent old runs keep their checkpoint positions);
+        unlike temporalio we don't tag the marker as deprecated, since our scan
+        only needs the id.
+        """
+        self._assert_not_read_only("use patched/deprecate_patch")
+        use = self._patches_memoized.get(id)
+        if use is not None:
+            return use
+        use = (not self.runtime_is_replaying()) or (id in self._patches_recorded)
+        self._patches_memoized[id] = use
+        if use:
+            seq = self._next_seq("patch")
+            self._pending_patches[seq] = id
+            self._commands.append(("patch", seq))
+        return use
+
+    def runtime_patched(self, id: str) -> bool:
+        return self._patch(id)
+
+    def runtime_deprecate_patch(self, id: str) -> None:
+        self._patch(id)
 
     def runtime_history_length(self) -> int:
         ctx = get_local_dbos_context()

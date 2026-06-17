@@ -641,11 +641,21 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   `attempt`, `task_queue` = DBOS queue name, `start_time` from status `created_at`,
   `parent`/`root` from DBOS parent links, `search_attributes`/`memo` from envelope,
   `get_current_history_length()` → interpreter seq count.
-- `workflow.patched(id)` / `deprecate_patch(id)`: checkpoint-marker implementation — first
-  execution records `True` for new code; replay of a pre-patch execution finds a
-  non-matching/absent checkpoint and returns `False`. Align with DBOS's native patching
-  (`enable_patching` config in `dbos/_dbos_config.py` — read how it works and reuse if it
-  fits). Phase 4.
+- `workflow.patched(id)` / `deprecate_patch(id)`: **done.** Checkpoint-marker
+  implementation. The decision (`not is_replaying() or id in recorded-markers`) is computed
+  synchronously at the call site, memoized per id, and — crucially — claims **no**
+  function_id; only when the newer path is taken is a marker durably written (a
+  `@DBOS.step(name="__tdb_patch")` whose output is the id, queued through the command queue
+  so it lands at a deterministic checkpoint position). First execution records the marker and
+  takes the newer path; replay of a pre-patch history finds no marker, returns `False`, and —
+  because the False decision consumed no position — replays the older path with its original
+  checkpoint sequence intact. The recorded-marker set is rebuilt at run start by scanning the
+  step list **by id** (set membership, like temporalio's `NotifyHasPatch`), not by position,
+  so it survives code that shifts checkpoints. We do **not** use DBOS's native
+  `patch_async` (`enable_patching` in `dbos/_dbos_config.py`): it is async and assumes
+  function_id == sequential code position, which our virtual-loop/command-queue split
+  decouples, and it pins `app_version` to `"PATCHING_ENABLED"`. See `_internal/interpreter.py`
+  (`_patch`, `_patch_marker`, the `execute()` scan) and [DEVIATIONS.md](DEVIATIONS.md) D28.
 - `workflow.unsafe.*`: `imports_passed_through()` → no-op context manager; `is_replaying()`
   real (§4.2); `in_sandbox()` → False; the rest no-ops.
 - Interceptors (client `Interceptor/OutboundInterceptor`, worker

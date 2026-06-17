@@ -118,7 +118,9 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     # *workflows* are intentionally rejected, not absent: workflow.defn still
     # accepts ``dynamic`` (raising NotImplementedError, DEVIATIONS D25), so it
     # is not listed here. activity.defn now accepts ``no_thread_cancel_exception``
-    # too (rejected when False, DEVIATIONS D26). versioning_behavior: Phase 4.
+    # too (rejected when False, DEVIATIONS D26). versioning_behavior is
+    # accepted-and-inert: worker deployment versioning has no DBOS analog
+    # (DEVIATIONS D28) — patched()/deprecate_patch() cover in-code branching.
     "workflow.defn": {"versioning_behavior"},
     # Info/describe field coverage grows with features (DESIGN §6.8).
     "workflow.Info.__init__": {
