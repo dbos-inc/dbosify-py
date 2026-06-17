@@ -17,7 +17,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "dbos==2.25.0a4",
+    "dbos==2.25.0a5",
     # datetime.fromisoformat can't parse some ISO-8601 forms before 3.11;
     # value_to_type falls back to dateutil there (mirrors temporalio).
     "python-dateutil>=2.8.2,<3 ; python_version < '3.11'",
