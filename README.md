@@ -59,7 +59,7 @@ harness).
 | hello_activity_multiprocess | ⬜ multiprocess activity executors unsupported |
 | hello_change_log_level | — never exits by design (also true on Temporal) |
 | hello_mtls | — needs mTLS infrastructure |
-| hello_patch | — manual multi-invocation walkthrough (Phase 4) |
+| hello_patch | ✅ `workflow.patched()` / `deprecate_patch()` implemented (DESIGN §6.8); the sample is a manual multi-deploy walkthrough, so replay semantics are covered by `tests/integration/test_patched_recovery.py` instead |
 
 `message_passing/` (multi-file, worker + starter as separate processes):
 
@@ -118,6 +118,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 16 | Schedules (`create_schedule`/`ScheduleHandle`) back onto DBOS schedules: a `ScheduleSpec` compiles to one cron expression (intervals that divide a cron boundary are exact, others approximate; calendar `year`/interval `offset` dropped); the schedule's overlap policy honors SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL (CANCEL_OTHER doesn't wait for the cancelled run to finish; detection is grid-based and bounded) but rejects BUFFER_ONE/BUFFER_ALL, and a per-call `trigger`/`backfill` overlap override is not applied (only None/ALLOW_ALL accepted, others raise); `update` is delete-then-recreate and `pause`/`unpause` don't persist their `note`; schedule history (recent actions, action counts) and schedule `memo`/`search_attributes` are not tracked. See [DEVIATIONS.md](DEVIATIONS.md) D22. |
 | 17 | Interceptors cover client (`Client(interceptors=)`), activity, and workflow inbound/outbound (`Worker(interceptors=)`, via `workflow_interceptor_class`). Header-based context propagation works end-to-end (client→workflow→activity/child/signal, re-injected across continue-as-new); header values are `Payload`s, encoded/decoded with `workflow.payload_converter()`/`activity.payload_converter()`. `handle_query`/`handle_update_validator` are synchronous (deviation #11). Nexus interception is unsupported; worker interceptors come only from `Worker(interceptors=)` (the worker has no client to harvest them from). See [DEVIATIONS.md](DEVIATIONS.md) D24. |
 | 18 | Dynamic **signal/query/update handlers** (`dynamic=True`, with `description=` metadata) and dynamic **activities** (`@activity.defn(dynamic=True)`) are supported, including `workflow`/`activity.payload_converter()` for converting their `RawValue` args. Dynamic **workflows** (`@workflow.defn(dynamic=True)`) are **not** supported and raise `NotImplementedError`: a catch-all workflow has no per-type `wf:{type}` DBOS registration (deviation #1 / one-workflow-per-type listing). See [DEVIATIONS.md](DEVIATIONS.md) D25. |
+| 19 | `workflow.patched()` / `deprecate_patch()` are supported (durable checkpoint markers; a False verdict claims no position so pre-patch runs replay the old path). Worker **deployment versioning** (Build IDs / Worker Deployment Versions, `versioning_behavior` on `@workflow.defn`, `versioning_*`/`versioning_override` knobs) is a Temporal-cluster routing concept with no DBOS analog — accepted-and-inert. Use `patched()` for in-code branching across deploys. See [DEVIATIONS.md](DEVIATIONS.md) D27. |
 
 ## Development
 

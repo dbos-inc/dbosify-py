@@ -104,6 +104,7 @@ def _reset_for_tests() -> None:
     interpreter._update_validate_step = None
     interpreter._safe_status_step = None
     interpreter._safe_status_list_step = None
+    interpreter._patch_step = None
 
 
 def register_worker(

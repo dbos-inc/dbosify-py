@@ -69,6 +69,7 @@ __all__ = [
     "continue_as_new",
     "ContinueAsNewError",
     "defn",
+    "deprecate_patch",
     "execute_activity",
     "execute_activity_method",
     "execute_child_workflow",
@@ -88,6 +89,7 @@ __all__ = [
     "memo",
     "memo_value",
     "now",
+    "patched",
     "payload_converter",
     "query",
     "random",
@@ -601,6 +603,12 @@ class _Runtime:
     def runtime_is_replaying(self) -> bool:
         raise NotImplementedError
 
+    def runtime_patched(self, id: str) -> bool:
+        raise NotImplementedError
+
+    def runtime_deprecate_patch(self, id: str) -> None:
+        raise NotImplementedError
+
     def runtime_history_length(self) -> int:
         raise NotImplementedError
 
@@ -915,6 +923,38 @@ def random() -> Random:
 def uuid4() -> uuid_mod.UUID:
     """Deterministic UUID v4 derived from the workflow's random seed."""
     return uuid_mod.UUID(bytes=random().getrandbits(128).to_bytes(16, "big"), version=4)
+
+
+def patched(id: str) -> bool:
+    """Patch a workflow.
+
+    When called, this will only return true if code should take the newer path
+    which means this is either not replaying or is replaying and has seen this
+    patch before.
+
+    Backed by a durable checkpoint marker (DESIGN §6.8): the first non-replaying
+    execution records the marker and takes the newer path; a run replaying
+    history that predates the patch finds no marker and takes the older path.
+
+    Returns:
+        True if this should take the newer path, false if it should take the
+        older path.
+    """
+    return _runtime().runtime_patched(id)
+
+
+def deprecate_patch(id: str) -> None:
+    """Mark a patch as deprecated.
+
+    This marks a workflow that had :py:func:`patched` in a previous version of
+    the code as no longer applicable because all workflows that use the old code
+    path are done and will never be queried again. Therefore the old code path
+    is removed as well.
+
+    Args:
+        id: The identifier originally used with :py:func:`patched`.
+    """
+    _runtime().runtime_deprecate_patch(id)
 
 
 async def sleep(

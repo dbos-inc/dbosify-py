@@ -629,3 +629,46 @@ registration for an unknown incoming type to dispatch to, so it conflicts with
 that model. Register each workflow type explicitly. (The `dynamic` parameter is
 still accepted on `@workflow.defn` for signature parity — it is rejected, not
 absent.)
+
+### D27. Patching is supported; worker-deployment versioning is not
+
+`workflow.patched(id)` and `workflow.deprecate_patch(id)` work and match
+temporalio's semantics: `patched()` returns `True` on a first (non-replaying)
+execution or when this patch's marker is already in history, and `False` when
+replaying a history that predates the patch; `deprecate_patch()` follows the same
+use-patch logic and records the marker so concurrent old runs keep their
+checkpoint positions.
+
+Implementation (DESIGN §6.8): the verdict is computed at the call site from the
+set of patch ids already recorded in this run's step list (rebuilt at run start),
+memoized per id, and claims **no** checkpoint position — so an old in-flight run
+that never had the call keeps its function-id sequence and replays the older path
+deterministically. Only when the newer path is taken is a marker durably written,
+as a `@DBOS.step(name="__tdb_patch")` whose output is the patch id, routed through
+the command queue so it lands at a deterministic position (replay reads it back).
+The set is keyed by id (set membership, like temporalio's `NotifyHasPatch`), not
+by position, so it is robust to code that shifts checkpoints.
+
+We deliberately do **not** use DBOS's native `DBOS.patch_async`
+(`enable_patching` in `dbos/_dbos_config.py`), even though its semantics match:
+it is `async` and assumes function-id == sequential code position, which our
+virtual-loop/command-queue interpreter decouples, and enabling it pins
+`GlobalParams.app_version` to `"PATCHING_ENABLED"` (app version scopes queue
+dequeuing — see the cross-queue notes in D23).
+
+Edges and gaps:
+
+- **As in temporalio, patching is the user's contract, not a safety net.**
+  `deprecate_patch()` is only safe to deploy once every pre-patch run is closed
+  (its whole purpose), and removing a patch branch while pre-patch runs are still
+  open will diverge from their recorded history — the standard non-determinism
+  hazard, surfaced at replay (D13), not at development time.
+- **No worker deployment versioning.** Temporal's Build IDs / Worker Deployment
+  Versions / `WorkerDeploymentConfig` and the `versioning_behavior` /
+  `versioning_override` / `versioning_intent` knobs are a Temporal-cluster
+  concept (the server routes tasks to compatible worker fleets). DBOS has a
+  single `app_version` per deployment and no task-routing fleet model, so these
+  are **not** implemented: `versioning_behavior` on `@workflow.defn` and the
+  `versioning_*` fields on the client/outbound `*Input`s are accepted-and-inert
+  (signature parity; carried, not acted on). Use `patched()` for in-code
+  branching across deploys.
