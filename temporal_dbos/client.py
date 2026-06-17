@@ -2014,10 +2014,11 @@ class WorkflowHandle:
             client, target, steps, mode="rehydrate"
         )
         scratch_id = scratch_handle.get_workflow_id()
+        reply_key = inbox.query_result_key(request_id)
         try:
             await client.send_async(scratch_id, envelope, inbox.INBOX_TOPIC)
-            reply = await self._client._await_reply_event(
-                scratch_id, scratch_id, inbox.query_result_key(request_id), timeout
+            reply = await self._await_rehydrate_reply(
+                scratch_handle, scratch_id, reply_key, timeout
             )
             if reply is None:
                 # The fork reached a terminal state without serving the query:
@@ -2031,10 +2032,11 @@ class WorkflowHandle:
                 )
             return reply
         finally:
-            _replay.unregister_guard(scratch_id)
-            # Stop the scratch run serving and wait for it to settle, so the
-            # delete below never races a still-serving run. If it does not stop
-            # within the settle window, cancel it to force a terminal state.
+            # Stop the scratch run serving and wait for it to settle BEFORE
+            # unregistering the guard, so the guard stays active for the whole
+            # time the fork is executing — a fork that is still replaying must
+            # never run a real op past the horizon while unguarded. Cancel it if
+            # it overruns the settle window, then unregister and delete.
             try:
                 await client.send_async(
                     scratch_id, inbox.rehydrate_stop_envelope(), inbox.INBOX_TOPIC
@@ -2053,6 +2055,7 @@ class WorkflowHandle:
                     pass
             except Exception:  # noqa: BLE001 — the run reached a terminal state
                 pass
+            _replay.unregister_guard(scratch_id)
             try:
                 # delete_children stays False: the rehydrated fork starts no
                 # real children (they replay from checkpoints), so it owns none
@@ -2062,6 +2065,44 @@ class WorkflowHandle:
                 logger.warning(
                     "query rehydrate: failed to delete scratch run %s", scratch_id
                 )
+
+    async def _await_rehydrate_reply(
+        self, scratch_handle: Any, scratch_id: str, reply_key: str, timeout: float
+    ) -> Optional[Any]:
+        """Wait for a rehydrate fork's query reply, but stop as soon as the fork
+        reaches a terminal state without one — so a diverged (code-changed) or
+        non-serving fork fails fast instead of blocking the full ``timeout``.
+
+        A faithful rehydrate serves the reply and then parks for the stop signal
+        (its result never resolves here), so the reply wins the race; a fork that
+        never serves (diverged past the horizon, or completed with no in-process
+        worker) reaches a terminal result with no reply, so the result wins and
+        we return None.
+        """
+        reply_task = asyncio.ensure_future(
+            self._client._await_reply_event(scratch_id, scratch_id, reply_key, timeout)
+        )
+        result_task = asyncio.ensure_future(
+            scratch_handle.get_result(polling_interval_sec=0.05)
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {reply_task, result_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if reply_task in done and reply_task.exception() is None:
+                return reply_task.result()  # reply payload, or None on its timeout
+            return None  # the fork terminated without serving a reply
+        finally:
+            for task in (reply_task, result_task):
+                if not task.done():
+                    task.cancel()
+            # Drain both so a cancelled wait or a fork failure is not an
+            # "exception was never retrieved" warning.
+            for task in (reply_task, result_task):
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
 
     async def start_update(
         self,
@@ -2249,11 +2290,15 @@ class WorkflowHandle:
         Unlike the interpreter's in-workflow step read (which must hop to an
         executor thread to stay live, see ``interpreter.execute``), this runs on
         a plain client with no DBOS workflow context, so the async call is safe.
+
+        Resolves the run the same way :py:meth:`describe` does (the bound run, or
+        the chain's current run) rather than anchoring on the first run, so the
+        same id snapshots the same run regardless of how the handle was obtained.
         """
         _ignore_rpc_options("fetch_history", rpc_metadata, rpc_timeout)
         if event_filter_type is not None:
             logger.debug("fetch_history: ignoring event_filter_type")
-        dbos_id = self._result_run_id or await self._target()
+        dbos_id = await self._target()
         status = await self._client._status_of(dbos_id)
         steps = await self._client._dbos_client.list_workflow_steps_async(dbos_id)
         workflow_type = status.name or ""

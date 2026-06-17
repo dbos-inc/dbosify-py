@@ -25,6 +25,14 @@ The guard is a process-global dict keyed by the scratch run id, **not** a
 set on the engine's task would not reach the fork's execution context. Keying on
 the unique scratch id keeps the guard inert for every other (real) workflow that
 happens to run concurrently.
+
+The same fork-and-guard machinery (``start_replay_fork`` with ``mode``) backs
+**query-on-closed-workflow rehydrate** (DEVIATIONS D25): the client forks a
+closed run in ``mode="rehydrate"``, the forked run replays to its final state
+and then *keeps serving* one query against the reconstructed instance (it is not
+deleted-after-verify but stops on a client signal or the
+``REHYDRATE_SERVE_SECONDS`` deadline), and the client then discards it. The
+``REHYDRATE_*`` constants below tune that serve/settle/poll timing.
 """
 
 import logging
@@ -59,6 +67,11 @@ REHYDRATE_SERVE_SECONDS = 30.0
 # How long the querying client waits for a rehydrate scratch run to settle
 # (after sending the stop signal) before force-cancelling it and deleting it.
 REHYDRATE_SETTLE_SECONDS = 10.0
+
+# Inbox-recv timeout a rehydrate scratch run uses while serving queries, so its
+# serve deadline stays effective even if the client never sends a stop signal
+# (a plain RECV_TIMEOUT_SECONDS would block the deadline re-check for an hour).
+REHYDRATE_POLL_SECONDS = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +140,6 @@ async def start_replay_fork(
     steps: Sequence[Mapping[str, Any]],
     *,
     mode: str = "verify",
-    application_version: Optional[str] = None,
 ) -> Any:
     """Fork ``run_id`` one step past its last recorded checkpoint — copying
     *every* recorded step — and register the replay guard for the scratch run.
@@ -137,21 +149,20 @@ async def start_replay_fork(
     verification path and the query-on-closed rehydrate path: the copy bound is
     ``function_id < start_step`` and ids are 1-based and contiguous, so
     ``horizon + 1`` includes the final step. ``forker`` is anything exposing
-    ``fork_workflow_async`` (the ``DBOS`` runtime or a ``DBOSClient``).
+    ``fork_workflow_async`` (the ``DBOS`` runtime or a ``DBOSClient``). The fork
+    is created with no pinned application version (NULL), so the *current*
+    worker dequeues and runs it — replay verifies today's code, not the
+    recorded run's version.
     """
     horizon = max((s["function_id"] for s in steps), default=0)
-    handle = await forker.fork_workflow_async(
-        run_id, horizon + 1, application_version=application_version
-    )
+    handle = await forker.fork_workflow_async(run_id, horizon + 1)
     register_guard(
         _ReplayGuard(scratch_id=handle.get_workflow_id(), horizon=horizon, mode=mode)
     )
     return handle
 
 
-async def replay_one(
-    history: "WorkflowHistory", *, application_version: Optional[str] = None
-) -> Optional[Exception]:
+async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     """Fork-and-verify a single history under the currently-registered code.
 
     Returns the replay failure (a ``NondeterminismError`` for divergence, or a
@@ -169,25 +180,24 @@ async def replay_one(
     )
     from .status import WorkflowExecutionStatus
 
-    # TERMINATED (native kill) and TIMED_OUT runs keep only a partial checkpoint
-    # history, so re-execution legitimately runs past the partial horizon and
-    # would look nondeterministic. Refuse them clearly rather than reporting a
-    # false divergence (mirrors the query-on-closed gate; DEVIATIONS D25).
+    # States that cannot be faithfully reconstructed by replay (mirrors the
+    # query-on-closed gate; DEVIATIONS D25): TERMINATED (native kill) and
+    # TIMED_OUT keep only a partial checkpoint history, so re-execution runs
+    # past the partial horizon and would look nondeterministic; CONTINUED_AS_NEW
+    # would re-enter the continue-as-new path on the throwaway fork. Refuse them
+    # clearly instead of reporting a false divergence.
     if history.status in (
         WorkflowExecutionStatus.TERMINATED,
         WorkflowExecutionStatus.TIMED_OUT,
+        WorkflowExecutionStatus.CONTINUED_AS_NEW,
     ):
         return ValueError(
-            f"cannot replay a {history.status.name} workflow: only a partial "
-            "checkpoint history was recorded (DEVIATIONS D25)"
+            f"cannot replay a {history.status.name} workflow: it cannot be "
+            "faithfully reconstructed from its checkpoints (DEVIATIONS D25)"
         )
 
     handle = await start_replay_fork(
-        DBOS,
-        history.run_id,
-        history.recorded_steps,
-        mode="verify",
-        application_version=application_version,
+        DBOS, history.run_id, history.recorded_steps, mode="verify"
     )
     scratch_id = handle.get_workflow_id()
     replay_failure: Optional[Exception] = None

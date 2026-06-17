@@ -175,11 +175,12 @@ def _make_dbos_workflow(
                 serialize_failure(cancelled.cause)
             ) from None
         except (NondeterminismError, DBOSUnexpectedStepError) as nde:
-            # A verification replay diverged (the interpreter guard fired, or
-            # DBOS saw a different step at a recorded function_id). Record it in
-            # the failure envelope under the nondeterminism marker so the replay
-            # engine can tell divergence apart from a faithfully-replayed
-            # genuine failure. No chain continuation — replay never retries.
+            # A replay diverged — verification OR rehydrate (the interpreter
+            # guard fired, or DBOS saw a different step at a recorded
+            # function_id). Record it in the failure envelope under the
+            # nondeterminism marker so the replay engine / rehydrate query can
+            # tell divergence apart from a faithfully-replayed genuine failure.
+            # No chain continuation — replay never retries.
             # Only convert when a replay guard is active for this run; outside a
             # replay, a DBOSUnexpectedStepError is a real non-determinism bug and
             # a user-raised NondeterminismError is an ordinary error — both keep

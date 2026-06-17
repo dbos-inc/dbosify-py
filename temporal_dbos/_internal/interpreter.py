@@ -913,7 +913,19 @@ class Interpreter(_Runtime):
                 )
                 await self._deliver(done)
         finally:
-            if self._outcome is not None and self._outcome[0] != "task_failure":
+            # A replay scratch run (verify OR rehydrate) is a read-only
+            # reconstruction of an already-closed workflow: it must NOT emit the
+            # terminal-close side effects below (cancelling the source run's
+            # in-flight activities, applying ParentClosePolicy to its children,
+            # continue-as-new enqueue, failing its abandoned updates, async-gone
+            # events) — those would act on the real chain's runs. Only the
+            # interpreter's own waiter teardown should run.
+            is_replay = _replay.current_guard_for(self._workflow_id) is not None
+            if (
+                not is_replay
+                and self._outcome is not None
+                and self._outcome[0] != "task_failure"
+            ):
                 # Cancel in-flight activities at a terminal close (including
                 # continue-as-new), so a fire-and-forget or still-running
                 # activity does not outlive the workflow. Local attempts are
@@ -934,7 +946,11 @@ class Interpreter(_Runtime):
                 # Terminal outcome (not a retryable task failure): apply
                 # ParentClosePolicy to still-running children.
                 await self._sweep_children_on_close()
-            if self._outcome is not None and self._outcome[0] == "continue_as_new":
+            if (
+                not is_replay
+                and self._outcome is not None
+                and self._outcome[0] == "continue_as_new"
+            ):
                 # Enqueue the next run BEFORE tearing down waiters: it must
                 # exist before carryover messages can be forwarded to it
                 # (FK), and the earlier it exists the sooner senders resolve
@@ -951,7 +967,11 @@ class Interpreter(_Runtime):
             self._waiters.clear()
             if self._can_new_run_id is not None:
                 await self._forward_inbox_to(self._can_new_run_id)
-            if self._outcome is not None and self._outcome[0] != "task_failure":
+            if (
+                not is_replay
+                and self._outcome is not None
+                and self._outcome[0] != "task_failure"
+            ):
                 await self._fail_abandoned_updates()
                 for exec_state in self._pending_activities.values():
                     if exec_state.async_pending:
@@ -1886,10 +1906,17 @@ class Interpreter(_Runtime):
 
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):
+            recv_timeout = inbox.RECV_TIMEOUT_SECONDS
+            if self._rehydrate_guard() is not None:
+                # Serving a rehydrate query: poll often so the serve deadline
+                # (re-checked at the loop top) stays effective even if the
+                # client never sends a stop signal — a full RECV_TIMEOUT would
+                # otherwise pin the scratch run alive for an hour.
+                recv_timeout = min(recv_timeout, _replay.REHYDRATE_POLL_SECONDS)
             self._launch_waiter(
                 "inbox",
                 0,
-                DBOS.recv_async(inbox.INBOX_TOPIC, inbox.RECV_TIMEOUT_SECONDS),
+                DBOS.recv_async(inbox.INBOX_TOPIC, recv_timeout),
             )
 
     async def _flush_outbox(self) -> None:
