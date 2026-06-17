@@ -57,6 +57,11 @@ def test_cross_queue_activity_is_cancelled(tmp_path: Path, cancel_type: str) -> 
             line = workflow_worker.wait_for_line("RESULT ", timeout=90)
             assert workflow_worker.wait(timeout=30) == 0
             assert line.split("RESULT ", 1)[1].strip() == "activity-cancelled"
+            # TRY_CANCEL resolves the workflow without waiting for the activity's
+            # cross-process cleanup, so the "cancelled" effect can land after the
+            # RESULT. Synchronize on the activity worker actually running its
+            # cleanup before tearing it down and reading the effects file.
+            activity_worker.wait_for_line("ACTIVITY_CANCELLED", timeout=30)
         finally:
             workflow_worker.terminate_and_wait()
     finally:

@@ -37,6 +37,13 @@ def activity_api_complete_async_error() -> "type[BaseException]":
 
 _attempt_steps: Dict[str, AttemptStep] = {}
 
+# The single catch-all step (DBOS name ``act:__dynamic__``) for the dynamic
+# activity, if one is registered. Any activity type with no exact step falls
+# back to this — the requested type rides in ``meta["activity_type"]``, so the
+# recorded step identity is stable across replay regardless of the type called.
+_DYNAMIC_STEP_NAME = "__dynamic__"
+_dynamic_attempt_step: Optional[AttemptStep] = None
+
 
 def ensure_attempt_step(activity_name: str) -> None:
     if activity_name in _attempt_steps:
@@ -44,14 +51,23 @@ def ensure_attempt_step(activity_name: str) -> None:
     _attempt_steps[activity_name] = _make_attempt_step(activity_name)
 
 
+def ensure_dynamic_attempt_step() -> None:
+    global _dynamic_attempt_step
+    if _dynamic_attempt_step is None:
+        _dynamic_attempt_step = _make_attempt_step(_DYNAMIC_STEP_NAME, dynamic=True)
+
+
 def attempt_step_for(activity_name: str) -> AttemptStep:
     step = _attempt_steps.get(activity_name)
-    if step is None:
-        raise KeyError(
-            f"Activity type {activity_name!r} is not registered with this worker. "
-            f"Registered types: {sorted(_attempt_steps)}"
-        )
-    return step
+    if step is not None:
+        return step
+    # Unregistered type: route to the dynamic activity if one exists.
+    if _dynamic_attempt_step is not None:
+        return _dynamic_attempt_step
+    raise KeyError(
+        f"Activity type {activity_name!r} is not registered with this worker. "
+        f"Registered types: {sorted(_attempt_steps)}"
+    )
 
 
 def retry_decision(
@@ -142,13 +158,20 @@ class _RootActivityOutbound(activity_interceptor.ActivityOutboundInterceptor):
         activity_api._root_heartbeat(self._ctx, *details)
 
 
-def _make_attempt_step(activity_name: str) -> AttemptStep:
+def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptStep:
     async def attempt(
         args: List[Any], start_to_close: Optional[float], meta: Dict[str, Any]
     ) -> Dict[str, Any]:
         from .. import activity as activity_api
 
-        defn = registry.lookup_activity(activity_name)
+        # The dynamic step handles any unmatched activity type: resolve the
+        # single dynamic activity rather than one keyed by the requested name
+        # (which has no registration). The real type rides in meta.
+        defn = (
+            registry.require_dynamic_activity()
+            if dynamic
+            else registry.lookup_activity(activity_name)
+        )
 
         attempt_started_at = time_mod.time()
         attempt_key = (str(meta.get("workflow_run_id", "")), int(meta.get("seq", -1)))
@@ -181,7 +204,16 @@ def _make_attempt_step(activity_name: str) -> AttemptStep:
         async def call_user_activity() -> Dict[str, Any]:
             from . import conversion
 
-            decoded_args = await conversion.decode_values(args, defn.arg_types)
+            if dynamic:
+                # A dynamic activity receives a single Sequence[RawValue]: wrap
+                # each raw payload untouched so the activity converts it itself
+                # via activity.payload_converter().
+                from ..common import RawValue
+
+                raw = await conversion.decode_values(args, [RawValue] * len(args))
+                decoded_args: List[Any] = [raw]
+            else:
+                decoded_args = await conversion.decode_values(args, defn.arg_types)
             headers = await conversion.decode_headers(meta.get("headers"))
             activity_api._register_attempt(attempt_key, ctx)
             token = activity_api._current_context.set(ctx)

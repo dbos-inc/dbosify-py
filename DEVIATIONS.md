@@ -222,6 +222,23 @@ exception is `asyncio.CancelledError` (catch via `is_cancelled_exception`
 for portability; `except temporalio.exceptions.CancelledError` clauses
 won't match).
 
+### D26. Sync-activity cancellation is cooperative-only
+
+Temporal's default for a synchronous (threaded) activity is to *raise* the
+cancellation into the worker thread (`no_thread_cancel_exception=False`, via an
+async thread exception). temporal-dbos never does this: a sync activity runs on
+`asyncio.to_thread` and observes cancellation cooperatively — at its next
+`activity.heartbeat()` (which raises `CancelledError`), or by polling
+`activity.is_cancelled()` / `activity.wait_for_cancelled_sync()`. It therefore
+always behaves as `no_thread_cancel_exception=True`. A sync activity that blocks
+without checking (e.g. a bare `time.sleep`) is not interrupted; it runs to its
+start-to-close timeout. `@activity.defn(no_thread_cancel_exception=False)` —
+explicitly asking for the raise-into-the-thread behavior — raises
+`NotImplementedError` at decoration time rather than silently degrading. (Even
+Temporal's version is best-effort: `PyThreadState_SetAsyncExc` only fires at
+Python bytecode boundaries and won't interrupt a blocking C call.) Async
+activities are a separate story — see D12.
+
 ### D17. Query handlers are synchronous-only
 
 `@workflow.query` rejects `async def` handlers at definition time, where
@@ -568,3 +585,47 @@ the SDK so signatures match. Scope and edges:
   intercepted via its constituent `start_workflow` + `start_workflow_update`
   calls, not as its own outbound verb. `list_schedules` is an `async` outbound
   (our `Client.list_schedules` is async), where temporalio's is synchronous.
+
+### D25. Dynamic handlers and activities are supported; dynamic workflows are not
+
+Dynamic **signal/query/update handlers** and dynamic **activities** work
+(DESIGN §6.1):
+
+- `@workflow.signal(dynamic=True)` / `@workflow.query(dynamic=True)` /
+  `@workflow.update(dynamic=True)` register a single catch-all handler per
+  category — invoked as `(self, name: str, args: Sequence[RawValue])` for any
+  message whose name has no exact handler. An exact match always wins; the
+  dynamic handler is the fallback. `description=` on these decorators is stored
+  as handler metadata.
+- `@activity.defn(dynamic=True)` registers a single catch-all activity —
+  invoked as `(args: Sequence[RawValue])` for any activity type with no exact
+  registration; the requested type is its `activity.info().activity_type`. It
+  shares the full local + cross-queue execution path (timeouts, retries,
+  cancellation, recovery).
+- `workflow.payload_converter()` / `activity.payload_converter()` are exposed so
+  a dynamic handler can convert the `RawValue` payloads it receives, e.g.
+  `payload_converter().from_payload(arg.payload, MyType)`.
+
+Edges:
+
+- **Handler `description=` is stored but not surfaced.** temporalio exposes it
+  through a `__temporal_workflow_metadata` query (backing `temporal workflow
+  metadata`); temporal-dbos has no such metadata query, so the description is
+  accepted and kept on the definition but never read. Inert metadata, not a
+  behavior change.
+- **A dynamic activity's durable step is named `act:__dynamic__`** (one shared
+  step), while a registered activity's is `act:{type}`. If an *open* workflow's
+  in-flight activity execution spans a redeploy that flips a type between
+  dynamic-fallback and explicit registration, replay presents a different step
+  name at that checkpoint and DBOS raises a step-mismatch error — the same
+  hazard as any step rename across a redeploy of a running workflow. Completed
+  runs and new runs are unaffected.
+
+**Dynamic workflows (`@workflow.defn(dynamic=True)`) are not supported** and
+raise `NotImplementedError`. temporal-dbos registers one DBOS workflow per
+Temporal type (`wf:{type}`, resolved decision DESIGN §10.1) so that native
+name-based listing/filtering works; a catch-all workflow has no such per-type
+registration for an unknown incoming type to dispatch to, so it conflicts with
+that model. Register each workflow type explicitly. (The `dynamic` parameter is
+still accepted on `@workflow.defn` for signature parity — it is rejected, not
+absent.)

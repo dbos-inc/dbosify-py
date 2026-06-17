@@ -91,14 +91,13 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
 # temporalio parameters not accepted yet, recorded exactly. qualname ->
 # parameter names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # Dynamic handlers + handler descriptions: Phase 3.
-    # versioning_behavior: Phase 4; no_thread_cancel_exception: Phase 3
-    # (activity cancellation types).
-    "workflow.defn": {"dynamic", "versioning_behavior"},
-    "workflow.signal": {"description", "dynamic"},
-    "workflow.query": {"description", "dynamic"},
-    "workflow.update": {"description", "dynamic"},
-    "activity.defn": {"dynamic", "no_thread_cancel_exception"},
+    # Dynamic signal/query/update handlers + handler descriptions are now
+    # supported (so signal/query/update have no missing params). Dynamic
+    # *workflows* are intentionally rejected, not absent: workflow.defn still
+    # accepts ``dynamic`` (raising NotImplementedError, DEVIATIONS D25), so it
+    # is not listed here. activity.defn now accepts ``no_thread_cancel_exception``
+    # too (rejected when False, DEVIATIONS D26). versioning_behavior: Phase 4.
+    "workflow.defn": {"versioning_behavior"},
     # Info/describe field coverage grows with features (DESIGN §6.8).
     "workflow.Info.__init__": {
         "execution_timeout",
@@ -159,9 +158,9 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "stack_level",
         "versioning_override",
     },
-    # Custom data converters arrive with the Phase 3 conversion pipeline.
-    "client.AsyncActivityHandle.__init__": {"data_converter_override"},
-    # Activity cancellation details: Phase 3.
+    # ActivityCancellationDetails (the cancel reason: not-found / timed-out /
+    # paused / worker-shutdown) is not implemented — the type and
+    # ``activity.cancellation_details()`` are absent
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
     # We have no protobuf Failure to mutate in place, so the failure converter
     # *returns* the failure envelope instead of filling a passed-in `failure`.
