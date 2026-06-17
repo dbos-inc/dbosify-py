@@ -2,9 +2,12 @@
 math, the NondeterminismError type, the id-scoped replay guard, and Replayer
 constructor validation."""
 
+from typing import Any, Dict, List
+
 import pytest
 
 from temporal_dbos import workflow
+from temporal_dbos._internal import replay
 from temporal_dbos.client import WorkflowHistory
 from temporal_dbos.exceptions import TemporalError
 from temporal_dbos.worker import (
@@ -12,10 +15,9 @@ from temporal_dbos.worker import (
     WorkflowReplayResult,
     WorkflowReplayResults,
 )
-from temporal_dbos._internal import replay
 
 
-def _steps(*function_ids: int) -> list:
+def _steps(*function_ids: int) -> List[Dict[str, Any]]:
     return [{"function_id": fid, "function_name": f"s{fid}"} for fid in function_ids]
 
 
@@ -54,6 +56,21 @@ def test_guard_is_scoped_to_its_scratch_id() -> None:
 def test_replayer_requires_at_least_one_workflow() -> None:
     with pytest.raises(ValueError):
         Replayer(workflows=[])
+
+
+@workflow.defn
+class _UnregisteredReplayProbe:
+    @workflow.run
+    async def run(self) -> None:
+        return None
+
+
+def test_replayer_requires_registered_workflow() -> None:
+    # The Replayer reuses a running Worker's registered dispatchers; a type no
+    # Worker has registered cannot be replayed, and construction must say so
+    # rather than silently (re-)registering it into the process.
+    with pytest.raises(RuntimeError, match="not registered"):
+        Replayer(workflows=[_UnregisteredReplayProbe])
 
 
 def test_replay_result_types() -> None:

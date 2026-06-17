@@ -55,6 +55,10 @@ NONDETERMINISM_MARKER = "__tdb_nondeterminism__"
 # before completing on its own, if the client never sends a stop signal.
 REHYDRATE_SERVE_SECONDS = 30.0
 
+# How long the querying client waits for a rehydrate scratch run to settle
+# (after sending the stop signal) before force-cancelling it and deleting it.
+REHYDRATE_SETTLE_SECONDS = 10.0
+
 
 # ---------------------------------------------------------------------------
 # Replay guard — consulted by the interpreter/dispatcher during a forked replay
@@ -129,7 +133,11 @@ async def replay_one(
     from dbos._error import DBOSUnexpectedStepError
 
     from ..workflow import NondeterminismError
-    from .payloads import SerializedContinueAsNew, SerializedWorkflowFailure
+    from .payloads import (
+        SerializedContinueAsNew,
+        SerializedWorkflowCancellation,
+        SerializedWorkflowFailure,
+    )
 
     # Fork one step past the last recorded step so *every* checkpoint is copied
     # (the copy bound is function_id < start_step, and ids are 1-based and
@@ -158,8 +166,8 @@ async def replay_one(
                     str(failure.envelope.get("message", "nondeterministic replay"))
                 )
             # else: a genuine recorded failure replayed faithfully -> PASS.
-        except SerializedContinueAsNew:
-            pass  # faithful continue-as-new -> PASS
+        except (SerializedContinueAsNew, SerializedWorkflowCancellation):
+            pass  # faithful continue-as-new / cancellation -> PASS
         except DBOSUnexpectedStepError as err:  # defensive: surfaced directly
             replay_failure = NondeterminismError(str(err))
         except NondeterminismError as err:  # defensive: surfaced directly
@@ -188,11 +196,18 @@ class Replayer:
 
     Unlike temporalio's server-backed replayer, this re-executes a run's DBOS
     step checkpoints, so it operates within **this process's launched DBOS
-    runtime**: construct a :class:`~temporal_dbos.worker.Worker` for the same
-    workflow types (which launches DBOS and registers their dispatchers), then
-    replay histories fetched via ``WorkflowHandle.fetch_history()``. The
-    Replayer registers its ``workflows`` so the fork runs *its* code.
+    runtime**: construct a :class:`~temporal_dbos.worker.Worker` for the
+    workflow types under test (which launches DBOS, registers their
+    dispatchers, and installs the data converter / interceptors / failure
+    types), then replay histories fetched via ``WorkflowHandle.fetch_history()``.
+    The fork re-enters the Worker's registered code, so the Worker *is* the code
+    under test.
 
+    The Replayer reuses that Worker's process-global configuration and does not
+    mutate it: ``data_converter``, ``interceptors``, and
+    ``workflow_failure_exception_types`` are accepted for API parity but the
+    running Worker's values are authoritative (overriding them here would
+    clobber the live Worker, since one Worker owns the process; DEVIATIONS D25).
     Parameters with no temporal-dbos analog (``namespace``, ``build_id``,
     ``identity``, ``workflow_runner``/``unsandboxed_workflow_runner``,
     ``debug_mode``, ``runtime``, ``plugins``, ``workflow_task_executor``, ...)
@@ -212,31 +227,28 @@ class Replayer:
             raise ValueError("At least one workflow must be specified")
         for key in unsupported:
             logger.debug("Replayer: ignoring unsupported option %r", key)
-
-        from .. import workflow as _workflow_mod  # noqa: F401 (ensures import)
-        from ..converter import DataConverter
-        from . import conversion
-        from . import registry
-        from .dispatcher import _make_dbos_workflow
-
-        # The fork's interpreter decodes run args with this converter, so align
-        # it with the histories being replayed (same as Worker construction).
         if data_converter is not None:
-            conversion.set_converter(data_converter)
-        if workflow_failure_exception_types:
-            registry.add_worker_failure_exception_types(
-                tuple(workflow_failure_exception_types)
+            logger.debug(
+                "Replayer: data_converter is inherited from the running Worker; "
+                "the passed value is ignored to avoid clobbering it"
             )
-        registry.set_worker_interceptors(tuple(interceptors))
-        # Register each type's definition (so the fork runs *our* code) and its
-        # dispatcher closure if the running worker hasn't already.
+
+        from . import registry
+
+        # Validate that each type is registered by a running Worker — the fork
+        # re-enters that Worker's ``wf:{type}`` dispatcher, so the types must
+        # already be registered. We deliberately do NOT register/replace the
+        # definition, nor reset interceptors / converter / failure types: those
+        # are process-global state the live Worker owns (DEVIATIONS D25).
         self._workflow_names: List[str] = []
         for cls in workflows:
             defn = registry.workflow_definition_of(cls)
-            registry.register_workflow(defn)
             if defn.name not in registry._dbos_workflows:
-                registry.register_dbos_workflow(
-                    defn.name, _make_dbos_workflow(defn.name)
+                raise RuntimeError(
+                    f"Workflow type {defn.name!r} is not registered; construct a "
+                    "Worker for the types under test (which launches DBOS and "
+                    "registers their dispatchers) before replaying. The Replayer "
+                    "reuses the process's Worker runtime."
                 )
             self._workflow_names.append(defn.name)
 

@@ -1938,13 +1938,17 @@ class WorkflowHandle:
         condition = (
             input.reject_condition or self._client._default_query_reject_condition
         )
-        target = await self._target()
         # Read status once: it gates the reject_condition and decides whether the
         # query needs a rehydrate replay (closed workflow). Read directly rather
         # than via describe() so a describe_workflow interceptor is not invoked
         # as a side effect of a query. (No server arbiter, DEVIATIONS D7 family:
-        # the status read and the query send are not atomic.)
-        raw = await self._client._status_of(target)
+        # the status read and the query send are not atomic.) A missing run
+        # surfaces as a query failure, not a bare RuntimeError.
+        try:
+            target = await self._target()
+            raw = await self._client._status_of(target)
+        except RuntimeError as err:
+            raise WorkflowQueryFailedError(str(err)) from err
         status = _status.to_execution_status(raw.status, error=raw.error)
         if condition is not None and condition != QueryRejectCondition.NONE:
             rejected = (
@@ -1968,17 +1972,29 @@ class WorkflowHandle:
             reply = await self._client._await_reply_event(
                 self._id, target, inbox.query_result_key(request_id), timeout
             )
-        else:
+        elif status in (
+            WorkflowExecutionStatus.COMPLETED,
+            WorkflowExecutionStatus.FAILED,
+            WorkflowExecutionStatus.CANCELED,
+        ):
             # Query on a closed workflow: rehydrate by replay — fork the run to
             # reconstruct its final state, serve the query against it, discard
             # the scratch run (resolves README deviation #2 / Temporal serving
             # queries after completion). Requires a worker in this process (the
             # fork executes locally and consults the in-process rehydrate guard).
             reply = await self._rehydrate_query(target, envelope, request_id, timeout)
-        if reply is None:
+        else:
+            # TERMINATED (native kill, only partial checkpoints), TIMED_OUT, and
+            # CONTINUED_AS_NEW cannot be faithfully replayed to reconstruct a
+            # queryable final state — fail clearly rather than spin up a fork
+            # that diverges (DEVIATIONS D25).
             raise WorkflowQueryFailedError(
-                f"query did not complete within {timeout}s"
+                f"cannot query a workflow in state {status.name}: rehydrate-by-"
+                "replay supports COMPLETED/FAILED/CANCELED runs only "
+                "(see DEVIATIONS D25)"
             )
+        if reply is None:
+            raise WorkflowQueryFailedError(f"query did not complete within {timeout}s")
         if reply["status"] == "completed":
             return await conversion.decode_value(reply["result"], input.ret_type)
         raise WorkflowQueryFailedError(str(deserialize_failure(reply["failure"])))
@@ -2005,23 +2021,32 @@ class WorkflowHandle:
         )
         try:
             await client.send_async(scratch_id, envelope, inbox.INBOX_TOPIC)
-            reply = await self._client._await_reply_event(
+            return await self._client._await_reply_event(
                 scratch_id, scratch_id, inbox.query_result_key(request_id), timeout
             )
-            # Tell the scratch run to stop serving and complete, then wait for
-            # it to settle so the delete below does not race a finishing run.
+        finally:
+            _replay.unregister_guard(scratch_id)
+            # Stop the scratch run serving and wait for it to settle, so the
+            # delete below never races a still-serving run. If it does not stop
+            # within the settle window, cancel it to force a terminal state.
             try:
                 await client.send_async(
                     scratch_id, inbox.rehydrate_stop_envelope(), inbox.INBOX_TOPIC
                 )
-                await asyncio.wait_for(
-                    scratch_handle.get_result(polling_interval_sec=0.05), timeout=10.0
-                )
-            except Exception:  # noqa: BLE001 — best-effort; the deadline also stops it
+            except Exception:  # noqa: BLE001 — best-effort
                 pass
-            return reply
-        finally:
-            _replay.unregister_guard(scratch_id)
+            try:
+                await asyncio.wait_for(
+                    scratch_handle.get_result(polling_interval_sec=0.05),
+                    timeout=_replay.REHYDRATE_SETTLE_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                try:
+                    await client.cancel_workflow_async(scratch_id)
+                except Exception:  # noqa: BLE001 — best-effort
+                    pass
+            except Exception:  # noqa: BLE001 — the run reached a terminal state
+                pass
             try:
                 # delete_children stays False: the rehydrated fork starts no
                 # real children (they replay from checkpoints), so it owns none

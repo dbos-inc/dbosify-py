@@ -15,11 +15,19 @@ import pytest
 from dbos import DBOSClient
 
 from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client, WorkflowFailureError, WorkflowHistory
+from temporal_dbos._internal import registry
+from temporal_dbos.client import (
+    Client,
+    WorkflowExecutionStatus,
+    WorkflowFailureError,
+    WorkflowHistory,
+    WorkflowQueryFailedError,
+)
 from temporal_dbos.exceptions import ApplicationError
-from temporal_dbos.worker import Replayer, Worker
+from temporal_dbos.worker import Interceptor, Replayer, Worker
 from temporal_dbos.workflow import NondeterminismError
 from tests.dbconfig import default_config, system_database_url
+from tests.harness import retry_until_success_async
 
 pytestmark = pytest.mark.usefixtures("tdb_env")
 
@@ -80,11 +88,16 @@ class TimerSignalWf:
     def go(self) -> None:
         self._go = True
 
+    @workflow.query
+    def state(self) -> str:
+        return "go" if self._go else "waiting"
+
     @workflow.run
     async def run(self, x: str) -> str:
         await workflow.wait_condition(lambda: self._go)
         await workflow.sleep(0.05)
-        return await workflow.execute_activity(act_a, x, **_OPTS)  # type: ignore[arg-type]
+        result: str = await workflow.execute_activity(act_a, x, **_OPTS)  # type: ignore[arg-type]
+        return result
 
 
 @workflow.defn
@@ -108,7 +121,8 @@ class GreetingWf:
 class ChildWf:
     @workflow.run
     async def run(self, x: str) -> str:
-        return await workflow.execute_activity(act_a, x, **_OPTS)  # type: ignore[arg-type]
+        result: str = await workflow.execute_activity(act_a, x, **_OPTS)  # type: ignore[arg-type]
+        return result
 
 
 @workflow.defn
@@ -278,9 +292,9 @@ async def test_replay_with_child_workflow_clean() -> None:
 
             # Replay re-attaches to the recorded child (no twin spawned) and the
             # child-start command does not trip the horizon guard.
-            result = await Replayer(
-                workflows=[ParentWf, ChildWf]
-            ).replay_workflow(history)
+            result = await Replayer(workflows=[ParentWf, ChildWf]).replay_workflow(
+                history
+            )
             assert result.replay_failure is None
         finally:
             dbos_client.destroy()
@@ -312,6 +326,86 @@ async def test_query_on_closed_workflow_rehydrates() -> None:
             assert all(s.workflow_id == "rp-query" for s in survivors), [
                 s.workflow_id for s in survivors
             ]
+        finally:
+            dbos_client.destroy()
+
+
+async def test_replay_canceled_workflow_replays_as_pass() -> None:
+    async with _worker(TimerSignalWf):
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)
+            handle = await client.start_workflow(
+                TimerSignalWf.run, "hi", id="rp-cancel", task_queue=TASK_QUEUE
+            )
+            await handle.cancel()  # cooperative cancel -> CANCELED
+
+            async def _is_canceled() -> None:
+                desc = await handle.describe()
+                assert desc.status == WorkflowExecutionStatus.CANCELED
+
+            await retry_until_success_async(_is_canceled)
+            history = await handle.fetch_history()
+
+            # A faithfully-replayed canceled workflow is a PASS, not a crash.
+            result = await Replayer(workflows=[TimerSignalWf]).replay_workflow(
+                history, raise_on_replay_failure=False
+            )
+            assert result.replay_failure is None
+        finally:
+            dbos_client.destroy()
+
+
+async def test_replayer_does_not_clobber_worker_interceptors() -> None:
+    interceptor = Interceptor()
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[ReplayWf],
+        activities=[act_a, act_b, act_c],
+        interceptors=[interceptor],
+    )
+    async with worker:
+        assert interceptor in registry.worker_interceptors
+        # Constructing the Replayer must reuse the live Worker's config, not
+        # reset its (process-global) interceptor list.
+        Replayer(workflows=[ReplayWf])
+        assert interceptor in registry.worker_interceptors
+
+
+async def test_query_on_missing_workflow_raises_query_failed() -> None:
+    async with _worker(GreetingWf):
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)
+            handle = client.get_workflow_handle("rp-does-not-exist")
+            # A missing run is a query failure, not a bare RuntimeError.
+            with pytest.raises(WorkflowQueryFailedError):
+                await handle.query(GreetingWf.greeting)
+        finally:
+            dbos_client.destroy()
+
+
+async def test_query_on_terminated_workflow_fails_clearly() -> None:
+    async with _worker(TimerSignalWf):
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)
+            handle = await client.start_workflow(
+                TimerSignalWf.run, "hi", id="rp-term", task_queue=TASK_QUEUE
+            )
+            await handle.terminate()  # native kill -> TERMINATED
+
+            async def _is_terminated() -> None:
+                desc = await handle.describe()
+                assert desc.status == WorkflowExecutionStatus.TERMINATED
+
+            await retry_until_success_async(_is_terminated)
+
+            # A terminated run cannot be faithfully rehydrated; fail clearly
+            # rather than spin up a diverging fork.
+            with pytest.raises(WorkflowQueryFailedError, match="TERMINATED"):
+                await handle.query(TimerSignalWf.state)
         finally:
             dbos_client.destroy()
 

@@ -85,9 +85,9 @@ from ..workflow import (
     _Runtime,
 )
 from . import activities as activities_mod
-from . import replay as _replay
 from . import attributes as _attributes
 from . import conversion, ids, inbox
+from . import replay as _replay
 from . import workflow_interceptor as _wfi
 from .payloads import (
     FailureEnvelope,

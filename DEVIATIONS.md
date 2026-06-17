@@ -582,7 +582,12 @@ currently-registered code. Consequences:
 - **No offline JSON portability (v1).** `WorkflowHistory` references a run that
   still exists in the connected system database; there is no `from_json`/`to_json`
   round-trip yet. Replay therefore needs a launched DBOS runtime (a `Worker` for
-  the workflow types), not just a history file.
+  the workflow types), not just a history file. The `Replayer` requires those
+  types to already be registered by a `Worker` and **reuses that Worker's
+  process-global configuration** — its data converter, interceptors, and
+  failure-exception types are authoritative; the matching `Replayer` constructor
+  arguments are accepted for API parity but not re-applied (overriding them would
+  clobber the live Worker, since one Worker owns the process).
 - **Non-determinism detection is checkpoint-shaped.** A different step at a
   recorded position is caught by DBOS itself (`DBOSUnexpectedStepError`); two
   cases DBOS can't see on its own are caught by a guard the interpreter consults:
@@ -599,3 +604,6 @@ currently-registered code. Consequences:
   when a worker for the workflow type runs **in the querying process** (the common
   embedded layout, and what the `hello_query` sample uses). A purely remote client
   with no co-located worker still gets the v1 "query requires RUNNING" behavior.
+  Only COMPLETED/FAILED/CANCELED runs can be rehydrated; TERMINATED (a native
+  kill leaves only partial checkpoints), TIMED_OUT, and CONTINUED_AS_NEW runs
+  cannot be faithfully reconstructed and a query on them fails clearly.

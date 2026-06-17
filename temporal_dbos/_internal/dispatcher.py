@@ -43,13 +43,15 @@ from dbos._context import get_local_dbos_context  # see docs/phase0.md
 from dbos._error import DBOSUnexpectedStepError
 
 from .. import exceptions
-from ..workflow import NondeterminismError
 
 # Re-exported here for the Phase 0 helper API; the canonical home mirrors
 # temporalio.client.WorkflowUpdateFailedError.
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
+from ..workflow import NondeterminismError
 from . import activities as activities_mod
-from . import conversion, ids, inbox, registry, schedules
+from . import conversion, ids, inbox, registry
+from . import replay as _replay
+from . import schedules
 from . import status as _status
 from .activity_workflow import register_activity_dispatcher
 from .interpreter import (
@@ -70,7 +72,6 @@ from .payloads import (
     unwrap_input,
     wrap_input,
 )
-from . import replay as _replay
 
 logger = logging.getLogger("temporal_dbos.dispatcher")
 
@@ -179,15 +180,16 @@ def _make_dbos_workflow(
             # the failure envelope under the nondeterminism marker so the replay
             # engine can tell divergence apart from a faithfully-replayed
             # genuine failure. No chain continuation — replay never retries.
-            # NondeterminismError is only ever raised by the replay guard, so it
-            # is always a replay; a bare DBOSUnexpectedStepError outside a replay
-            # is a real non-determinism bug and keeps its prior propagation.
+            # Only convert when a replay guard is active for this run; outside a
+            # replay, a DBOSUnexpectedStepError is a real non-determinism bug and
+            # a user-raised NondeterminismError is an ordinary error — both keep
+            # their prior propagation rather than being stamped as a divergence.
             dispatch_ctx = get_local_dbos_context()
-            if (
-                isinstance(nde, DBOSUnexpectedStepError)
-                and dispatch_ctx is not None
-                and _replay.current_guard_for(dispatch_ctx.workflow_id) is None
-            ):
+            in_replay = (
+                dispatch_ctx is not None
+                and _replay.current_guard_for(dispatch_ctx.workflow_id) is not None
+            )
+            if not in_replay:
                 raise
             raise SerializedWorkflowFailure(
                 {
