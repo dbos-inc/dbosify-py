@@ -37,7 +37,6 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from . import _schedule, exceptions
 from ._internal import attributes as _attributes
 from ._internal import conversion, ids, inbox
-from ._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
 from ._internal import registry as _registry
 from ._internal import replay as _replay
 from ._internal import schedules as _schedules
@@ -67,6 +66,7 @@ from ._internal.client_interceptor import (
     UnpauseScheduleInput,
     UpdateScheduleInput,
 )
+from ._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
 from ._internal.payloads import (
     RunMeta,
     SerializedContinueAsNew,

@@ -35,12 +35,12 @@ from ._internal.activity_interceptor import (
     ExecuteActivityInput,
     Interceptor,
 )
+from ._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
 from ._internal.replay import (
     Replayer,
     WorkflowReplayResult,
     WorkflowReplayResults,
 )
-from ._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
 from ._internal.serializer import TEMPORAL_SERIALIZER
 from ._internal.workflow_interceptor import (
     ContinueAsNewInput,
