@@ -17,13 +17,16 @@ import json
 import logging
 import threading
 import time as time_mod
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import (
+    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
+    Iterator,
     List,
     NoReturn,
     Optional,
@@ -39,19 +42,27 @@ from ._internal import registry as _registry
 from .common import Priority, RetryPolicy
 from .converter import PayloadConverter
 
+if TYPE_CHECKING:
+    from .client import Client
+
 _EPOCH = datetime.fromtimestamp(0, timezone.utc)
 
 __all__ = [
     "Info",
+    "client",
     "defn",
     "heartbeat",
     "in_activity",
     "info",
     "is_cancelled",
+    "is_worker_shutdown",
     "logger",
     "payload_converter",
     "raise_complete_async",
+    "shield_thread_cancel_exception",
     "wait_for_cancelled_sync",
+    "wait_for_worker_shutdown",
+    "wait_for_worker_shutdown_sync",
 ]
 
 
@@ -197,6 +208,10 @@ class _Context:
     # (DESIGN §6.8). ``info()``/``heartbeat()`` route through it. Left None by
     # ActivityEnvironment, where the functions use the root behavior directly.
     outbound: Optional[Any] = None
+    # A Temporal client for ``activity.client()``. ActivityEnvironment may set
+    # one explicitly; on real worker runs it is left None and ``client()``
+    # lazily builds the process's worker client (see ``_worker_client``).
+    client: Optional["Client"] = None
 
 
 # Worker-process state for in-flight activity attempts, keyed by
@@ -209,6 +224,56 @@ class _Context:
 _live_attempts: Dict[Tuple[str, int], "_Context"] = {}
 _heartbeat_store: Dict[Tuple[str, int], Sequence[Any]] = {}
 _cancel_requested_keys: "set[Tuple[str, int]]" = set()
+
+# Process-global worker-lifecycle state backing activity.is_worker_shutdown()
+# and activity.client(). One Worker per process owns these: the Worker sets the
+# config (and clears the shutdown flag) at construction, and sets the shutdown
+# flag on shutdown(). ``_worker_client`` is the lazily-built client returned by
+# activity.client(); it is destroyed on worker shutdown.
+_worker_shutdown_event = threading.Event()
+_worker_dbos_config: Optional[Any] = None
+_worker_client: Optional["Client"] = None
+
+
+def _on_worker_start(config: Any) -> None:
+    """Called by the Worker at construction: arm the worker-lifecycle state for
+    a fresh run (clears any prior shutdown flag / cached client)."""
+    global _worker_dbos_config, _worker_client
+    _worker_shutdown_event.clear()
+    _worker_dbos_config = config
+    _worker_client = None
+
+
+def _on_worker_shutdown() -> None:
+    """Called by the Worker on shutdown: trip ``is_worker_shutdown()`` /
+    ``wait_for_worker_shutdown*`` and tear down the cached worker client."""
+    global _worker_client, _worker_dbos_config
+    _worker_shutdown_event.set()
+    client = _worker_client
+    _worker_client = None
+    _worker_dbos_config = None
+    if client is not None:
+        client._dbos_client.destroy()
+
+
+def _worker_client_lazy() -> Optional["Client"]:
+    """Build (once) and return the process worker's Temporal client, or None if
+    no Worker has registered its config in this process."""
+    global _worker_client
+    if _worker_client is not None:
+        return _worker_client
+    config = _worker_dbos_config
+    if config is None:
+        return None
+    from dbos import DBOSClient
+
+    from ._internal import conversion
+    from .client import Client
+
+    url = config.get("system_database_url") or config.get("database_url")
+    dbos_client = DBOSClient(system_database_url=url)
+    _worker_client = Client(dbos_client, data_converter=conversion.get_converter())
+    return _worker_client
 
 
 def _register_attempt(key: Tuple[str, int], ctx: "_Context") -> None:
@@ -332,6 +397,83 @@ def wait_for_cancelled_sync(
     """Synchronously block until the activity is cancelled."""
     seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
     _context().cancelled.wait(seconds)
+
+
+def is_worker_shutdown() -> bool:
+    """Whether shutdown has been invoked on the worker, mirroring
+    ``temporalio.activity.is_worker_shutdown``.
+
+    Raises:
+        RuntimeError: When not in an activity.
+    """
+    _context()  # parity: only valid inside an activity
+    return _worker_shutdown_event.is_set()
+
+
+async def wait_for_worker_shutdown() -> None:
+    """Asynchronously wait for shutdown to be called on the worker, mirroring
+    ``temporalio.activity.wait_for_worker_shutdown``.
+
+    Raises:
+        RuntimeError: When not in an activity.
+    """
+    _context()
+    if _worker_shutdown_event.is_set():
+        return
+    import asyncio
+
+    await asyncio.get_event_loop().run_in_executor(None, _worker_shutdown_event.wait)
+
+
+def wait_for_worker_shutdown_sync(
+    timeout: Optional[Union[timedelta, float]] = None,
+) -> None:
+    """Synchronously block until shutdown is called on the worker, mirroring
+    ``temporalio.activity.wait_for_worker_shutdown_sync``.
+
+    Raises:
+        RuntimeError: When not in an activity.
+    """
+    _context()
+    seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
+    _worker_shutdown_event.wait(seconds)
+
+
+@contextmanager
+def shield_thread_cancel_exception() -> Iterator[None]:
+    """Context manager for synchronous multithreaded activities to delay
+    cancellation exceptions, mirroring
+    ``temporalio.activity.shield_thread_cancel_exception``.
+
+    In temporal-dbos this is always a no-op: cancellation is delivered
+    cooperatively (via ``is_cancelled()``/``heartbeat()``) and never raised into
+    a sync activity's worker thread (DEVIATIONS D26), so there is nothing to
+    shield against — matching temporalio's own no-op behavior for async and
+    multiprocess activities.
+    """
+    yield None
+
+
+def client() -> "Client":
+    """Return a Temporal client for use in the current activity, mirroring
+    ``temporalio.activity.client``.
+
+    On real worker runs this is the process worker's client (built lazily from
+    the Worker's DBOS configuration). In tests it is the client passed to
+    :py:class:`temporal_dbos.testing.ActivityEnvironment`.
+
+    Raises:
+        RuntimeError: When no client is available.
+    """
+    ctx = _context()
+    available = ctx.client if ctx.client is not None else _worker_client_lazy()
+    if available is None:
+        raise RuntimeError(
+            "No client available. On real worker runs the client is built from "
+            "the Worker's configuration; in tests pass a client when creating "
+            "ActivityEnvironment."
+        )
+    return available
 
 
 def _make_info(meta: dict[str, Any]) -> Info:

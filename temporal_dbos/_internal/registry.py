@@ -97,6 +97,9 @@ class WorkflowDefinition:
     # infer the result type when none is passed.
     arg_types: Optional[List[type]] = None
     ret_type: Optional[type] = None
+    # @workflow.defn(versioning_behavior=...): accepted for parity, inert —
+    # DBOS pins dequeue to application_version regardless (DEVIATIONS D29).
+    versioning_behavior: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -198,6 +201,20 @@ def set_worker_task_queue(task_queue: Optional[str]) -> None:
     worker_task_queue = task_queue
 
 
+# This process's worker deployment version, backing
+# workflow.Info.get_current_deployment_version()/get_current_build_id(). Set by
+# the Worker from Worker(deployment_config=)/Worker(build_id=), else derived
+# from the DBOS application name + application_version. Inert for scheduling
+# (DEVIATIONS D29). Stored as an opaque object to avoid importing the public
+# common types into this internal module.
+worker_deployment_version: Optional[Any] = None
+
+
+def set_worker_deployment_version(version: Optional[Any]) -> None:
+    global worker_deployment_version
+    worker_deployment_version = version
+
+
 def workflow_definition_of(cls: Type[Any]) -> WorkflowDefinition:
     defn = cls.__dict__.get(WORKFLOW_DEFN_ATTR)
     if defn is None:
@@ -269,6 +286,7 @@ def build_workflow_definition(
     *,
     name: Optional[str],
     failure_exception_types: Sequence[Type[BaseException]],
+    versioning_behavior: Optional[int] = None,
 ) -> WorkflowDefinition:
     """Scan a @workflow.defn-decorated class for handler markers and validate,
     mirroring temporalio's decoration-time checks.
@@ -370,6 +388,7 @@ def build_workflow_definition(
         failure_exception_types=tuple(failure_exception_types),
         arg_types=arg_types,
         ret_type=ret_type,
+        versioning_behavior=versioning_behavior,
     )
 
 

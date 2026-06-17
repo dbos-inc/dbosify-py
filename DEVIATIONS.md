@@ -670,7 +670,7 @@ that model. Register each workflow type explicitly. (The `dynamic` parameter is
 still accepted on `@workflow.defn` for signature parity — it is rejected, not
 absent.)
 
-### D28. Patching is supported; worker-deployment versioning is not
+### D28. Patching is supported; worker-deployment versioning is surfaced but inert (D29)
 
 `workflow.patched(id)` and `workflow.deprecate_patch(id)` work and match
 temporalio's semantics: `patched()` returns `True` on a first (non-replaying)
@@ -718,12 +718,53 @@ Edges and gaps:
   (its whole purpose), and removing a patch branch while pre-patch runs are still
   open will diverge from their recorded history — the standard non-determinism
   hazard, surfaced at replay (D13), not at development time.
-- **No worker deployment versioning.** Temporal's Build IDs / Worker Deployment
-  Versions / `WorkerDeploymentConfig` and the `versioning_behavior` /
-  `versioning_override` / `versioning_intent` knobs are a Temporal-cluster
-  concept (the server routes tasks to compatible worker fleets). DBOS has a
-  single `app_version` per deployment and no task-routing fleet model, so these
-  are **not** implemented: `versioning_behavior` on `@workflow.defn` and the
-  `versioning_*` fields on the client/outbound `*Input`s are accepted-and-inert
-  (signature parity; carried, not acted on). Use `patched()` for in-code
-  branching across deploys.
+- **Worker deployment versioning maps to DBOS app version (D29).** Temporal's
+  Build IDs / Worker Deployment Versions are a cluster concept (the server routes
+  tasks to compatible worker fleets); DBOS has a single `app_version` per
+  deployment and no task-routing fleet model. We surface a deployment *identity*
+  derived from DBOS but do not implement version-based routing — see D29. Use
+  `patched()` for in-code branching across deploys.
+
+
+### D29. Worker deployment version is derived from DBOS, and is inert
+
+Temporal's worker-versioning API is mirrored and given a concrete, honest
+backing: a **deployment version** is `WorkerDeploymentVersion(deployment_name,
+build_id)` where `deployment_name` is the DBOS application name and `build_id`
+is the DBOS `application_version` (the same string that scopes recovery and
+queue dequeuing — D28). `Worker(build_id=...)` or
+`Worker(deployment_config=WorkerDeploymentConfig(...))` override the derived
+version; the two are mutually exclusive. The version is readable in-workflow via
+`workflow.info().get_current_deployment_version()` (and the deprecated
+`get_current_build_id()`), which return the process-global value the Worker set.
+
+What is **inert** (accepted for signature parity, carried but not acted on):
+`VersioningBehavior` (PINNED / AUTO_UPGRADE) on `@workflow.defn`,
+`ContinueAsNewVersioningBehavior` on `continue_as_new`, `VersioningOverride`
+(`PinnedVersioningOverride` / `AutoUpgradeVersioningOverride`) on client
+`start_workflow`/`execute_workflow`, and `versioning_intent`. DBOS pins dequeue
+to `application_version` regardless of any pin/auto-upgrade request, and there is
+no fleet to route between. `is_target_worker_deployment_version_changed()` always
+returns `False` (no upgrade-on-continue-as-new). Use `patched()` (D28) for
+in-code branching across deploys.
+
+
+### D30. Current details are in-memory, reconstructed on replay, not in describe()
+
+`workflow.set_current_details()` / `get_current_details()` are supported as
+free-form (Temporal-markdown) UI/CLI metadata. The value is ordinary in-memory
+workflow state: settable from the run method and signal/update handlers
+(everything on the deterministic loop), reconstructed deterministically on
+recovery by replaying the same `set_current_details()` calls — no checkpoint is
+written for it. Two consequences:
+
+- Like every other workflow runtime accessor (`info()`, `now()`, …), it is only
+  available on the deterministic loop, **not** inside a query handler (queries
+  run synchronously off that loop — D17). `set_current_details()` from a
+  read-only context (a query/validator) is additionally rejected, like
+  `upsert_memo`.
+- The current details are **not** surfaced to `describe()` / `list_workflows`
+  in v1 (there is no live channel from a running interpreter's in-memory state to
+  a status read, and no UI consuming it). `static_summary` / `static_details`
+  passed at start are likewise accepted but not surfaced (consistent with
+  memo/search-attribute exposure limits, D15).

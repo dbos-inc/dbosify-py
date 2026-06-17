@@ -59,6 +59,7 @@ from typing import (
     Set,
     Tuple,
     Union,
+    cast,
 )
 
 from dbos import DBOS
@@ -73,6 +74,7 @@ from ..common import (
     SearchAttributes,
     SearchAttributeUpdate,
     TypedSearchAttributes,
+    WorkerDeploymentVersion,
 )
 from ..workflow import (
     ActivityHandle,
@@ -846,6 +848,11 @@ class Interpreter(_Runtime):
         # the DBOS attributes column).
         self._memo: Dict[str, Any] = {}
         self._typed_sa: TypedSearchAttributes = TypedSearchAttributes.empty
+        # Free-form UI/CLI details set via workflow.set_current_details(): pure
+        # in-memory state, reconstructed deterministically on recovery by
+        # replaying the same set_current_details calls (no checkpoint needed —
+        # not surfaced to describe()/list in v1, DEVIATIONS D30).
+        self._current_details: str = ""
         self._random = Random(0)
         self._workflow_id = ""
         self._start_time = 0.0
@@ -3018,6 +3025,26 @@ class Interpreter(_Runtime):
 
     def runtime_can_suggested(self) -> bool:
         return self.runtime_history_length() >= CAN_SUGGESTION_THRESHOLD
+
+    def runtime_get_current_deployment_version(
+        self,
+    ) -> Optional[WorkerDeploymentVersion]:
+        # Process-global, set by the Worker from its deployment config or the
+        # DBOS application name + application_version (DEVIATIONS D29).
+        from . import registry
+
+        return cast(
+            Optional[WorkerDeploymentVersion], registry.worker_deployment_version
+        )
+
+    def runtime_get_current_details(self) -> str:
+        return self._current_details
+
+    def runtime_set_current_details(self, details: str) -> None:
+        # A state mutation: disallowed from read-only contexts (queries /
+        # update validators), like upsert_memo.
+        self._assert_not_read_only("set current details")
+        self._current_details = details
 
     async def runtime_wait_condition(
         self, fn: Callable[[], bool], *, timeout: Optional[float]

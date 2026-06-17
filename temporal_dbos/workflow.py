@@ -54,6 +54,8 @@ from .common import (
     SearchAttributes,
     SearchAttributeUpdate,
     TypedSearchAttributes,
+    VersioningBehavior,
+    WorkerDeploymentVersion,
     _warn_on_deprecated_search_attributes,
 )
 from .converter import PayloadConverter
@@ -63,6 +65,7 @@ __all__ = [
     "ActivityHandle",
     "ChildWorkflowCancellationType",
     "ChildWorkflowHandle",
+    "ContinueAsNewVersioningBehavior",
     "ExternalWorkflowHandle",
     "Info",
     "ParentClosePolicy",
@@ -73,6 +76,7 @@ __all__ = [
     "ContinueAsNewError",
     "defn",
     "deprecate_patch",
+    "get_current_details",
     "NondeterminismError",
     "execute_activity",
     "execute_activity_method",
@@ -99,6 +103,7 @@ __all__ = [
     "query",
     "random",
     "run",
+    "set_current_details",
     "signal",
     "sleep",
     "start_activity",
@@ -207,6 +212,18 @@ class UnfinishedSignalHandlersWarning(RuntimeWarning):
     """The workflow exited before all signal handlers completed."""
 
 
+class ContinueAsNewVersioningBehavior(IntEnum):
+    """Versioning behavior for the run created by :py:func:`continue_as_new`,
+    mirroring ``temporalio.workflow.ContinueAsNewVersioningBehavior``.
+
+    Accepted for parity; inert in temporal-dbos (DEVIATIONS D29).
+    """
+
+    UNSPECIFIED = 0
+    AUTO_UPGRADE = 1
+    USE_RAMPING_VERSION = 2
+
+
 # ---------------------------------------------------------------------------
 # Definition decorators
 # ---------------------------------------------------------------------------
@@ -223,6 +240,7 @@ def defn(
     sandboxed: bool = True,
     dynamic: bool = False,
     failure_exception_types: Sequence[Type[BaseException]] = [],
+    versioning_behavior: VersioningBehavior = VersioningBehavior.UNSPECIFIED,
 ) -> Callable[[_CT], _CT]: ...
 
 
@@ -233,9 +251,14 @@ def defn(
     sandboxed: bool = True,
     dynamic: bool = False,
     failure_exception_types: Sequence[Type[BaseException]] = [],
+    versioning_behavior: VersioningBehavior = VersioningBehavior.UNSPECIFIED,
 ) -> Union[_CT, Callable[[_CT], _CT]]:
     """Decorator for workflow classes. ``sandboxed`` is accepted and ignored
     (temporal-dbos runs no sandbox — see the README deviations table).
+
+    ``versioning_behavior`` is accepted and stored for parity but is inert:
+    DBOS pins workflow recovery/dequeue to ``application_version`` regardless
+    of the requested pin/auto-upgrade behavior (DEVIATIONS D29).
 
     ``dynamic`` is **not supported**: a catch-all workflow has no
     ``wf:{type}`` registration to dispatch to, which conflicts with the
@@ -254,7 +277,10 @@ def defn(
 
     def decorator(cls: _CT) -> _CT:
         defn = _registry.build_workflow_definition(
-            cls, name=name, failure_exception_types=failure_exception_types
+            cls,
+            name=name,
+            failure_exception_types=failure_exception_types,
+            versioning_behavior=int(versioning_behavior),
         )
         setattr(cls, _registry.WORKFLOW_DEFN_ATTR, defn)
         return cls
@@ -612,6 +638,31 @@ class Info:
         (``TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD``, default 10000)."""
         return _runtime().runtime_can_suggested()
 
+    def get_current_build_id(self) -> str:
+        """The build id of the worker executing this run — the DBOS
+        ``application_version`` (DEVIATIONS D29). Empty string when no worker
+        deployment version is set.
+
+        .. deprecated::
+            Use :py:meth:`get_current_deployment_version` instead.
+        """
+        version = _runtime().runtime_get_current_deployment_version()
+        return version.build_id if version is not None else ""
+
+    def get_current_deployment_version(self) -> Optional[WorkerDeploymentVersion]:
+        """The deployment version of the worker executing this run, derived
+        from DBOS (deployment name = DBOS application name, build id = DBOS
+        ``application_version``). None when no worker deployment version is set
+        (e.g. the in-process dispatcher harness). DEVIATIONS D29.
+        """
+        return _runtime().runtime_get_current_deployment_version()
+
+    def is_target_worker_deployment_version_changed(self) -> bool:
+        """Whether the target worker deployment version has changed
+        (upgrade-on-continue-as-new). Always False in temporal-dbos: there is
+        no version-based routing to upgrade across (DEVIATIONS D29)."""
+        return False
+
 
 class _Runtime:
     """Interface the interpreter implements to back this module's functions.
@@ -645,6 +696,17 @@ class _Runtime:
         raise NotImplementedError
 
     def runtime_can_suggested(self) -> bool:
+        raise NotImplementedError
+
+    def runtime_get_current_deployment_version(
+        self,
+    ) -> Optional[WorkerDeploymentVersion]:
+        raise NotImplementedError
+
+    def runtime_get_current_details(self) -> str:
+        raise NotImplementedError
+
+    def runtime_set_current_details(self, details: str) -> None:
         raise NotImplementedError
 
     def runtime_cancellation_reason(self) -> Optional[str]:
@@ -864,6 +926,29 @@ def all_handlers_finished() -> bool:
 def cancellation_reason() -> Optional[str]:
     """The reason for the workflow's cancellation request, if any."""
     return _runtime().runtime_cancellation_reason()
+
+
+def get_current_details() -> str:
+    """The current details of the workflow (free-form, Temporal-markdown,
+    multi-line) which may appear in the UI/CLI, mirroring
+    ``temporalio.workflow.get_current_details``.
+
+    Unlike static details set at start, this value can be updated throughout
+    the life of the workflow via :py:func:`set_current_details`. It is in-memory
+    workflow state — reconstructed deterministically on recovery by replaying
+    the same :py:func:`set_current_details` calls — and is not surfaced to
+    ``describe()``/``list_workflows`` in v1 (DEVIATIONS D30). Empty string if
+    never set.
+    """
+    return _runtime().runtime_get_current_details()
+
+
+def set_current_details(description: str) -> None:
+    """Set the current details of the workflow which may appear in the UI/CLI,
+    mirroring ``temporalio.workflow.set_current_details``. See
+    :py:func:`get_current_details`.
+    """
+    _runtime().runtime_set_current_details(description)
 
 
 def has_last_completion_result() -> bool:
@@ -1304,11 +1389,14 @@ def continue_as_new(
     memo: Optional[Any] = None,
     search_attributes: Optional[Any] = None,
     versioning_intent: Optional[Any] = None,
-    initial_versioning_behavior: Optional[Any] = None,
+    initial_versioning_behavior: Optional[ContinueAsNewVersioningBehavior] = None,
 ) -> "NoReturn":
     """Stop the current run and continue the chain as a new run with the
     given arguments (same workflow type unless ``workflow`` is given). The
     raised :py:class:`ContinueAsNewError` must not be caught.
+
+    ``versioning_intent``/``initial_versioning_behavior`` are accepted for
+    parity but inert (DEVIATIONS D29).
     """
     for key, value in {
         "task_timeout": task_timeout,

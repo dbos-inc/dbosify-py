@@ -641,6 +641,27 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   `attempt`, `task_queue` = DBOS queue name, `start_time` from status `created_at`,
   `parent`/`root` from DBOS parent links, `search_attributes`/`memo` from envelope,
   `get_current_history_length()` → interpreter seq count.
+- **Worker deployment versioning (done, inert).** `common.VersioningBehavior`,
+  `WorkerDeploymentVersion`, `VersioningOverride`/`PinnedVersioningOverride`/
+  `AutoUpgradeVersioningOverride`, `worker.WorkerDeploymentConfig`,
+  `@workflow.defn(versioning_behavior=)`, `continue_as_new(initial_versioning_behavior=)`
+  (`ContinueAsNewVersioningBehavior`), and client `start_workflow(versioning_override=)` are
+  mirrored. The *deployment version* is derived from DBOS — `deployment_name` = DBOS app
+  name, `build_id` = DBOS `application_version` — overridable via `Worker(build_id=)` or
+  `Worker(deployment_config=)`; surfaced via `Info.get_current_deployment_version()` /
+  `get_current_build_id()` (process-global set by the Worker). The pin/auto-upgrade
+  *behavior* is inert (DBOS pins dequeue to `application_version`, no fleet to route between);
+  `is_target_worker_deployment_version_changed()` is always `False`. See DEVIATIONS D29.
+- **Current details (done).** `workflow.set_current_details()`/`get_current_details()` back
+  free-form UI/CLI metadata as in-memory workflow state, reconstructed on replay (no
+  checkpoint); settable on the deterministic loop (run/handlers), rejected in read-only
+  contexts, not surfaced to `describe()` in v1. See DEVIATIONS D30.
+- **Activity context helpers (done).** `activity.is_worker_shutdown()` /
+  `wait_for_worker_shutdown()` / `wait_for_worker_shutdown_sync()` read a process-global
+  shutdown event the Worker trips on `shutdown()`; `activity.shield_thread_cancel_exception()`
+  is a no-op (cancellation is cooperative — DEVIATIONS D26); `activity.client()` returns a
+  Temporal client lazily built from the Worker's `DBOSConfig` (or one passed to
+  `ActivityEnvironment(client=)`).
 - `workflow.patched(id)` / `deprecate_patch(id)`: **done.** Checkpoint-marker
   implementation. The decision (`not is_replaying() or id in recorded-markers`) is computed
   synchronously at the call site, memoized per id, and — crucially — claims **no**

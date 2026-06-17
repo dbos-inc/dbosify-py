@@ -113,8 +113,6 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
 # temporalio parameters not accepted, recorded exactly. qualname -> parameter
 # names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # worker-deployment versioning has no DBOS analog (D28); patched() branches
-    "workflow.defn": {"versioning_behavior"},
     # no-analog timeouts (exec/task, unenforced); protobuf raw_memo; root not held
     "workflow.Info.__init__": {
         "execution_timeout",
@@ -143,15 +141,13 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     },
     # no archival tier; fetch_history reads DBOS step checkpoints
     "client.WorkflowHandle.fetch_history": {"skip_archival"},
-    # gRPC-era callbacks/links/stack_level; versioning_override: no DBOS analog (D27/D28)
+    # gRPC-era callbacks/links/stack_level (versioning_override is accepted
+    # and inert — DEVIATIONS D29)
     "client.Client.start_workflow": {
         "callbacks",
         "links",
         "stack_level",
-        "versioning_override",
     },
-    # versioning_override: no DBOS worker-versioning analog (D27/D28)
-    "client.Client.execute_workflow": {"versioning_override"},
     # gRPC-era stack_level; versioning_override: no DBOS analog (D27/D28)
     "client.WithStartWorkflowOperation.__init__": {
         "stack_level",

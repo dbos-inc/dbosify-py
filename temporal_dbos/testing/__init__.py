@@ -47,12 +47,14 @@ class ActivityEnvironment:
     """
 
     def __init__(self, client: Optional[Any] = None) -> None:
-        # `client` is accepted for temporalio parity (used there for async
-        # activity completion heartbeats); not yet meaningful here.
+        # `client`, when given, is returned by ``activity.client()`` inside the
+        # run activity (temporalio parity).
         self.info: _activity.Info = _default_info
         self.on_heartbeat: Callable[..., None] = lambda *args: None
         self._context = _activity._Context(
-            info=self.info, on_heartbeat=lambda *details: self.on_heartbeat(*details)
+            info=self.info,
+            on_heartbeat=lambda *details: self.on_heartbeat(*details),
+            client=client,
         )
 
     def cancel(self) -> None:

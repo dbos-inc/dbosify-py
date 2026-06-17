@@ -22,13 +22,16 @@ arguments are accepted and ignored with a debug log.
 import asyncio
 import concurrent.futures
 import logging
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Callable, Optional, Sequence, Type
 
 from dbos import DBOS, DBOSConfig
 
+from . import activity as _activity
 from ._internal import conversion
 from ._internal import dispatcher as _dispatcher
+from ._internal import registry as _registry
 from ._internal.activity_interceptor import (
     ActivityInboundInterceptor,
     ActivityOutboundInterceptor,
@@ -56,6 +59,7 @@ from ._internal.workflow_interceptor import (
     WorkflowInterceptorClassInput,
     WorkflowOutboundInterceptor,
 )
+from .common import VersioningBehavior, WorkerDeploymentVersion
 from .converter import DataConverter
 
 __all__ = [
@@ -74,6 +78,7 @@ __all__ = [
     "StartActivityInput",
     "StartChildWorkflowInput",
     "StartLocalActivityInput",
+    "WorkerDeploymentConfig",
     "WorkflowInboundInterceptor",
     "WorkflowInterceptorClassInput",
     "WorkflowOutboundInterceptor",
@@ -121,6 +126,47 @@ def _reset_for_tests() -> None:
     DBOS.destroy(destroy_registry=True)
     _dispatcher._reset_for_tests()
     conversion.reset_converter()
+    _registry.set_worker_deployment_version(None)
+    _activity._on_worker_shutdown()
+
+
+def _resolve_deployment_version(
+    config: DBOSConfig,
+    deployment_config: Optional["WorkerDeploymentConfig"],
+    build_id: Optional[str],
+) -> WorkerDeploymentVersion:
+    """Resolve this worker's deployment version (DEVIATIONS D29): an explicit
+    ``deployment_config``/``build_id`` if given, else the DBOS application name
+    + ``application_version`` (falling back to DBOS's runtime app version when
+    the config opted into code-hash auto-versioning).
+    """
+    if deployment_config is not None:
+        return deployment_config.version
+    deployment_name = config.get("name", "")
+    if build_id is not None:
+        return WorkerDeploymentVersion(deployment_name, build_id)
+    resolved_build = config.get("application_version")
+    if not resolved_build:
+        from dbos._utils import GlobalParams
+
+        resolved_build = GlobalParams.app_version
+    return WorkerDeploymentVersion(deployment_name, resolved_build or "")
+
+
+@dataclass(frozen=True)
+class WorkerDeploymentConfig:
+    """Options for configuring the Worker Versioning feature, mirroring
+    ``temporalio.worker.WorkerDeploymentConfig``.
+
+    Accepted for parity. The deployment ``version`` is surfaced through
+    ``workflow.Info.get_current_deployment_version()``, but the versioning
+    behavior it requests is inert: DBOS pins workflow recovery/dequeue to
+    ``application_version`` regardless (DEVIATIONS D29).
+    """
+
+    version: WorkerDeploymentVersion
+    use_worker_versioning: bool
+    default_versioning_behavior: VersioningBehavior = VersioningBehavior.UNSPECIFIED
 
 
 class Worker:
@@ -143,11 +189,21 @@ class Worker:
         workflow_failure_exception_types: Sequence[Type[BaseException]] = [],
         data_converter: DataConverter = DataConverter.default,
         interceptors: Sequence[Interceptor] = [],
+        build_id: Optional[str] = None,
+        use_worker_versioning: bool = False,
+        deployment_config: Optional[WorkerDeploymentConfig] = None,
         **unsupported: Any,
     ) -> None:
         """Create the process's worker. Registration (workflow types,
         activity types, the task queue) happens at construction; execution
         and recovery start at :py:meth:`run`.
+
+        ``build_id`` / ``deployment_config`` / ``use_worker_versioning`` are
+        accepted for parity and feed the worker's deployment version (surfaced
+        via ``workflow.Info.get_current_deployment_version()``), but do not
+        change scheduling — DBOS pins dequeue to ``application_version``
+        regardless (DEVIATIONS D29). When neither is given, the deployment
+        version is derived from the DBOS application name + application_version.
         """
         global _live_worker
         if not task_queue or not isinstance(task_queue, str):
@@ -159,6 +215,8 @@ class Worker:
             )
         if not workflows and not activities:
             raise ValueError("At least one workflow and/or activity must be specified")
+        if deployment_config is not None and build_id is not None:
+            raise ValueError("Cannot set both build_id and deployment_config")
         for key, value in {
             "activity_executor": activity_executor,
             "workflow_task_executor": workflow_task_executor,
@@ -181,6 +239,16 @@ class Worker:
         # and workflow.patched() actually reaches pre-patch runs (DEFAULT_APP_VERSION).
         config = _with_default_app_version(config)
         DBOS(config=config)
+        # Resolve this process's worker deployment version (DEVIATIONS D29):
+        # explicit deployment_config/build_id wins, else derive it from the DBOS
+        # application name + application_version. Surfaced via
+        # workflow.Info.get_current_deployment_version(); inert for scheduling.
+        _registry.set_worker_deployment_version(
+            _resolve_deployment_version(config, deployment_config, build_id)
+        )
+        # Arm activity worker-lifecycle state (activity.is_worker_shutdown(),
+        # activity.client()) for this run.
+        _activity._on_worker_start(config)
         _dispatcher.register_worker(
             workflows=workflows,
             activities=activities,
@@ -275,6 +343,9 @@ class Worker:
 
     async def shutdown(self) -> None:
         """Initiate shutdown and wait for :py:meth:`run` to return."""
+        # Trip activity worker-lifecycle observers (is_worker_shutdown() /
+        # wait_for_worker_shutdown*) and tear down the worker's activity client.
+        _activity._on_worker_shutdown()
         if self._shutdown_event is not None:
             self._shutdown_event.set()
         if self._run_task is not None:
