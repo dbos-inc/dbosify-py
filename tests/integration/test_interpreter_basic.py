@@ -74,6 +74,7 @@ async def report_activity_info() -> Dict[str, Any]:
         "priority_is_default": info.priority == Priority.default,
         "activity_run_id": info.activity_run_id,
         "started_le_now": info.started_time <= datetime.now(timezone.utc),
+        "task_queue": info.task_queue,
     }
 
 
@@ -94,6 +95,7 @@ class InfoWorkflow:
             "workflow_id": info.workflow_id,
             "start_time_eq": info.workflow_start_time == info.start_time,
             "has_parent": info.parent is not None,
+            "task_queue": info.task_queue,
             "activity": act,
         }
 
@@ -262,6 +264,9 @@ def test_workflow_and_activity_info_parity_fields() -> None:
     assert res["workflow_id"] == "infowf"
     assert res["start_time_eq"] is True
     assert res["has_parent"] is False
+    # No Worker registered a queue (in-process harness), so the workflow's queue
+    # falls back to "default"; a local activity reports the workflow's queue.
+    assert res["task_queue"] == "default"
 
     act = res["activity"]
     assert act["namespace"] == "default"
@@ -272,6 +277,7 @@ def test_workflow_and_activity_info_parity_fields() -> None:
     assert act["priority_is_default"] is True
     assert act["activity_run_id"] is None
     assert act["started_le_now"] is True
+    assert act["task_queue"] == "default"
 
 
 @pytest.mark.usefixtures("tdb")

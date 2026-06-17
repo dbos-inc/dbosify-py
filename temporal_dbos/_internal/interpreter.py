@@ -816,6 +816,12 @@ class Interpreter(_Runtime):
         )
         self._own_queue_name: Optional[str] = None
         self._own_queue_resolved = False
+        # This process's Worker task queue (one Worker per process): the queue
+        # this workflow runs on, surfaced as info().task_queue and as a local
+        # activity's task_queue. "default" under the in-process Phase-0 harness.
+        from . import registry
+
+        self._task_queue_name = registry.worker_task_queue or "default"
         self._replay_horizon = 0
         # workflow.patched()/deprecate_patch() state (DESIGN §6.8). Patch ids
         # whose marker exists in recorded history (rebuilt from the step list at
@@ -1846,6 +1852,7 @@ class Interpreter(_Runtime):
             "start_to_close": exec_state.start_to_close,
             "retry_policy": serialize_retry_policy(exec_state.retry_policy),
             "seq": exec_state.seq,
+            "task_queue": exec_state.task_queue or self._task_queue_name,
             "workflow_id": ids.parse_run(self._workflow_id)[0],
             "workflow_run_id": self._workflow_id,
             "workflow_type": self._defn.name,
@@ -1909,6 +1916,8 @@ class Interpreter(_Runtime):
             "attempt": exec_state.attempt,
             "heartbeat_timeout": exec_state.heartbeat_timeout,
             "seq": seq,
+            # The activity runs on the target worker; report that queue.
+            "task_queue": exec_state.task_queue,
             "workflow_id": ids.parse_run(self._workflow_id)[0],
             "workflow_run_id": self._workflow_id,
             "workflow_type": self._defn.name,
@@ -2808,7 +2817,7 @@ class Interpreter(_Runtime):
             ),
             search_attributes=_attributes.typed_to_untyped(self._typed_sa),
             start_time=start_time,
-            task_queue="default",
+            task_queue=self._task_queue_name,
             typed_search_attributes=self._typed_sa,
             workflow_id=self._workflow_id,
             workflow_start_time=start_time,
