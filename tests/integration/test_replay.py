@@ -2,10 +2,10 @@
 checkpoints under the currently-registered code and detect non-determinism.
 
 Each test records a run with a Worker up, then constructs a Replayer (which
-re-registers the workflow type, so the fork runs *its* code) and replays the
-fetched history. Divergence is simulated by module-level ``MODE`` flags that
-change which activities the workflow runs — standing in for a code change
-between the recorded run and the replay.
+reuses that Worker's registered code) and replays the fetched history.
+Divergence is simulated by module-level ``MODE`` flags that change which
+activities the workflow runs — standing in for a code change between the
+recorded run and the replay.
 """
 
 from datetime import timedelta
@@ -35,13 +35,13 @@ TASK_QUEUE = "replay-tq"
 _OPTS: Dict[str, object] = {"start_to_close_timeout": timedelta(seconds=30)}
 
 # Behaviour flags simulating a code change between record and replay.
-MODE = {"reorder": False, "extra": False, "skip": False}
+MODE = {"reorder": False, "extra": False, "skip": False, "greet_extra": False}
 C_RUNS: List[int] = []
 
 
 @pytest.fixture(autouse=True)
 def _reset_mode() -> None:
-    MODE.update(reorder=False, extra=False, skip=False)
+    MODE.update(reorder=False, extra=False, skip=False, greet_extra=False)
     C_RUNS.clear()
 
 
@@ -114,6 +114,8 @@ class GreetingWf:
         self._greeting = f"Hello, {name}!"
         await workflow.sleep(0.05)
         self._greeting = f"Goodbye, {name}!"
+        if MODE["greet_extra"]:  # a "code change" that diverges on replay
+            await workflow.execute_activity(act_a, name, **_OPTS)  # type: ignore[arg-type]
         return self._greeting
 
 
@@ -406,6 +408,56 @@ async def test_query_on_terminated_workflow_fails_clearly() -> None:
             # rather than spin up a diverging fork.
             with pytest.raises(WorkflowQueryFailedError, match="TERMINATED"):
                 await handle.query(TimerSignalWf.state)
+        finally:
+            dbos_client.destroy()
+
+
+async def test_replay_terminated_workflow_is_rejected() -> None:
+    async with _worker(TimerSignalWf):
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)
+            handle = await client.start_workflow(
+                TimerSignalWf.run, "hi", id="rp-term-replay", task_queue=TASK_QUEUE
+            )
+            await handle.terminate()
+
+            async def _is_terminated() -> None:
+                desc = await handle.describe()
+                assert desc.status == WorkflowExecutionStatus.TERMINATED
+
+            await retry_until_success_async(_is_terminated)
+            history = await handle.fetch_history()
+
+            # A terminated run has only a partial checkpoint history; the
+            # Replayer refuses it clearly instead of reporting a false divergence.
+            result = await Replayer(workflows=[TimerSignalWf]).replay_workflow(
+                history, raise_on_replay_failure=False
+            )
+            assert isinstance(result.replay_failure, ValueError)
+            assert "TERMINATED" in str(result.replay_failure)
+        finally:
+            dbos_client.destroy()
+
+
+async def test_query_on_closed_with_changed_code_fails_clearly() -> None:
+    async with _worker(GreetingWf):
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)
+            handle = await client.start_workflow(
+                GreetingWf.run, "World", id="rp-changed", task_queue=TASK_QUEUE
+            )
+            assert await handle.result() == "Goodbye, World!"
+
+            # Simulate a code change: the rehydrate fork now diverges from the
+            # recorded history, so it can't reconstruct state — the query must
+            # fail with a clear message, not a generic timeout.
+            MODE["greet_extra"] = True
+            with pytest.raises(WorkflowQueryFailedError, match="code may have changed"):
+                await handle.query(
+                    GreetingWf.greeting, rpc_timeout=timedelta(seconds=3)
+                )
         finally:
             dbos_client.destroy()
 

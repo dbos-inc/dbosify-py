@@ -2008,22 +2008,28 @@ class WorkflowHandle:
         against that reconstructed state, then discard the scratch run."""
         client = self._client._dbos_client
         steps = await client.list_workflow_steps_async(target)
-        horizon = max((s["function_id"] for s in steps), default=0)
-        scratch_handle = await client.fork_workflow_async(target, horizon + 1)
-        scratch_id = scratch_handle.get_workflow_id()
-        _replay.register_guard(
-            _replay._ReplayGuard(
-                scratch_id=scratch_id,
-                horizon=horizon,
-                step_count=len(steps),
-                mode="rehydrate",
-            )
+        # The fork-one-past-horizon convention + guard registration are shared
+        # with the verification replayer (replay.start_replay_fork).
+        scratch_handle = await _replay.start_replay_fork(
+            client, target, steps, mode="rehydrate"
         )
+        scratch_id = scratch_handle.get_workflow_id()
         try:
             await client.send_async(scratch_id, envelope, inbox.INBOX_TOPIC)
-            return await self._client._await_reply_event(
+            reply = await self._client._await_reply_event(
                 scratch_id, scratch_id, inbox.query_result_key(request_id), timeout
             )
+            if reply is None:
+                # The fork reached a terminal state without serving the query:
+                # the reconstruction diverged (the workflow's code changed since
+                # it ran), or no worker for this type is running in *this*
+                # process to drive the rehydrate (DEVIATIONS D25).
+                raise WorkflowQueryFailedError(
+                    "rehydrate-by-replay produced no query reply: the workflow's "
+                    "code may have changed since it ran, or no worker for this "
+                    "type is running in the querying process (DEVIATIONS D25)"
+                )
+            return reply
         finally:
             _replay.unregister_guard(scratch_id)
             # Stop the scratch run serving and wait for it to settle, so the

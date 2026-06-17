@@ -43,7 +43,7 @@ def test_nondeterminism_error_is_temporal_error() -> None:
 
 
 def test_guard_is_scoped_to_its_scratch_id() -> None:
-    guard = replay._ReplayGuard(scratch_id="scratch-A", horizon=3, step_count=3)
+    guard = replay._ReplayGuard(scratch_id="scratch-A", horizon=3)
     replay.register_guard(guard)
     try:
         assert replay.current_guard_for("scratch-A") is guard

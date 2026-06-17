@@ -1409,13 +1409,15 @@ class Interpreter(_Runtime):
         return now >= self._rehydrate_deadline
 
     def _check_replay_horizon(self) -> None:
-        """During a verification replay, refuse to launch a *new* durable
-        operation beyond the recorded checkpoint horizon: that means the
+        """During any replay (verify or rehydrate), refuse to launch a *new*
+        durable operation beyond the recorded checkpoint horizon: that means the
         replayed code produced commands not in the recorded history (and would
         run a real activity in the fork). function_ids are 1-based and
         contiguous, so the workflow context's ``function_id`` equals the count
         of steps claimed so far; if it has already reached the horizon, the next
-        claim would exceed it."""
+        claim would exceed it. A faithful rehydrate never reaches this (it only
+        replays recorded steps, then serves queries), so the guard is mode-
+        agnostic."""
         guard = _replay.current_guard_for(self._workflow_id)
         if guard is None:
             return

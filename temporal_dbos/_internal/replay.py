@@ -36,6 +36,7 @@ from typing import (
     AsyncIterator,
     Dict,
     List,
+    Mapping,
     Optional,
     Sequence,
 )
@@ -71,9 +72,8 @@ class _ReplayGuard:
 
     scratch_id: str
     horizon: int
-    step_count: int
-    # "verify" detects non-determinism; "rehydrate" (Phase 2) replays a closed
-    # workflow to serve a query against its reconstructed state.
+    # "verify" detects non-determinism; "rehydrate" replays a closed workflow to
+    # serve a query against its reconstructed state (both Phase 4).
     mode: str = "verify"
 
 
@@ -121,12 +121,41 @@ class WorkflowReplayResults:
 # ---------------------------------------------------------------------------
 
 
+async def start_replay_fork(
+    forker: Any,
+    run_id: str,
+    steps: Sequence[Mapping[str, Any]],
+    *,
+    mode: str = "verify",
+    application_version: Optional[str] = None,
+) -> Any:
+    """Fork ``run_id`` one step past its last recorded checkpoint — copying
+    *every* recorded step — and register the replay guard for the scratch run.
+    Returns the fork handle.
+
+    This is the single source of the fork-bound convention shared by the
+    verification path and the query-on-closed rehydrate path: the copy bound is
+    ``function_id < start_step`` and ids are 1-based and contiguous, so
+    ``horizon + 1`` includes the final step. ``forker`` is anything exposing
+    ``fork_workflow_async`` (the ``DBOS`` runtime or a ``DBOSClient``).
+    """
+    horizon = max((s["function_id"] for s in steps), default=0)
+    handle = await forker.fork_workflow_async(
+        run_id, horizon + 1, application_version=application_version
+    )
+    register_guard(
+        _ReplayGuard(scratch_id=handle.get_workflow_id(), horizon=horizon, mode=mode)
+    )
+    return handle
+
+
 async def replay_one(
     history: "WorkflowHistory", *, application_version: Optional[str] = None
 ) -> Optional[Exception]:
     """Fork-and-verify a single history under the currently-registered code.
 
-    Returns the replay failure (a ``NondeterminismError``) or None if the run
+    Returns the replay failure (a ``NondeterminismError`` for divergence, or a
+    ``ValueError`` for a history that cannot be replayed) or None if the run
     replayed faithfully. Requires a launched DBOS runtime (see :class:`Replayer`).
     """
     from dbos import DBOS
@@ -138,36 +167,48 @@ async def replay_one(
         SerializedWorkflowCancellation,
         SerializedWorkflowFailure,
     )
+    from .status import WorkflowExecutionStatus
 
-    # Fork one step past the last recorded step so *every* checkpoint is copied
-    # (the copy bound is function_id < start_step, and ids are 1-based and
-    # contiguous, so horizon+1 covers the final step too).
-    start_step = history.replay_horizon + 1
-    handle = await DBOS.fork_workflow_async(
-        history.run_id, start_step, application_version=application_version
+    # TERMINATED (native kill) and TIMED_OUT runs keep only a partial checkpoint
+    # history, so re-execution legitimately runs past the partial horizon and
+    # would look nondeterministic. Refuse them clearly rather than reporting a
+    # false divergence (mirrors the query-on-closed gate; DEVIATIONS D25).
+    if history.status in (
+        WorkflowExecutionStatus.TERMINATED,
+        WorkflowExecutionStatus.TIMED_OUT,
+    ):
+        return ValueError(
+            f"cannot replay a {history.status.name} workflow: only a partial "
+            "checkpoint history was recorded (DEVIATIONS D25)"
+        )
+
+    handle = await start_replay_fork(
+        DBOS,
+        history.run_id,
+        history.recorded_steps,
+        mode="verify",
+        application_version=application_version,
     )
     scratch_id = handle.get_workflow_id()
-    register_guard(
-        _ReplayGuard(
-            scratch_id=scratch_id,
-            horizon=history.replay_horizon,
-            step_count=history.step_count,
-        )
-    )
     replay_failure: Optional[Exception] = None
     try:
         try:
             # Poll briskly: the scratch fork only replays recorded checkpoints,
             # so it finishes in well under the 1s default poll interval.
             await handle.get_result(polling_interval_sec=0.1)
+        except SerializedWorkflowCancellation:
+            # Faithful cancellation -> PASS. Caught BEFORE SerializedWorkflowFailure
+            # because it is a subclass (payloads.py); the broader clause would
+            # otherwise shadow it.
+            pass
         except SerializedWorkflowFailure as failure:
             if failure.envelope.get("type") == NONDETERMINISM_MARKER:
                 replay_failure = NondeterminismError(
                     str(failure.envelope.get("message", "nondeterministic replay"))
                 )
             # else: a genuine recorded failure replayed faithfully -> PASS.
-        except (SerializedContinueAsNew, SerializedWorkflowCancellation):
-            pass  # faithful continue-as-new / cancellation -> PASS
+        except SerializedContinueAsNew:
+            pass  # faithful continue-as-new -> PASS
         except DBOSUnexpectedStepError as err:  # defensive: surfaced directly
             replay_failure = NondeterminismError(str(err))
         except NondeterminismError as err:  # defensive: surfaced directly
