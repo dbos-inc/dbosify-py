@@ -186,6 +186,7 @@ class Worker:
             activities=activities,
             failure_exception_types=workflow_failure_exception_types,
             interceptors=interceptors,
+            task_queue=task_queue,
         )
         # The task queue is a database-backed DBOS queue; this process
         # dequeues only from its declared listen set (plus DBOS's internal

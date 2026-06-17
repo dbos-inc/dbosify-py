@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from .converter import Payload
 
 __all__ = [
+    "Priority",
     "QueryRejectCondition",
     "RawValue",
     "RetryPolicy",
@@ -67,6 +68,41 @@ class RawValue:
     """
 
     payload: "Payload"
+
+
+@dataclass(frozen=True)
+class Priority:
+    """Priority metadata controlling relative task-processing order, mirroring
+    ``temporalio.common.Priority``.
+
+    temporal-dbos does not implement priority-based dispatch (DBOS queues are
+    FIFO), so this type exists for signature parity and for the default that
+    ``workflow.info().priority`` / ``activity.info().priority`` return —
+    temporalio specifies an unset priority surfaces as the default instance,
+    which is exactly what we return.
+    """
+
+    priority_key: Optional[int] = None
+    """A positive integer (1..n); smaller is higher priority. Default unset."""
+
+    fairness_key: Optional[str] = None
+    """A short string keying a fairness-balancing mechanism. Default unset."""
+
+    fairness_weight: Optional[float] = None
+    """Weight for fairness dispatch within a ``fairness_key``. Default unset."""
+
+    default: ClassVar["Priority"]
+    """Singleton default priority instance."""
+
+    def __post_init__(self) -> None:
+        if self.priority_key is not None:
+            if not isinstance(self.priority_key, int):
+                raise TypeError("priority_key must be an integer")
+            if self.priority_key < 1:
+                raise ValueError("priority_key must be a positive integer")
+
+
+Priority.default = Priority(priority_key=None, fairness_key=None, fairness_weight=None)
 
 
 @dataclass(frozen=True)

@@ -629,8 +629,14 @@ class WorkflowExecution:
     """
 
     close_time: Optional[datetime] = None
+    # When this run started or should start. We have a single creation
+    # timestamp per run, so this equals :py:attr:`start_time`.
+    execution_time: Optional[datetime] = None
     id: str = ""
+    namespace: str = "default"
     parent_id: Optional[str] = None
+    # Run ID of the parent (its DBOS run id); set only for cross-chain children.
+    parent_run_id: Optional[str] = None
     run_id: str = ""
     search_attributes: SearchAttributes = field(default_factory=dict)
     """Search attributes for the workflow.
@@ -880,24 +886,29 @@ def _execution_from_status(
         stored_attrs.get(_attributes.SEARCH_ATTRIBUTES_KEY, {})
     )
     dbos_id = status.workflow_id
+    # A same-chain DBOS parent link is a continuation (continue-as-new), not a
+    # parent; only cross-chain links are real parents.
+    parent_dbos_id = (
+        status.parent_workflow_id
+        if status.parent_workflow_id is not None
+        and ids.parse_run(status.parent_workflow_id)[0] != ids.parse_run(dbos_id)[0]
+        else None
+    )
+    created = _to_datetime(status.created_at)
     execution = cls(
         id=ids.parse_run(dbos_id)[0],
+        namespace="default",
         run_id=dbos_id,
         workflow_type=workflow_type,
         task_queue=status.queue_name,
         status=_status.to_execution_status(status.status, error=status.error),
-        start_time=_to_datetime(status.created_at),
+        start_time=created,
+        execution_time=created,
         close_time=_to_datetime(status.completed_at),
         search_attributes=_attributes.typed_to_untyped(typed_sa),
         typed_search_attributes=typed_sa,
-        # A same-chain DBOS parent link is a continuation (continue-as-new),
-        # not a parent; only cross-chain links are real parents.
-        parent_id=(
-            status.parent_workflow_id
-            if status.parent_workflow_id is not None
-            and ids.parse_run(status.parent_workflow_id)[0] != ids.parse_run(dbos_id)[0]
-            else None
-        ),
+        parent_id=ids.parse_run(parent_dbos_id)[0] if parent_dbos_id else None,
+        parent_run_id=parent_dbos_id,
     )
     object.__setattr__(
         execution, "_encoded_memo", stored_attrs.get(_attributes.MEMO_KEY, {})
