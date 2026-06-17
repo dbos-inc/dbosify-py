@@ -733,10 +733,16 @@ A **deployment version** is `WorkerDeploymentVersion(deployment_name, build_id)`
 where `deployment_name` is the DBOS application/deployment name and `build_id` is
 the DBOS `application_version`. `Worker(build_id=...)` or
 `Worker(deployment_config=WorkerDeploymentConfig(...))` set that build ID *as the
-DBOS `application_version`* (the two are mutually exclusive); absent both, it is
+DBOS `application_version`* (the two are mutually exclusive; a non-empty build id
+that conflicts with an `application_version` already in the `DBOSConfig` is
+rejected, as is `use_worker_versioning=True` with no build id); absent both, it is
 derived from the configured `application_version` (default `DEFAULT_APP_VERSION`,
 D28). The version is readable in-workflow via
-`workflow.info().get_current_deployment_version()` / `get_current_build_id()`.
+`workflow.info().get_current_deployment_version()` / `get_current_build_id()`,
+whose `build_id` is read live from the worker's `application_version` at access
+time — so it always equals the version DBOS actually enforces, including a
+computed code-hash when the config opts into DBOS auto-versioning
+(`application_version=None`).
 
 **PINNED is real and enforced, not inert.** DBOS scopes both workflow recovery
 (`get_pending_workflows` filters `application_version == <worker version>`) and

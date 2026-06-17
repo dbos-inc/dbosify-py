@@ -212,6 +212,11 @@ class _Context:
     # one explicitly; on real worker runs it is left None and ``client()``
     # lazily builds the process's worker client (see ``_worker_client``).
     client: Optional["Client"] = None
+    # Worker-shutdown observation (activity.is_worker_shutdown() /
+    # wait_for_worker_shutdown*). Real activity attempts point this at the
+    # worker's shared ``_worker_shutdown_event``; ActivityEnvironment leaves the
+    # default fresh, unset event so a test never observes a stale worker's flag.
+    worker_shutdown_event: threading.Event = field(default_factory=threading.Event)
 
 
 # Worker-process state for in-flight activity attempts, keyed by
@@ -225,14 +230,16 @@ _live_attempts: Dict[Tuple[str, int], "_Context"] = {}
 _heartbeat_store: Dict[Tuple[str, int], Sequence[Any]] = {}
 _cancel_requested_keys: "set[Tuple[str, int]]" = set()
 
-# Process-global worker-lifecycle state backing activity.is_worker_shutdown()
-# and activity.client(). One Worker per process owns these: the Worker sets the
-# config (and clears the shutdown flag) at construction, and sets the shutdown
-# flag on shutdown(). ``_worker_client`` is the lazily-built client returned by
-# activity.client(); it is destroyed on worker shutdown.
+# Process-global worker-lifecycle state. One Worker per process owns these. The
+# shutdown *event* is the worker's; each real activity ``_Context`` references it
+# (so a fresh ActivityEnvironment context, with its own unset event, never sees a
+# stale tripped flag). ``_worker_dbos_config`` / ``_worker_client`` back
+# activity.client(): the client is built lazily on first use and destroyed when
+# the worker's run() finishes its graceful drain (not at the shutdown signal).
 _worker_shutdown_event = threading.Event()
 _worker_dbos_config: Optional[Any] = None
 _worker_client: Optional["Client"] = None
+_worker_client_lock = threading.Lock()
 
 
 def _on_worker_start(config: Any) -> None:
@@ -244,21 +251,30 @@ def _on_worker_start(config: Any) -> None:
     _worker_client = None
 
 
-def _on_worker_shutdown() -> None:
-    """Called by the Worker on shutdown: trip ``is_worker_shutdown()`` /
-    ``wait_for_worker_shutdown*`` and tear down the cached worker client."""
-    global _worker_client, _worker_dbos_config
+def _signal_worker_shutdown() -> None:
+    """Trip ``is_worker_shutdown()`` / ``wait_for_worker_shutdown*``. Called when
+    shutdown is initiated; the client is left usable for draining activities and
+    torn down later by :py:func:`_teardown_worker_state`."""
     _worker_shutdown_event.set()
+
+
+def _teardown_worker_state() -> None:
+    """Release worker-lifecycle resources after the worker's graceful drain (and
+    on test reset): destroy the lazily-built client and clear stored config. The
+    shutdown event is reset so the next worker starts clean."""
+    global _worker_client, _worker_dbos_config
     client = _worker_client
     _worker_client = None
     _worker_dbos_config = None
+    _worker_shutdown_event.clear()
     if client is not None:
         client._dbos_client.destroy()
 
 
 def _worker_client_lazy() -> Optional["Client"]:
     """Build (once) and return the process worker's Temporal client, or None if
-    no Worker has registered its config in this process."""
+    no Worker has registered its config in this process. Double-checked locking
+    so concurrent first callers don't each open (and leak) a connection pool."""
     global _worker_client
     if _worker_client is not None:
         return _worker_client
@@ -270,9 +286,17 @@ def _worker_client_lazy() -> Optional["Client"]:
     from ._internal import conversion
     from .client import Client
 
-    url = config.get("system_database_url") or config.get("database_url")
-    dbos_client = DBOSClient(system_database_url=url)
-    _worker_client = Client(dbos_client, data_converter=conversion.get_converter())
+    with _worker_client_lock:
+        if _worker_client is not None:
+            return _worker_client
+        # Pass both URL keys through and let DBOSClient derive the system DB:
+        # ``database_url`` is DBOS's deprecated *application*-DB alias, so it must
+        # not be handed in as ``system_database_url`` directly.
+        dbos_client = DBOSClient(
+            system_database_url=config.get("system_database_url"),
+            database_url=config.get("database_url"),
+        )
+        _worker_client = Client(dbos_client, data_converter=conversion.get_converter())
     return _worker_client
 
 
@@ -406,8 +430,7 @@ def is_worker_shutdown() -> bool:
     Raises:
         RuntimeError: When not in an activity.
     """
-    _context()  # parity: only valid inside an activity
-    return _worker_shutdown_event.is_set()
+    return _context().worker_shutdown_event.is_set()
 
 
 async def wait_for_worker_shutdown() -> None:
@@ -417,12 +440,15 @@ async def wait_for_worker_shutdown() -> None:
     Raises:
         RuntimeError: When not in an activity.
     """
-    _context()
-    if _worker_shutdown_event.is_set():
-        return
     import asyncio
 
-    await asyncio.get_event_loop().run_in_executor(None, _worker_shutdown_event.wait)
+    event = _context().worker_shutdown_event
+    # Poll rather than parking a thread on the shared (DBOS) default executor via
+    # run_in_executor — a never-firing wait there would tie up a pool thread for
+    # the worker's lifetime, and enough of them would starve it. Shutdown is a
+    # rare terminal event, so the small detection latency is acceptable.
+    while not event.is_set():
+        await asyncio.sleep(0.1)
 
 
 def wait_for_worker_shutdown_sync(
@@ -434,9 +460,9 @@ def wait_for_worker_shutdown_sync(
     Raises:
         RuntimeError: When not in an activity.
     """
-    _context()
+    event = _context().worker_shutdown_event
     seconds = timeout.total_seconds() if isinstance(timeout, timedelta) else timeout
-    _worker_shutdown_event.wait(seconds)
+    event.wait(seconds)
 
 
 @contextmanager

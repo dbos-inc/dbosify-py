@@ -184,6 +184,32 @@ async def test_continue_as_new_successor_inherits_build_id() -> None:
     assert successor.app_version == "can-build"
 
 
+async def test_auto_versioning_reports_computed_version_not_empty() -> None:
+    # application_version=None opts into DBOS code-hash auto-versioning. The
+    # reported build_id must be the live computed version DBOS pins on (read at
+    # access time), not the empty construction-time value.
+    config = default_config()
+    config["application_version"] = None
+    worker = Worker(config, task_queue=TASK_QUEUE, workflows=_WORKFLOWS)
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)
+            result = await client.execute_workflow(
+                DeploymentInfoWorkflow.run, id="dv-autover", task_queue=TASK_QUEUE
+            )
+        finally:
+            dbos_client.destroy()
+    assert result["build_id"], "auto-versioned build_id should be the computed hash"
+    probe = DBOSClient(system_database_url=system_database_url())
+    try:
+        status = probe.retrieve_workflow("dv-autover").get_status()
+    finally:
+        probe.destroy()
+    # Reported version equals the version DBOS actually enforced on the run.
+    assert result["build_id"] == status.app_version
+
+
 def test_worker_rejects_build_id_and_deployment_config_together() -> None:
     config = WorkerDeploymentConfig(
         version=WorkerDeploymentVersion("d", "b"), use_worker_versioning=True
@@ -195,4 +221,30 @@ def test_worker_rejects_build_id_and_deployment_config_together() -> None:
             workflows=_WORKFLOWS,
             build_id="x",
             deployment_config=config,
+        )
+
+
+def test_worker_rejects_empty_build_id() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        Worker(
+            default_config(), task_queue=TASK_QUEUE, workflows=_WORKFLOWS, build_id=""
+        )
+
+
+def test_worker_rejects_build_id_conflicting_with_config_version() -> None:
+    config = default_config()
+    config["application_version"] = "cfg-ver"
+    with pytest.raises(ValueError, match="conflicts with"):
+        Worker(
+            config, task_queue=TASK_QUEUE, workflows=_WORKFLOWS, build_id="bld-other"
+        )
+
+
+def test_worker_rejects_use_worker_versioning_without_build_id() -> None:
+    with pytest.raises(ValueError, match="use_worker_versioning"):
+        Worker(
+            default_config(),
+            task_queue=TASK_QUEUE,
+            workflows=_WORKFLOWS,
+            use_worker_versioning=True,
         )

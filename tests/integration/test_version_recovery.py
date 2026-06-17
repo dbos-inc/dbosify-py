@@ -9,18 +9,12 @@ just checking the recorded version field.
 """
 
 from pathlib import Path
-from typing import Dict
 
 import pytest
 
-from tests.harness import PythonProcess
+from tests.harness import PythonProcess, build_id_env
 
 WORKER = Path(__file__).parent / "version_recovery_worker.py"
-REPO_ROOT = Path(__file__).parents[2]
-
-
-def _env(build_id: str) -> Dict[str, str]:
-    return {"PYTHONPATH": str(REPO_ROOT), "TDB_BUILD_ID": build_id}
 
 
 @pytest.mark.usefixtures("cleanup_test_databases")
@@ -28,7 +22,7 @@ def test_workflow_pinned_to_build_id_across_recovery() -> None:
     wf_id = "version-pin-recovery"
 
     # 1. A v1 worker starts the workflow (stamped v1); it parks. Crash it.
-    first = PythonProcess(WORKER, "start", wf_id, env=_env("v1"))
+    first = PythonProcess(WORKER, "start", wf_id, env=build_id_env("v1"))
     first.start()
     try:
         first.wait_for_line("PARKED", timeout=60)
@@ -39,7 +33,7 @@ def test_workflow_pinned_to_build_id_across_recovery() -> None:
 
     # 2. A v2 worker sends the release and stays up. It must NOT recover the v1
     #    workflow, so the release is never processed and it stays RUNNING.
-    idle = PythonProcess(WORKER, "idle", wf_id, env=_env("v2"))
+    idle = PythonProcess(WORKER, "idle", wf_id, env=build_id_env("v2"))
     idle.start()
     try:
         status_line = idle.wait_for_line("STATUS ", timeout=60)
@@ -51,7 +45,7 @@ def test_workflow_pinned_to_build_id_across_recovery() -> None:
     ), f"a v2 worker must not recover the v1 workflow; got {status_line!r}"
 
     # 3. A v1 worker recovers it, processes the buffered release, and completes.
-    resume = PythonProcess(WORKER, "resume", wf_id, env=_env("v1"))
+    resume = PythonProcess(WORKER, "resume", wf_id, env=build_id_env("v1"))
     resume.start()
     try:
         result_line = resume.wait_for_line("RESULT ", timeout=60)

@@ -199,6 +199,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
             info=activity_api._make_info(meta),
             on_heartbeat=lambda *details: None,
             attempt_key=attempt_key,
+            # Observe the worker's shared shutdown flag (activity.is_worker_shutdown()).
+            worker_shutdown_event=activity_api._worker_shutdown_event,
         )
 
         async def call_user_activity() -> Dict[str, Any]:

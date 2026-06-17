@@ -9,22 +9,17 @@ a separate-process client with a different/absent version is not a sharp edge.
 
 import asyncio
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import pytest
 from dbos import DBOSClient
 
 from temporal_dbos.client import Client
 from tests.dbconfig import system_database_url
-from tests.harness import PythonProcess
+from tests.harness import PythonProcess, build_id_env
 from tests.integration.version_client_worker import TASK_QUEUE, VersionEcho
 
 WORKER = Path(__file__).parent / "version_client_worker.py"
-REPO_ROOT = Path(__file__).parents[2]
-
-
-def _env(build_id: str) -> Dict[str, str]:
-    return {"PYTHONPATH": str(REPO_ROOT), "TDB_BUILD_ID": build_id}
 
 
 async def _client_run(wf_id: str) -> Tuple[str, Optional[str]]:
@@ -44,7 +39,7 @@ async def _client_run(wf_id: str) -> Tuple[str, Optional[str]]:
 
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_separate_process_client_workflow_takes_worker_build_id() -> None:
-    worker = PythonProcess(WORKER, env=_env("cli-build"))
+    worker = PythonProcess(WORKER, env=build_id_env("cli-build"))
     worker.start()
     try:
         worker.wait_for_line("READY", timeout=90)

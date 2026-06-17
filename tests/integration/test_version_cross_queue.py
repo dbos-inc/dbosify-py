@@ -6,28 +6,24 @@ runs to completion and its workflow row carries that build id.
 """
 
 from pathlib import Path
-from typing import Dict
 
 import pytest
 from dbos import DBOSClient
 
 from tests.dbconfig import system_database_url
-from tests.harness import PythonProcess
+from tests.harness import PythonProcess, build_id_env
 
 WORKER = Path(__file__).parent / "version_cross_queue_worker.py"
-REPO_ROOT = Path(__file__).parents[2]
-
-
-def _env(build_id: str) -> Dict[str, str]:
-    return {"PYTHONPATH": str(REPO_ROOT), "TDB_BUILD_ID": build_id}
 
 
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_cross_queue_activity_pinned_to_build_id() -> None:
     wf_id = "version-xq-wf"
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("cq-build"))
+    activity_worker = PythonProcess(WORKER, "activity", env=build_id_env("cq-build"))
     activity_worker.start()
-    workflow_worker = PythonProcess(WORKER, "workflow", wf_id, env=_env("cq-build"))
+    workflow_worker = PythonProcess(
+        WORKER, "workflow", wf_id, env=build_id_env("cq-build")
+    )
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
         workflow_worker.start()

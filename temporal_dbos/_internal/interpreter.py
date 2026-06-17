@@ -65,6 +65,7 @@ from typing import (
 from dbos import DBOS
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
 from dbos._error import DBOSUnexpectedStepError
+from dbos._utils import GlobalParams  # the worker's live DBOS application_version
 
 from .. import activity as activity_api
 from .. import exceptions
@@ -3029,14 +3030,18 @@ class Interpreter(_Runtime):
     def runtime_get_current_deployment_version(
         self,
     ) -> Optional[WorkerDeploymentVersion]:
-        # Process-global, set by the Worker from its build_id/deployment_config
-        # (= the DBOS application_version DBOS pins recovery/dequeue to) or the
-        # DBOS application name + application_version (DEVIATIONS D29).
+        # Deployment name is a process-global set by the Worker; the build_id is
+        # read live from the worker's DBOS application_version (post-launch, so
+        # it reflects an explicit build_id, the pinned default, or a computed
+        # code-hash for auto-versioning) — the version DBOS actually pins
+        # recovery/dequeue to, so reported == enforced (DEVIATIONS D29). None
+        # when no Worker is active (the in-process dispatcher harness).
         from . import registry
 
-        return cast(
-            Optional[WorkerDeploymentVersion], registry.worker_deployment_version
-        )
+        name = registry.worker_deployment_name
+        if name is None:
+            return None
+        return WorkerDeploymentVersion(name, GlobalParams.app_version)
 
     def runtime_get_current_details(self) -> str:
         return self._current_details

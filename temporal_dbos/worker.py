@@ -126,31 +126,8 @@ def _reset_for_tests() -> None:
     DBOS.destroy(destroy_registry=True)
     _dispatcher._reset_for_tests()
     conversion.reset_converter()
-    _registry.set_worker_deployment_version(None)
-    _activity._on_worker_shutdown()
-
-
-def _resolve_deployment_version(
-    config: DBOSConfig,
-    deployment_config: Optional["WorkerDeploymentConfig"],
-    build_id: Optional[str],
-) -> WorkerDeploymentVersion:
-    """Resolve this worker's deployment version (DEVIATIONS D29): an explicit
-    ``deployment_config``/``build_id`` if given, else the DBOS application name
-    + ``application_version`` (falling back to DBOS's runtime app version when
-    the config opted into code-hash auto-versioning).
-    """
-    if deployment_config is not None:
-        return deployment_config.version
-    deployment_name = config.get("name", "")
-    if build_id is not None:
-        return WorkerDeploymentVersion(deployment_name, build_id)
-    resolved_build = config.get("application_version")
-    if not resolved_build:
-        from dbos._utils import GlobalParams
-
-        resolved_build = GlobalParams.app_version
-    return WorkerDeploymentVersion(deployment_name, resolved_build or "")
+    _registry.set_worker_deployment_name(None)
+    _activity._teardown_worker_state()
 
 
 @dataclass(frozen=True)
@@ -222,6 +199,13 @@ class Worker:
             raise ValueError("At least one workflow and/or activity must be specified")
         if deployment_config is not None and build_id is not None:
             raise ValueError("Cannot set both build_id and deployment_config")
+        if use_worker_versioning and build_id is None and deployment_config is None:
+            # Mirror temporalio: opting into versioning with no version to pin to
+            # is a silent misconfiguration (the worker would run unversioned).
+            raise ValueError(
+                "build_id (or deployment_config) must be specified when "
+                "use_worker_versioning is True"
+            )
         for key, value in {
             "activity_executor": activity_executor,
             "workflow_task_executor": workflow_task_executor,
@@ -253,15 +237,27 @@ class Worker:
             else build_id
         )
         if explicit_build is not None:
+            if not explicit_build:
+                raise ValueError("build_id must be a non-empty string")
+            existing_version = config.get("application_version")
+            if existing_version is not None and existing_version != explicit_build:
+                raise ValueError(
+                    f"build_id {explicit_build!r} conflicts with the "
+                    f"application_version {existing_version!r} already set in the "
+                    "DBOSConfig (a build id IS the DBOS application_version); set "
+                    "only one"
+                )
             config = {**config, "application_version": explicit_build}
         config = _with_default_app_version(config)
         DBOS(config=config)
-        # The worker deployment version surfaced via
-        # workflow.Info.get_current_deployment_version(): build_id = the DBOS
-        # application_version DBOS pins on, deployment_name = the app/deployment
-        # name (DEVIATIONS D29).
-        _registry.set_worker_deployment_version(
-            _resolve_deployment_version(config, deployment_config, build_id)
+        # Deployment name surfaced via workflow.Info.get_current_deployment_version():
+        # the explicit deployment_config name, else the DBOS app name. The build_id
+        # half is read live from the DBOS application_version at access time, so the
+        # surfaced version always equals the one DBOS enforces (DEVIATIONS D29).
+        _registry.set_worker_deployment_name(
+            deployment_config.version.deployment_name
+            if deployment_config is not None
+            else config.get("name", "")
         )
         # Arm activity worker-lifecycle state (activity.is_worker_shutdown(),
         # activity.client()) for this run.
@@ -356,13 +352,20 @@ class Worker:
                     thread_name_prefix="asyncio"
                 )
             loop.set_default_executor(original_executor)
+            # Tear down activity worker-lifecycle state only AFTER the graceful
+            # drain above, so an activity reacting to shutdown could still use
+            # activity.client() while it was draining.
+            _activity._teardown_worker_state()
+            _registry.set_worker_deployment_name(None)
             _live_worker = None
 
     async def shutdown(self) -> None:
         """Initiate shutdown and wait for :py:meth:`run` to return."""
         # Trip activity worker-lifecycle observers (is_worker_shutdown() /
-        # wait_for_worker_shutdown*) and tear down the worker's activity client.
-        _activity._on_worker_shutdown()
+        # wait_for_worker_shutdown*) NOW, so draining activities can observe it;
+        # the activity client is torn down later, after the graceful drain in
+        # run()'s finally, so it stays usable while activities wind down.
+        _activity._signal_worker_shutdown()
         if self._shutdown_event is not None:
             self._shutdown_event.set()
         if self._run_task is not None:

@@ -66,10 +66,9 @@ def test_cancellation() -> None:
 
 
 def test_worker_lifecycle_helpers_without_worker() -> None:
-    # No Worker is running in this process for a pure ActivityEnvironment test;
-    # reset the process-global shutdown flag so the assertion is independent of
-    # any prior worker test in the same process.
-    activity._worker_shutdown_event.clear()
+    # ActivityEnvironment gives each activity its own (unset) worker-shutdown
+    # event, so is_worker_shutdown() reads False regardless of any prior worker
+    # test in the same process — no manual reset needed.
     env = ActivityEnvironment()
     assert env.run(worker_lifecycle_activity) == "shutdown=False"
 

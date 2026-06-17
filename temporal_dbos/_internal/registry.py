@@ -202,18 +202,20 @@ def set_worker_task_queue(task_queue: Optional[str]) -> None:
     worker_task_queue = task_queue
 
 
-# This process's worker deployment version, backing
+# This process's worker deployment NAME, backing
 # workflow.Info.get_current_deployment_version()/get_current_build_id(). Set by
-# the Worker from Worker(deployment_config=)/Worker(build_id=), else derived
-# from the DBOS application name + application_version. The build_id is the DBOS
-# application_version DBOS pins recovery/dequeue to (DEVIATIONS D29). Stored as
-# an opaque object to avoid importing the public common types here.
-worker_deployment_version: Optional[Any] = None
+# the Worker (deployment_config.version.deployment_name, else the DBOS app name);
+# None when no Worker is active (the in-process dispatcher harness) → the
+# accessors return None. The build_id half is NOT stored here: it is read live
+# from the DBOS application_version at access time (the version DBOS actually
+# pins recovery/dequeue to, including a code-hash for auto-versioning), so the
+# surfaced version always equals the enforced one (DEVIATIONS D29).
+worker_deployment_name: Optional[str] = None
 
 
-def set_worker_deployment_version(version: Optional[Any]) -> None:
-    global worker_deployment_version
-    worker_deployment_version = version
+def set_worker_deployment_name(name: Optional[str]) -> None:
+    global worker_deployment_name
+    worker_deployment_name = name
 
 
 def workflow_definition_of(cls: Type[Any]) -> WorkflowDefinition:
