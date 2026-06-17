@@ -822,23 +822,21 @@ async def _action_from_context(ctx: Mapping[str, Any]) -> ScheduleActionStartWor
 
 
 async def _schedule_from_context(ctx: Mapping[str, Any]) -> Schedule:
-    policy = ctx.get("policy", {})
-    state = ctx.get("state", {})
+    policy = ctx["policy"]
+    state = ctx["state"]
     return Schedule(
         action=await _action_from_context(ctx),
-        spec=_deserialize_spec(ctx.get("spec", {})),
+        spec=_deserialize_spec(ctx["spec"]),
         policy=SchedulePolicy(
-            overlap=ScheduleOverlapPolicy(
-                policy.get("overlap", ScheduleOverlapPolicy.SKIP)
-            ),
-            catchup_window=timedelta(seconds=policy.get("catchup_window", 31536000.0)),
-            pause_on_failure=policy.get("pause_on_failure", False),
+            overlap=ScheduleOverlapPolicy(policy["overlap"]),
+            catchup_window=timedelta(seconds=policy["catchup_window"]),
+            pause_on_failure=policy["pause_on_failure"],
         ),
         state=ScheduleState(
-            note=state.get("note"),
-            paused=state.get("paused", False),
-            limited_actions=state.get("limited_actions", False),
-            remaining_actions=state.get("remaining_actions", 0),
+            note=state["note"],
+            paused=state["paused"],
+            limited_actions=state["limited_actions"],
+            remaining_actions=state["remaining_actions"],
         ),
     )
 
