@@ -43,7 +43,7 @@ import time as time_mod
 import warnings
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from random import Random
 from typing import (
     Any,
@@ -162,6 +162,7 @@ _activity_result_step: Optional[Callable[[str], Any]] = None
 _update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
 _safe_status_step: Optional[Callable[[str], Any]] = None
 _safe_status_list_step: Optional[Callable[[List[str]], Any]] = None
+_schedule_occurrences_step: Optional[Callable[[str, int, int], Any]] = None
 
 
 def _workflow_init_step() -> Any:
@@ -382,6 +383,54 @@ def _safe_status_list(dbos_ids: List[str]) -> Any:
 
         _safe_status_list_step = safe_status_list_step
     return _safe_status_list_step(dbos_ids)
+
+
+def _schedule_occurrences(schedule_name: str, before_epoch: int, limit: int) -> Any:
+    """Checkpointed lookup of a DBOS schedule's prior fire times, as a
+    descending list of epoch seconds strictly before ``before_epoch``.
+
+    Each schedule occurrence is a tagged dispatcher firing (``schedule_name``
+    is set by DBOS on every regular/trigger/backfill fire); its nominal fire
+    time is the firing's first input arg. Returning the times — rather than
+    walking the cron grid backward — lets the schedule overlap check map them
+    to per-occurrence action ids and probe those in one batch, and it picks up
+    off-grid trigger/backfill fires the grid walk could never reproduce. The
+    checkpoint keeps the (otherwise time-varying) listing replay-stable.
+    """
+    global _schedule_occurrences_step
+    if _schedule_occurrences_step is None:
+
+        @DBOS.step(name="__tdb_schedule_occurrences")
+        async def schedule_occurrences_step(
+            schedule_name: str, before_epoch: int, limit: int
+        ) -> List[int]:
+            # schedule_name is set only on dispatcher firings, so this is an
+            # indexed lookup (idx_workflow_status_schedule_name), not a scan.
+            firings = await DBOS.list_workflows_async(
+                schedule_name=schedule_name,
+                sort_desc=True,
+                limit=limit,
+                load_input=True,
+                load_output=False,
+            )
+            occ: List[int] = []
+            for f in firings:
+                args = (f.input or {}).get("args") if f.input else None
+                if not args:
+                    continue
+                fired_at = args[0]
+                if isinstance(fired_at, str):
+                    fired_at = datetime.fromisoformat(fired_at)
+                if fired_at.tzinfo is None:
+                    fired_at = fired_at.replace(tzinfo=timezone.utc)
+                ts = int(fired_at.timestamp())
+                if ts < before_epoch:
+                    occ.append(ts)
+            occ.sort(reverse=True)
+            return occ
+
+        _schedule_occurrences_step = schedule_occurrences_step
+    return _schedule_occurrences_step(schedule_name, before_epoch, limit)
 
 
 class _TimerHandle(asyncio.TimerHandle):

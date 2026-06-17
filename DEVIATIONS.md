@@ -412,18 +412,22 @@ temporalio; these edges differ:
   `intervals`/`calendars`/`cron_expressions` use the first.
 - **Overlap policy: SKIP / CANCEL_OTHER / TERMINATE_OTHER / ALLOW_ALL honored;
   BUFFER_ONE / BUFFER_ALL rejected.** At each fire (for any policy but
-  ALLOW_ALL) the dispatcher walks prior occurrences backward on the cron grid —
-  exact-id status reads only, never a prefix scan — to find the most recently
-  *started* action (skipped occurrences leave no row) and whether it is still
-  open. SKIP drops the new fire; CANCEL_OTHER cooperatively cancels the running
-  action (but does **not** wait for it to finish unwinding before starting the
-  next — they may briefly overlap, unlike Temporal); TERMINATE_OTHER natively
-  cancels it. Edges: the walk is bounded by the schedule's creation time and a
-  hard cap (~60 occurrences), so an action overrunning more occurrences than the
-  cap may not be detected; detection is grid-based, so `trigger`/`backfill`
-  (off-grid / historical fires) aren't matched against grid occurrences; and a
-  scheduled action that continues-as-new or retries isn't tracked across the
-  hop. `BUFFER_ONE`/`BUFFER_ALL` (durable start-after-completion queueing) raise
+  ALLOW_ALL) the dispatcher finds the most recently *started* action and checks
+  whether it is still open. Every fire (regular, `trigger`, or `backfill`) is a
+  dispatcher firing that DBOS tags with the schedule name, so it is found by an
+  indexed schedule lookup (filter on `schedule_name`, not a prefix scan) over
+  recent fires, mapping each to its per-occurrence action id and probing those
+  in one batch (skipped fires leave no row). SKIP drops the new fire;
+  CANCEL_OTHER cooperatively cancels the running action (but does **not** wait
+  for it to finish unwinding before starting the next — they may briefly
+  overlap, unlike Temporal); TERMINATE_OTHER natively cancels it. `trigger` and
+  `backfill` fires now participate in overlap detection (they are tagged fires
+  too). Edges: the lookup considers the most recent ~60 fires, so under SKIP a
+  single action overrunning more than ~60 skipped fires may stop being detected
+  (CANCEL/TERMINATE_OTHER start an action on every fire, so the prior is always
+  the latest fire — no cap concern there); and a scheduled action that
+  continues-as-new or retries isn't tracked across the hop.
+  `BUFFER_ONE`/`BUFFER_ALL` (durable start-after-completion queueing) raise
   `NotImplementedError` at `create_schedule`.
 - **Per-call overlap override is not applied.** `ScheduleHandle.trigger(overlap=)`
   and `ScheduleBackfill.overlap` can't be threaded through DBOS's

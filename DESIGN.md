@@ -627,8 +627,9 @@ via cancel-then-start. `ScheduleHandle.pause/unpause/trigger/backfill/delete/des
 get_schedule` (+ re-create for update). **Done** as sketched, with v1 scope cuts
 (DEVIATIONS D22): the `ScheduleSpec` compiles to one cron (intervals dividing a boundary
 are exact, others approximate; calendar `year`/interval `offset` dropped); overlap honors
-SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL (the fire dispatcher walks prior occurrences
-backward on the cron grid via exact-id status reads to find a still-running prior) but
+SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL (the fire dispatcher finds a still-running
+prior via an indexed `schedule_name` lookup over recent fires — DBOS tags every fire with
+the schedule name — then probes their per-occurrence action ids in one batch) but
 rejects BUFFER_ONE/BUFFER_ALL; `update` is delete-then-recreate; schedule history and
 `memo`/`search_attributes` aren't tracked. The action + full spec ride in the schedule's
 DBOS `context` (so describe/list/update reconstruct them); the fire dispatcher

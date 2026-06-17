@@ -939,6 +939,9 @@ async def create_schedule_row(
     context["cron"] = cron
     context["timezone"] = tz_name
     context["created_at"] = datetime.now(timezone.utc).isoformat()
+    # The schedule's own name (what DBOS tags each fire's status with), so the
+    # dispatcher can find prior occurrences by an indexed schedule lookup.
+    context["schedule_id"] = id
     await client._dbos_client.create_schedule_async(
         schedule_name=id,
         workflow_name=SCHEDULE_FIRE_WORKFLOW,
