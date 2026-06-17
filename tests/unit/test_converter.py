@@ -284,3 +284,58 @@ def test_custom_json_encoding_name() -> None:
     payload = conv.to_payload({"x": 1})
     assert payload is not None
     assert payload.metadata["encoding"] == b"json/custom"
+
+
+# --------------------------------------------------------------------------
+# Per-handle data-converter override (AsyncActivityHandle.data_converter_override)
+# --------------------------------------------------------------------------
+def test_internal_encode_honors_converter_override() -> None:
+    """conversion.encode_value / encode_values / encode_values_sync use a
+    per-call converter override instead of the process converter."""
+    from temporal_dbos._internal import conversion
+
+    override = DataConverter(payload_codec=_ReverseCodec())
+    value = {"a": 1}
+
+    # Process converter (default, no codec) stores inline JSON.
+    default_dict = asyncio.run(conversion.encode_value(value))
+    assert "json" in default_dict and "b64" not in default_dict
+
+    # The override's codec transforms the bytes → base64, not inline JSON.
+    override_dict = asyncio.run(conversion.encode_value(value, override))
+    assert "b64" in override_dict and "json" not in override_dict
+    # encode_values (heartbeat path) honors it identically.
+    assert asyncio.run(conversion.encode_values([value], override)) == [override_dict]
+
+
+def test_async_activity_handle_threads_converter_override() -> None:
+    """AsyncActivityHandle stores its override and threads it onto every
+    outbound *Input, so the chain-root rebuild (which carries only id_or_token)
+    still encodes complete/heartbeat/fail with it."""
+    from temporal_dbos.client import AsyncActivityHandle
+
+    captured: Dict[str, Any] = {}
+
+    class _StubImpl:
+        async def complete_async_activity(self, input: Any) -> None:
+            captured["complete"] = input
+
+        async def heartbeat_async_activity(self, input: Any) -> None:
+            captured["heartbeat"] = input
+
+        async def fail_async_activity(self, input: Any) -> None:
+            captured["fail"] = input
+
+    class _StubClient:
+        _impl = _StubImpl()
+
+    override = DataConverter(payload_codec=_ReverseCodec())
+    handle = AsyncActivityHandle(_StubClient(), ("wf", None, "act"), override)  # type: ignore[arg-type]
+    assert handle._converter is override
+
+    asyncio.run(handle.complete("x"))
+    asyncio.run(handle.heartbeat("h"))
+    asyncio.run(handle.fail(ValueError("boom")))
+    assert captured["complete"].data_converter_override is override
+    assert captured["heartbeat"].data_converter_override is override
+    assert captured["fail"].data_converter_override is override

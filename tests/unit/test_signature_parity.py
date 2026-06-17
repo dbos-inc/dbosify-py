@@ -158,9 +158,9 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "stack_level",
         "versioning_override",
     },
-    # Custom data converters arrive with the Phase 3 conversion pipeline.
-    "client.AsyncActivityHandle.__init__": {"data_converter_override"},
-    # Activity cancellation details: Phase 3.
+    # ActivityCancellationDetails (the cancel reason: not-found / timed-out /
+    # paused / worker-shutdown) is not implemented — the type and
+    # ``activity.cancellation_details()`` are absent
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
     # We have no protobuf Failure to mutate in place, so the failure converter
     # *returns* the failure envelope instead of filling a passed-in `failure`.

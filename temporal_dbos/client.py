@@ -345,11 +345,20 @@ class AsyncActivityHandle:
     checkpointed inbox envelopes to the activity's run.
     """
 
-    def __init__(self, client: "Client", id_or_token: Any) -> None:
+    def __init__(
+        self,
+        client: "Client",
+        id_or_token: Any,
+        data_converter_override: Optional[DataConverter] = None,
+    ) -> None:
         self._client = client
         # The original addressing argument, re-used to rebuild this handle at
         # the root of the outbound chain (DESIGN §6.8).
         self._id_or_token = id_or_token
+        # Per-handle converter override for complete/fail/heartbeat encoding. It
+        # rides on each *Input so it survives the chain-root handle rebuild
+        # (which only carries id_or_token).
+        self._converter = data_converter_override
         self._workflow_id: Optional[str] = None
         self._run_id: Optional[str] = None
         # On the queued path (§6.1.2) the completion goes to the activity
@@ -418,13 +427,17 @@ class AsyncActivityHandle:
                 result=None if result is _arg_unset else result,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                data_converter_override=self._converter,
             )
         )
 
     async def _complete_impl(self, input: CompleteAsyncActivityInput) -> None:
         await self._send(
             inbox.activity_result_envelope(
-                self._activity_id, result=await conversion.encode_value(input.result)
+                self._activity_id,
+                result=await conversion.encode_value(
+                    input.result, input.data_converter_override
+                ),
             )
         )
 
@@ -447,13 +460,15 @@ class AsyncActivityHandle:
                 last_heartbeat_details=last_heartbeat_details,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                data_converter_override=self._converter,
             )
         )
 
     async def _fail_impl(self, input: FailAsyncActivityInput) -> None:
         await self._send(
             inbox.activity_result_envelope(
-                self._activity_id, failure=serialize_failure(input.error)
+                self._activity_id,
+                failure=serialize_failure(input.error, input.data_converter_override),
             )
         )
 
@@ -471,6 +486,7 @@ class AsyncActivityHandle:
                 details=details,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                data_converter_override=self._converter,
             )
         )
 
@@ -478,7 +494,9 @@ class AsyncActivityHandle:
         await self._send(
             inbox.activity_heartbeat_envelope(
                 self._activity_id,
-                await conversion.encode_values(list(input.details)),
+                await conversion.encode_values(
+                    list(input.details), input.data_converter_override
+                ),
             )
         )
 
