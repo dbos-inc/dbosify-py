@@ -73,6 +73,14 @@ def test_worker_lifecycle_helpers_without_worker() -> None:
     assert env.run(worker_lifecycle_activity) == "shutdown=False"
 
 
+def test_environment_worker_shutdown_trips_flag() -> None:
+    # ActivityEnvironment.worker_shutdown() trips the env's event, so
+    # is_worker_shutdown() reads True and wait_for_worker_shutdown_sync returns.
+    env = ActivityEnvironment()
+    env.worker_shutdown()
+    assert env.run(worker_lifecycle_activity) == "shutdown=True"
+
+
 def test_client_helper_returns_environment_client() -> None:
     sentinel = object()
     env = ActivityEnvironment(client=sentinel)

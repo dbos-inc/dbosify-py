@@ -659,11 +659,15 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   checkpoint); settable on the deterministic loop (run/handlers), rejected in read-only
   contexts, not surfaced to `describe()` in v1. See DEVIATIONS D30.
 - **Activity context helpers (done).** `activity.is_worker_shutdown()` /
-  `wait_for_worker_shutdown()` / `wait_for_worker_shutdown_sync()` read a process-global
-  shutdown event the Worker trips on `shutdown()`; `activity.shield_thread_cancel_exception()`
-  is a no-op (cancellation is cooperative — DEVIATIONS D26); `activity.client()` returns a
-  Temporal client lazily built from the Worker's `DBOSConfig` (or one passed to
-  `ActivityEnvironment(client=)`).
+  `wait_for_worker_shutdown()` / `wait_for_worker_shutdown_sync()` read a *per-Worker* shutdown
+  event (fresh per Worker, latched once the Worker trips it on `shutdown()`, so a straggler
+  activity never observes a later Worker's flag); `ActivityEnvironment.worker_shutdown()` trips
+  the env's own event for tests. `activity.shield_thread_cancel_exception()` is a no-op
+  (cancellation is cooperative — DEVIATIONS D26); `activity.client()` returns a Temporal client
+  lazily built from the Worker's `DBOSConfig` (or one passed to `ActivityEnvironment(client=)`).
+  The per-Worker shutdown event + lazy client live on one `_ActivityWorkerState` object whose
+  lifecycle is bound to the Worker run (built at construction, disposed off-loop after the
+  graceful drain).
 - `workflow.patched(id)` / `deprecate_patch(id)`: **done.** Checkpoint-marker
   implementation. The decision (`not is_replaying() or id in recorded-markers`) is computed
   synchronously at the call site, memoized per id, and — crucially — claims **no**

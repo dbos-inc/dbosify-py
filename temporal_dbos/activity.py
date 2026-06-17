@@ -312,6 +312,13 @@ def _on_worker_start(config: Any) -> "_ActivityWorkerState":
     """Called by the Worker at construction: install a fresh per-worker activity
     state (new shutdown event, no client yet) and return it."""
     global _active
+    # Defensive: a leftover state should already be torn down (one Worker per
+    # process), but if a prior Worker was constructed and never fully run, close
+    # and dispose it so its client (if any) can't leak.
+    if _active is not None:
+        stale = _active.close()
+        if stale is not None:
+            stale._dbos_client.destroy()
     _active = _ActivityWorkerState(config)
     return _active
 

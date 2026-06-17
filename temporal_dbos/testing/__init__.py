@@ -63,6 +63,14 @@ class ActivityEnvironment:
         """
         self._context.cancelled.set()
 
+    def worker_shutdown(self) -> None:
+        """Mark the environment's worker as shut down, mirroring
+        ``temporalio.testing.ActivityEnvironment.worker_shutdown``:
+        ``is_worker_shutdown()`` becomes true and ``wait_for_worker_shutdown*``
+        unblocks.
+        """
+        self._context.worker_shutdown_event.set()
+
     @overload
     def run(
         self,
