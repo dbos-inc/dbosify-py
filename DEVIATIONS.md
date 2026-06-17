@@ -837,3 +837,29 @@ delivers activity cancellation cooperatively (D26) — observed via
 `activity.is_cancelled()` / `wait_for_cancelled()` / `heartbeat()` — and does not
 record *why* an activity was cancelled (not-found / paused / reset / timed-out /
 worker-shutdown), so the structured reason temporalio surfaces is unavailable.
+
+
+### D33. Metrics and the telemetry `runtime` module are not provided in v1
+
+Temporal's metrics surface is **not implemented** in this first version:
+`workflow.metric_meter()` / `activity.metric_meter()`, the
+`common.MetricMeter` / `MetricCounter` / `MetricHistogram[Float|Timedelta]` /
+`MetricGauge[Float]` recording tree, and the **entire `temporalio.runtime`
+module** (`Runtime`, `TelemetryConfig`, `PrometheusConfig`,
+`OpenTelemetryConfig`, `LoggingConfig`, `MetricBuffer`, …) have no
+`temporal_dbos` equivalent. Code that calls `metric_meter()` raises
+`AttributeError`, and `import temporal_dbos.runtime` fails — the one place this
+package does **not** mirror `temporalio`'s module layout (DESIGN §2).
+
+Why it's deferred rather than stubbed: in Temporal the metric *recording* API
+(`MetricMeter`) and the *export* configuration (the `runtime` module) are two
+halves of one feature, and the export half exists to configure Temporal's Rust
+`sdk-core` telemetry pipeline (Prometheus endpoint, OTLP push, Core log
+forwarding) — there is no Core here, so half the module has no analog at all.
+A faithful version is real work: our own meter wired to a real exporter
+(`prometheus_client` / `opentelemetry-sdk`), not a Rust passthrough. Rather than
+ship an inert no-op meter that silently drops business metrics (a worse failure
+mode than a clear `AttributeError`), v1 omits the surface entirely. Mitigation:
+instrument with `prometheus_client` / OpenTelemetry directly from workflow and
+activity code for now; a `temporal_dbos.runtime` + non-`noop` meter is a
+candidate for a later version.
