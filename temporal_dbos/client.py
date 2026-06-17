@@ -1287,20 +1287,32 @@ class Client:
             options["delay_seconds"] = start_delay.total_seconds()
         if meta.attributes is not None:
             options["attributes"] = meta.attributes
-        await self._dbos_client.enqueue_async(
-            options, wrap_input(await conversion.encode_values(workflow_args), meta)
-        )
-
-        if start_signal is not None:
-            await self._dbos_client.send_async(
-                dbos_id,
-                inbox.signal_envelope(
-                    start_signal,
-                    await conversion.encode_values(start_signal_args),
-                    headers=await conversion.encode_headers(input.headers),
-                ),
-                inbox.INBOX_TOPIC,
+        payload = wrap_input(await conversion.encode_values(workflow_args), meta)
+        if start_signal is None:
+            await self._dbos_client.enqueue_async(options, payload)
+        else:
+            # signal-with-start: enqueue the run and deliver the start signal in
+            # a single system-database transaction, so a crash between the two
+            # can't leave the workflow started but un-signaled — matching
+            # Temporal's atomic signal-with-start (DEVIATIONS D7). The encoded
+            # signal envelope is built here (async) and the commit runs in a
+            # thread, mirroring how enqueue_async/send_async bridge to the sync
+            # DBOS client.
+            signal_env = inbox.signal_envelope(
+                start_signal,
+                await conversion.encode_values(start_signal_args),
+                headers=await conversion.encode_headers(input.headers),
             )
+            dbos_client = self._dbos_client
+
+            def _enqueue_with_signal() -> None:
+                with dbos_client._sys_db.engine.begin() as conn:
+                    dbos_client.enqueue_in_transaction(conn, options, payload)
+                    dbos_client.send_in_transaction(
+                        conn, dbos_id, signal_env, inbox.INBOX_TOPIC
+                    )
+
+            await asyncio.to_thread(_enqueue_with_signal)
         # Like temporalio, the returned handle is NOT run-bound: signals,
         # queries, and updates resolve the chain's *current* run at call
         # time, so they keep routing correctly across continue-as-new (a

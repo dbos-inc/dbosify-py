@@ -153,10 +153,14 @@ check) are check-then-start from the client or parent worker, leaving small
 race windows under concurrent starts (DESIGN §6.4; narrowable with claim
 rows, not eliminable without a central arbiter). The terminate-vs-child-start
 window is closed by claim-then-start ordering; the others remain. Compound
-starts are likewise non-atomic: signal-with-start and update-with-start
-commit the start, then send the message — a client crash between the two
-leaves the workflow started without its signal/update, where Temporal's are
-a single atomic request. (Upstreamable: DBOS atomic enqueue-with-message.)
+signal-with-start *is* atomic: the start enqueue and the start signal commit
+in one system-database transaction (DBOS `enqueue_in_transaction` +
+`send_in_transaction`), so a client crash never leaves the workflow started
+without its signal. Update-with-start remains non-atomic — the start commits,
+then the update is sent and awaited (the workflow must be running to process
+it, so it can't ride the start's transaction); a crash between the two leaves
+the workflow started without its update, where Temporal's is a single atomic
+request.
 
 ### D8. Blocking workflow code stalls the whole worker
 
