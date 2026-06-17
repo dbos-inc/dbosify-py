@@ -14,7 +14,9 @@ to advance the workflow's virtual clock deterministically.
 """
 
 import asyncio
+import contextvars
 import time as time_mod
+from contextlib import nullcontext
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from dbos import DBOS
@@ -136,9 +138,23 @@ class _RootActivityInbound(activity_interceptor.ActivityInboundInterceptor):
     async def execute_activity(
         self, input: activity_interceptor.ExecuteActivityInput
     ) -> Any:
-        if self._is_async:
-            return await input.fn(*input.args)
-        return await asyncio.to_thread(input.fn, *input.args)
+        state = self._ctx.worker_state
+        # Cap concurrent activity execution to Worker(max_concurrent_activities=)
+        # (a no-op when unset); the slot is held for the activity's whole run.
+        slot = state.activity_slot() if state is not None else nullcontext()
+        async with slot:
+            if self._is_async:
+                return await input.fn(*input.args)
+            # Run the sync activity on the Worker's activity_executor if it set
+            # one, else the loop default. run_in_executor does not copy
+            # contextvars (unlike asyncio.to_thread), so copy the current context
+            # explicitly — the activity context (info/heartbeat) rides one.
+            executor = state.activity_executor if state is not None else None
+            ctx = contextvars.copy_context()
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                executor, lambda: ctx.run(input.fn, *input.args)
+            )
 
 
 class _RootActivityOutbound(activity_interceptor.ActivityOutboundInterceptor):

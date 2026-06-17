@@ -863,3 +863,42 @@ mode than a clear `AttributeError`), v1 omits the surface entirely. Mitigation:
 instrument with `prometheus_client` / OpenTelemetry directly from workflow and
 activity code for now; a `temporal_dbos.runtime` + non-`noop` meter is a
 candidate for a later version.
+
+
+### D34. Worker tuning options map onto DBOS queues, with model differences
+
+Temporal's worker tuning knobs are honored by mapping onto DBOS primitives
+rather than ignored, but our queue model differs from Temporal's separate slot
+pools, so a few have caveats:
+
+- **`max_concurrent_activities` / `max_concurrent_local_activities`** cap concurrent
+  activity execution via a single per-process semaphore around the activity step.
+  Temporal keeps *separate* slot pools for regular vs. local activities; here both
+  run as DBOS steps and share one cap (we use `max_concurrent_activities`, falling
+  back to the local cap if only that is set). An activities-only worker also gets
+  the cap as its task queue's `worker_concurrency` (its queue items *are*
+  activities).
+- **`max_task_queue_activities_per_second` / `max_activities_per_second`** become the
+  activity queue's rate `limiter`. DBOS's limiter is **queue-wide** (across all
+  workers), so the task-queue-wide knob maps exactly; the per-worker knob, when it
+  is the only one set, is applied as a queue-wide approximation. Fractional rates
+  ≥1 round to an integer per-second limit; sub-1 rates map to one start per
+  `1/rate` seconds (exact).
+- **`identity`** sets the DBOS `executor_id` (so it shows in DBOS views / list
+  filters). Unlike Temporal — where identity is purely informational and any
+  poller can pick up a task — `executor_id` also *scopes recovery* (D6): a custom
+  identity should be **stable per fleet**, not unique per process, or a crashed
+  worker's workflows won't be recovered until a worker with the same identity
+  returns.
+- **`activity_executor`** is honored: sync activities run on the provided executor
+  (with the activity context copied in), instead of the event loop's default pool.
+
+The remaining Worker options have no DBOS analog and stay accepted-and-ignored:
+`tuner` and the slot-supplier classes, all poller-behavior / poll-count knobs,
+sticky-cache options (`max_cached_workflows`, eviction, sticky timeouts), the
+sandbox runners, `shared_state_manager` (multiprocess activities, D9), the
+heartbeat-throttle intervals (our heartbeat model is in-memory, D6), Nexus
+options, and server-side optimization flags (`disable_eager_activity_execution`,
+`debug_mode`, payload-limit/external-storage knobs). `Client.connect`'s gRPC
+connection/auth options are likewise N/A — the `Client` wraps an already-built
+`DBOSClient` (D2).

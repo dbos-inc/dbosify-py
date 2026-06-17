@@ -12,12 +12,14 @@ durably (DEVIATIONS D6). ``raise_complete_async`` parks the activity for
 external completion via ``client.get_async_activity_handle``.
 """
 
+import asyncio
+import contextvars
 import inspect
 import json
 import logging
 import threading
 import time as time_mod
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -270,12 +272,34 @@ class _ActivityWorkerState:
     keep using their own worker's state even if a new worker starts.
     """
 
-    def __init__(self, config: Any) -> None:
+    def __init__(
+        self,
+        config: Any,
+        *,
+        activity_concurrency: Optional[int] = None,
+        activity_executor: Optional[Any] = None,
+    ) -> None:
         self._config = config
         self.shutdown_event = threading.Event()
         self._client: Optional["Client"] = None
         self._lock = threading.Lock()
         self._closed = False
+        # Worker(max_concurrent_activities=...): caps concurrent activity-step
+        # execution in this process. The semaphore is created lazily on the
+        # worker's running loop (first activity), so all attempts share one.
+        self._activity_concurrency = activity_concurrency
+        self._activity_semaphore: Optional[asyncio.Semaphore] = None
+        # Worker(activity_executor=...): the executor sync activities run on.
+        self.activity_executor = activity_executor
+
+    def activity_slot(self) -> Any:
+        """An ``async with`` context bounding concurrent activity execution to
+        ``max_concurrent_activities`` (a no-op when unset)."""
+        if self._activity_concurrency is None:
+            return nullcontext()
+        if self._activity_semaphore is None:
+            self._activity_semaphore = asyncio.Semaphore(self._activity_concurrency)
+        return self._activity_semaphore
 
     def client(self) -> Optional["Client"]:
         """The worker's Temporal client, built once on first use; None after
@@ -326,7 +350,12 @@ class _ActivityWorkerState:
 _active: Optional[_ActivityWorkerState] = None
 
 
-def _on_worker_start(config: Any) -> "_ActivityWorkerState":
+def _on_worker_start(
+    config: Any,
+    *,
+    activity_concurrency: Optional[int] = None,
+    activity_executor: Optional[Any] = None,
+) -> "_ActivityWorkerState":
     """Called by the Worker at construction: install a fresh per-worker activity
     state (new shutdown event, no client yet) and return it."""
     global _active
@@ -337,7 +366,11 @@ def _on_worker_start(config: Any) -> "_ActivityWorkerState":
         stale = _active.close()
         if stale is not None:
             stale._dbos_client.destroy()
-    _active = _ActivityWorkerState(config)
+    _active = _ActivityWorkerState(
+        config,
+        activity_concurrency=activity_concurrency,
+        activity_executor=activity_executor,
+    )
     return _active
 
 

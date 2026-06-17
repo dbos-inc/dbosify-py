@@ -13,10 +13,16 @@ deviations). One worker per process is also the dominant production layout.
 workflows, mirroring Temporal worker restart semantics — and blocks until
 ``shutdown()``. ``async with`` is supported and is what tests use constantly.
 
-Parameter mapping: ``max_concurrent_workflow_tasks`` -> task queue
-``worker_concurrency``; ``graceful_shutdown_timeout`` ->
-``DBOS.destroy(workflow_completion_timeout_sec)``. Tuner/poller/sandbox
-arguments are accepted and ignored with a debug log.
+Parameter mapping onto DBOS (DEVIATIONS D34): ``max_concurrent_workflow_tasks``
+-> the workflow task queue's ``worker_concurrency``; ``max_concurrent_activities``
+/ ``max_concurrent_local_activities`` -> a per-process semaphore around activity
+execution (and the activity queue's ``worker_concurrency`` for an activities-only
+worker); ``max_activities_per_second`` / ``max_task_queue_activities_per_second``
+-> the activity queue's rate ``limiter``; ``activity_executor`` -> the executor
+sync activities run on; ``identity`` -> the DBOS ``executor_id``;
+``graceful_shutdown_timeout`` -> ``DBOS.destroy(workflow_completion_timeout_sec)``.
+Tuner/poller/sandbox/sticky-cache arguments have no DBOS analog and are accepted
+and ignored with a debug log.
 """
 
 import asyncio
@@ -27,6 +33,7 @@ from datetime import timedelta
 from typing import Any, Callable, Optional, Sequence, Type
 
 from dbos import DBOS, DBOSConfig
+from dbos._queue import QueueRateLimit
 
 from . import activity as _activity
 from ._internal import conversion
@@ -109,6 +116,20 @@ DEFAULT_APP_VERSION = "0.1"
 _live_worker: Optional["Worker"] = None
 
 
+def _rate_limiter(rate_per_second: Optional[float]) -> Optional[QueueRateLimit]:
+    """Map an activities-per-second rate to a DBOS queue ``limiter`` (no more
+    than ``limit`` starts per ``period`` seconds). None when unset."""
+    if rate_per_second is None:
+        return None
+    if rate_per_second <= 0:
+        raise ValueError("activities-per-second must be positive")
+    if rate_per_second >= 1:
+        # Whole starts per 1s window (an integer limit; fractional rates ≥1 round).
+        return {"limit": round(rate_per_second), "period": 1.0}
+    # Sub-1 rate: one start per 1/rate seconds (exact).
+    return {"limit": 1, "period": 1.0 / rate_per_second}
+
+
 def _with_default_app_version(config: DBOSConfig) -> DBOSConfig:
     """Pin :data:`DEFAULT_APP_VERSION` unless the caller set
     ``application_version`` in the ``DBOSConfig``. Pass it as ``None`` to opt
@@ -164,6 +185,10 @@ class Worker:
         workflow_task_executor: Optional[Any] = None,
         max_concurrent_workflow_tasks: Optional[int] = None,
         max_concurrent_activities: Optional[int] = None,
+        max_concurrent_local_activities: Optional[int] = None,
+        max_activities_per_second: Optional[float] = None,
+        max_task_queue_activities_per_second: Optional[float] = None,
+        identity: Optional[str] = None,
         graceful_shutdown_timeout: timedelta = timedelta(),
         workflow_failure_exception_types: Sequence[Type[BaseException]] = [],
         data_converter: DataConverter = DataConverter.default,
@@ -214,9 +239,7 @@ class Worker:
                 "build_id must be specified when use_worker_versioning is True"
             )
         for key, value in {
-            "activity_executor": activity_executor,
             "workflow_task_executor": workflow_task_executor,
-            "max_concurrent_activities": max_concurrent_activities,
             **unsupported,
         }.items():
             if value is not None:
@@ -225,12 +248,38 @@ class Worker:
         self._task_queue = task_queue
         self._max_concurrent_workflow_tasks = max_concurrent_workflow_tasks
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
+        # Activity concurrency cap: max_concurrent_activities, else (an
+        # activities-only worker that set only) max_concurrent_local_activities.
+        # In our model regular and local activities both run as steps, sharing
+        # one cap (DEVIATIONS D34).
+        self._activity_concurrency = (
+            max_concurrent_activities
+            if max_concurrent_activities is not None
+            else max_concurrent_local_activities
+        )
+        # Whether the worker dequeues activities (vs. only workflows) — its task
+        # queue carries __temporal_activity items, so its worker_concurrency is
+        # the activity cap rather than the workflow-task cap.
+        self._activities_only = bool(activities) and not workflows
+        # Activity rate limit → DBOS queue limiter. DBOS's limiter is queue-wide,
+        # so the task-queue-wide knob maps exactly; the per-worker knob is applied
+        # as a queue-wide approximation when it's the only one set (D34).
+        self._activity_rate_per_second = (
+            max_task_queue_activities_per_second
+            if max_task_queue_activities_per_second is not None
+            else max_activities_per_second
+        )
         # The interpreter (in this process) decodes run args / encodes results
         # with this converter; configure the Client the same.
         conversion.set_converter(data_converter)
         # JSON transport (replaces DBOS's default pickle). All processes on the
         # database must share this serializer's name (see serializer.py).
         config = {**config, "serializer": TEMPORAL_SERIALIZER}
+        # Worker identity → DBOS executor_id (surfaced in DBOS views / list
+        # filters). Note: executor_id also *scopes recovery* in DBOS (D6), so a
+        # custom identity should be stable per fleet, not unique per process.
+        if identity is not None:
+            config = {**config, "executor_id": identity}
         # An explicit build_id / deployment_config IS the DBOS application_version
         # (build IDs map to DBOS versions, DEVIATIONS D29): DBOS scopes both
         # workflow recovery and queue dequeue to application_version, so setting
@@ -274,8 +323,13 @@ class Worker:
             else config.get("name", "")
         )
         # Arm activity worker-lifecycle state (activity.is_worker_shutdown(),
-        # activity.client()) for this run.
-        _activity._on_worker_start(config)
+        # activity.client()) for this run, with the activity concurrency cap and
+        # sync-activity executor.
+        _activity._on_worker_start(
+            config,
+            activity_concurrency=self._activity_concurrency,
+            activity_executor=activity_executor,
+        )
         _dispatcher.register_worker(
             workflows=workflows,
             activities=activities,
@@ -325,9 +379,18 @@ class Worker:
             # Persist this worker's queue configuration. The default
             # conflict policy (update_if_latest_version) keeps an older
             # worker in a rolling deploy from clobbering newer queue config.
+            # An activities-only worker dequeues __temporal_activity items, so
+            # its per-worker concurrency is the activity cap; a workflow worker's
+            # is the workflow-task cap.
+            worker_concurrency = (
+                self._activity_concurrency
+                if self._activities_only
+                else self._max_concurrent_workflow_tasks
+            )
             await DBOS.register_queue_async(
                 self._task_queue,
-                worker_concurrency=self._max_concurrent_workflow_tasks,
+                worker_concurrency=worker_concurrency,
+                limiter=_rate_limiter(self._activity_rate_per_second),
             )
             await self._shutdown_event.wait()
         finally:
