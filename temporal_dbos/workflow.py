@@ -44,6 +44,7 @@ from typing import (
 
 from . import exceptions
 from ._internal import registry as _registry
+from ._internal.namespaces import DEFAULT_NAMESPACE
 
 if TYPE_CHECKING:
     from ._internal.workflow_interceptor import WorkflowOutboundInterceptor
@@ -426,7 +427,9 @@ class ExternalWorkflowHandle:
         input = SignalExternalWorkflowInput(
             signal=str(name),
             args=_resolve_args(arg, args),
-            namespace="default",
+            # Single namespace per process: the external workflow is in this
+            # process's namespace (cross-namespace signaling isn't supported).
+            namespace=_registry.worker_namespace or DEFAULT_NAMESPACE,
             workflow_id=self._id,
             workflow_run_id=self._run_id,
             headers={},

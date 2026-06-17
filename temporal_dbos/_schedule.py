@@ -1002,12 +1002,13 @@ async def create_schedule_row(
     action_attributes = await encode_action_attributes(schedule.action)
     if action_attributes is not None:
         context["action"]["attributes"] = action_attributes
-    # The fire dispatcher needs the compiled cron + timezone to walk prior
-    # occurrences for overlap handling, and created_at to bound that walk
-    # (and to back describe()'s ScheduleInfo.created_at).
+    # Carried in the schedule's DBOS context: cron gates overlap handling
+    # (recurring schedules only); created_at backs describe()'s
+    # ScheduleInfo.created_at; schedule_id is what DBOS tags each fire's status
+    # with, so the dispatcher finds prior occurrences by an indexed lookup.
     context["cron"] = cron
-    context["timezone"] = tz_name
     context["created_at"] = datetime.now(timezone.utc).isoformat()
+    context["schedule_id"] = id
     await client._dbos_client.create_schedule_async(
         schedule_name=id,
         workflow_name=SCHEDULE_FIRE_WORKFLOW,

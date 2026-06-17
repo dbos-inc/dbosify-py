@@ -273,6 +273,36 @@ async def test_signal_with_start() -> None:
         assert await handle.result() == ["first", "second"]
 
 
+async def test_signal_with_start_attaches_to_running() -> None:
+    # USE_EXISTING signal-with-start against an already-running run must deliver
+    # the signal to it, not silently drop it (the early-return-before-send gap).
+    # The first call starts the run (atomically delivering "first"); the run
+    # blocks waiting for a second greeting, so it's still open when the second
+    # call attaches and must deliver "second" to that same run.
+    async with _env() as client:
+        first = await client.start_workflow(
+            SignalStartWorkflow.run,
+            id="sws-attach-wf",
+            task_queue=TASK_QUEUE,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+            start_signal="greet",
+            start_signal_args=["first"],
+        )
+        second = await client.start_workflow(
+            SignalStartWorkflow.run,
+            id="sws-attach-wf",
+            task_queue=TASK_QUEUE,
+            id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
+            start_signal="greet",
+            start_signal_args=["second"],
+        )
+        # The second call attached to the running run rather than starting a new
+        # one, and its start signal reached that run (else run() hangs at one
+        # greeting): both handles resolve the same result.
+        assert await first.result() == ["first", "second"]
+        assert await second.result() == ["first", "second"]
+
+
 async def test_one_worker_per_process() -> None:
     async with _env():
         with pytest.raises(RuntimeError, match="one Worker per process"):

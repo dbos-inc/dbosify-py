@@ -19,8 +19,9 @@ roadmap.
   for Python-only applications.
 - **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's
   workflow-management APIs and DBOS Conductor instead.
-- **Partial support only** for Nexus, multi-namespace isolation, and advanced visibility
-  (full query language, custom indexed search attributes).
+- **Partial support only** for Nexus and advanced visibility (full query language, custom
+  indexed search attributes). Namespaces are supported as per-namespace Postgres schemas,
+  one namespace per process (see `DEVIATIONS.md` D1).
 
 ## Conformance
 

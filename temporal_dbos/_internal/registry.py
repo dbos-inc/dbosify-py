@@ -198,6 +198,17 @@ def set_worker_task_queue(task_queue: Optional[str]) -> None:
     worker_task_queue = task_queue
 
 
+# The Temporal namespace this process serves (one per process — it maps to the
+# DBOS system schema, which is process-global). Surfaced as
+# workflow.info()/activity.info().namespace. None when no Worker is registered.
+worker_namespace: Optional[str] = None
+
+
+def set_worker_namespace(namespace: Optional[str]) -> None:
+    global worker_namespace
+    worker_namespace = namespace
+
+
 def workflow_definition_of(cls: Type[Any]) -> WorkflowDefinition:
     defn = cls.__dict__.get(WORKFLOW_DEFN_ATTR)
     if defn is None:

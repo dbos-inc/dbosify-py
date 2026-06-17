@@ -44,8 +44,9 @@ guarantees (a workflow survives process crashes and resumes correctly).
   Temporal *server* replacement; it is a replacement for server + Python SDK together.
 - Temporal Web UI, `temporal` CLI, tctl. Users get DBOS's workflow-management APIs and
   Conductor instead.
-- Nexus, multi-namespace isolation, advanced visibility (full query language, custom
-  indexed search attributes) — partial support only, see §8.
+- Nexus and advanced visibility (full query language, custom indexed search attributes)
+  — partial support only, see §8. Namespaces are supported as per-namespace DBOS system
+  schemas, but one namespace per process (the runtime is process-global) — DEVIATIONS D1.
 
 **Why this is feasible.** Both systems use deterministic re-execution with checkpointed
 effects. Temporal replays workflow code against an event history held by the server; DBOS
@@ -62,17 +63,17 @@ that is the core engineering work: the deterministic interpreter of §4.
 
 ## 2. Packaging
 
-Two levels of drop-in:
+Two levels of drop-in were planned; only the first ships:
 
 1. **`temporal_dbos` package** mirroring `temporalio`'s module layout exactly:
    `temporal_dbos.workflow`, `.activity`, `.client`, `.worker`, `.common`, `.exceptions`,
-   `.converter`, `.testing`. Migration = change the import root. This is the primary,
-   supported mode. (`temporalio.contrib.pydantic` is **not** mirrored — see §6.9; configure
-   a custom `DataConverter` for pydantic support.)
-2. **Alias shim** for zero-change runs: `temporal_dbos.install()` (and a
-   `python -m temporal_dbos run app.py` runner) registers a meta-path finder that serves
-   `temporalio.*` imports from `temporal_dbos.*`. It must refuse to install if the real
-   `temporalio` is importable, to avoid silent ambiguity. Phase 4.
+   `.converter`, `.testing`. Migration = change the import root. This is the primary —
+   and only — supported migration path. (`temporalio.contrib.pydantic` is **not** mirrored
+   — see §6.9; configure a custom `DataConverter` for pydantic support.)
+2. **Alias shim** for zero-change runs (`temporal_dbos.install()` + a
+   `python -m temporal_dbos run app.py` runner serving `temporalio.*` imports from
+   `temporal_dbos.*`): **out of scope** (cut from Phase 4 — see §9). The import-root swap
+   in (1) is the only supported migration path.
 
 PyPI name `temporal-dbos`; import name `temporal_dbos`. Depends on `dbos` (PyPI pin;
 `/home/peter/dbos-transact-py` stays a read-only reference tree). Do **not** depend on
@@ -94,8 +95,8 @@ temporal_dbos/
     types.py               # mirrored from temporalio.types as needed
     testing/
         __init__.py        # WorkflowEnvironment, ActivityEnvironment
-    runner.py              # python -m temporal_dbos run
-    _shim.py               # temporalio alias meta-path finder
+    # runner.py            # python -m temporal_dbos run — CUT (out of scope, §9)
+    # _shim.py             # temporalio alias meta-path finder — CUT (out of scope, §9)
     _internal/
         registry.py        # workflow-type/activity-type name -> definition
         dispatcher.py      # the registered DBOS workflow functions (§3)
@@ -627,8 +628,9 @@ via cancel-then-start. `ScheduleHandle.pause/unpause/trigger/backfill/delete/des
 get_schedule` (+ re-create for update). **Done** as sketched, with v1 scope cuts
 (DEVIATIONS D22): the `ScheduleSpec` compiles to one cron (intervals dividing a boundary
 are exact, others approximate; calendar `year`/interval `offset` dropped); overlap honors
-SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL (the fire dispatcher walks prior occurrences
-backward on the cron grid via exact-id status reads to find a still-running prior) but
+SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL (the fire dispatcher finds a still-running
+prior via an indexed `schedule_name` lookup over recent fires — DBOS tags every fire with
+the schedule name — then probes their per-occurrence action ids in one batch) but
 rejects BUFFER_ONE/BUFFER_ALL; `update` is delete-then-recreate; schedule history and
 `memo`/`search_attributes` aren't tracked. The action + full spec ride in the schedule's
 DBOS `context` (so describe/list/update reconstruct them); the fire dispatcher
@@ -706,11 +708,13 @@ sketch above; type hints come from signatures, codecs run at the async boundarie
   Worker's loop, the Worker restores a live default executor on exit so the app's
   `asyncio.to_thread` keeps working (regression-tested; upstream-worthy: DBOS could
   restore it in destroy).
-- `WorkflowEnvironment.start_time_skipping()`: Phase 4. Approach: a test-mode clock service —
-  when all interpreters in the env are parked on timers (no inbox/activity waiters), find
-  the earliest deadline and fast-forward by rewriting pending sleep deadlines in the system
-  DB (or by injecting a scaled clock into `next_event`). `env.sleep(n)` advances manually.
-  Honest fallback if this proves deep: scale-factor clock + documented deviation.
+- `WorkflowEnvironment.start_time_skipping()`: **out of scope** (cut from Phase 4 — see §9).
+  `start_time_skipping` raises `NotImplementedError` and `supports_time_skipping` is `False`;
+  tests use the real-time `start_local` env. (Sketch if ever revisited: a test-mode clock
+  service — when all interpreters in the env are parked on timers (no inbox/activity
+  waiters), find the earliest deadline and fast-forward by rewriting pending sleep deadlines
+  in the system DB, or inject a scaled clock into `next_event`; `env.sleep(n)` advances
+  manually.)
 
 ---
 
@@ -850,12 +854,12 @@ PayloadCodec, per-boundary conversion, and the JSON DBOS serializer that replace
 pydantic), memo/search-attribute storage. **Exit:** `samples-python` `schedules/`,
 `activity_worker/`, expanded conformance matrix published in README.
 
-**Phase 4 — Ecosystem & polish.** Time-skipping `WorkflowEnvironment`, `Replayer` over
+**Phase 4 — Ecosystem & polish.** `Replayer` over
 DBOS step checkpoints via `fork_workflow` (**done**: non-determinism verification +
 `WorkflowHandle.fetch_history`, plus rehydrate-by-replay answering queries on closed
 workflows — flipped `hello_query`, DEVIATIONS D27), `patched()`/versioning, workflow
 interceptors (**done**: inbound/outbound + header propagation, DEVIATIONS D24),
-the `temporalio` alias shim + `python -m temporal_dbos run`, perf work
+perf work
 (micro-checkpoint batching), signature-parity CI (introspect installed `temporalio` as a
 dev-dep and diff public signatures against ours — this test is the API-drift alarm).
 Final accepted-parameter audit: classify every accepted-and-ignored parameter as
@@ -863,6 +867,12 @@ honored / inert / pending (machine-checked like the parity ledgers); nothing may
 "pending" at release, and every "inert" classification must be defensible — silent
 ignores of behavior-changing parameters (e.g. `cron_schedule` before Phase 3) are the
 failure mode this audit exists to catch.
+
+**Cut from Phase 4 (out of scope):** the time-skipping `WorkflowEnvironment`
+(`start_time_skipping` raises `NotImplementedError`, `supports_time_skipping` is `False`;
+tests use the real-time `start_local` env) and the `temporalio` alias shim +
+`python -m temporal_dbos run` runner — the import-root swap (§2.1) is the only supported
+migration path.
 
 Conformance harness (`tests/conformance/`) runs from Phase 1: clone `samples-python`,
 rewrite imports mechanically (`temporalio` → `temporal_dbos`), run each sample's worker +

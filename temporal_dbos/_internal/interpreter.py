@@ -43,7 +43,7 @@ import time as time_mod
 import warnings
 from collections import Counter, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from random import Random
 from typing import (
     Any,
@@ -163,6 +163,7 @@ _activity_result_step: Optional[Callable[[str], Any]] = None
 _update_validate_step: Optional[Callable[[Callable[[], None]], Any]] = None
 _safe_status_step: Optional[Callable[[str], Any]] = None
 _safe_status_list_step: Optional[Callable[[List[str]], Any]] = None
+_schedule_occurrences_step: Optional[Callable[[str, int, int], Any]] = None
 _patch_step: Optional[Callable[[str], Any]] = None
 
 # The DBOS step name for a workflow.patched()/deprecate_patch() marker. The
@@ -391,6 +392,62 @@ def _safe_status_list(dbos_ids: List[str]) -> Any:
 
         _safe_status_list_step = safe_status_list_step
     return _safe_status_list_step(dbos_ids)
+
+
+def _schedule_occurrences(schedule_name: str, before_epoch: int, limit: int) -> Any:
+    """Checkpointed lookup of a DBOS schedule's prior fire times, as a
+    descending list of epoch seconds strictly before ``before_epoch``.
+
+    Each schedule occurrence is a tagged dispatcher firing (``schedule_name``
+    is set by DBOS on every regular/trigger/backfill fire); its nominal fire
+    time is the firing's first input arg. Returning the times — rather than
+    walking the cron grid backward — lets the schedule overlap check map them
+    to per-occurrence action ids and probe those in one batch, and it picks up
+    off-grid trigger/backfill fires the grid walk could never reproduce. The
+    checkpoint keeps the (otherwise time-varying) listing replay-stable.
+    """
+    global _schedule_occurrences_step
+    if _schedule_occurrences_step is None:
+
+        @DBOS.step(name="__tdb_schedule_occurrences")
+        async def schedule_occurrences_step(
+            schedule_name: str, before_epoch: int, limit: int
+        ) -> List[int]:
+            # schedule_name is set only on dispatcher firings, so this is an
+            # indexed lookup (idx_workflow_status_schedule_name), not a scan.
+            firings = await DBOS.list_workflows_async(
+                schedule_name=schedule_name,
+                sort_desc=True,
+                limit=limit,
+                load_input=True,
+                load_output=False,
+            )
+            occ: List[int] = []
+            for f in firings:
+                # Defensive: this returns every firing tagged with the schedule
+                # name, and list_workflows hands back a raw (non-dict) input for
+                # any row it can't deserialize. Skip anything that doesn't parse
+                # as our ``(fired_at, context)`` firing input rather than failing
+                # the whole fire on one bad row.
+                try:
+                    args = f.input.get("args") if isinstance(f.input, dict) else None
+                    if not args:
+                        continue
+                    fired_at = args[0]
+                    if isinstance(fired_at, str):
+                        fired_at = datetime.fromisoformat(fired_at)
+                    if fired_at.tzinfo is None:
+                        fired_at = fired_at.replace(tzinfo=timezone.utc)
+                    ts = int(fired_at.timestamp())
+                except (AttributeError, TypeError, ValueError, KeyError, IndexError):
+                    continue
+                if ts < before_epoch:
+                    occ.append(ts)
+            occ.sort(reverse=True)
+            return occ
+
+        _schedule_occurrences_step = schedule_occurrences_step
+    return _schedule_occurrences_step(schedule_name, before_epoch, limit)
 
 
 def _patch_marker(patch_id: str) -> Any:
@@ -820,8 +877,12 @@ class Interpreter(_Runtime):
         # this workflow runs on, surfaced as info().task_queue and as a local
         # activity's task_queue. "default" under the in-process Phase-0 harness.
         from . import registry
+        from .namespaces import DEFAULT_NAMESPACE
 
         self._task_queue_name = registry.worker_task_queue or "default"
+        # The namespace this process serves (its DBOS schema), surfaced as
+        # info().namespace and on parent/child references.
+        self._namespace = registry.worker_namespace or DEFAULT_NAMESPACE
         self._replay_horizon = 0
         # workflow.patched()/deprecate_patch() state (DESIGN §6.8). Patch ids
         # whose marker exists in recorded history (rebuilt from the step list at
@@ -2193,7 +2254,7 @@ class Interpreter(_Runtime):
             return
         error = exceptions.ChildWorkflowError(
             "Child workflow execution failed",
-            namespace="default",
+            namespace=self._namespace,
             workflow_id=child.child_id,
             run_id=child.child_id,
             workflow_type=child.type_name,
@@ -2786,7 +2847,7 @@ class Interpreter(_Runtime):
         base_id = ids.parse_run(self._workflow_id)[0]
         parent = (
             ParentInfo(
-                namespace="default",
+                namespace=self._namespace,
                 run_id=self._parent_run_id,
                 workflow_id=ids.parse_run(self._parent_run_id)[0],
             )
@@ -2802,7 +2863,7 @@ class Interpreter(_Runtime):
             # the run-chain base — the first execution of this chain.
             first_execution_run_id=base_id,
             headers=self._headers,
-            namespace="default",
+            namespace=self._namespace,
             parent=parent,
             retry_policy=(
                 deserialize_retry_policy(self._meta.retry_policy)

@@ -3,8 +3,8 @@
 :py:class:`ActivityEnvironment` runs activity code in memory, no database.
 :py:class:`WorkflowEnvironment.start_local` provisions an isolated,
 throwaway database on an externally provided Postgres server (there is no
-dev server to download — Postgres *is* the server). Time-skipping is Phase 4
-(see DESIGN §6.10).
+dev server to download — Postgres *is* the server). Time-skipping is out of
+scope (see DESIGN §6.10).
 """
 
 import asyncio
@@ -178,7 +178,8 @@ class WorkflowEnvironment:
     @classmethod
     async def start_time_skipping(cls) -> "WorkflowEnvironment":
         raise NotImplementedError(
-            "time-skipping test environments are not supported yet (Phase 4)"
+            "time-skipping test environments are out of scope; use start_local "
+            "(real-time) instead"
         )
 
     @property
