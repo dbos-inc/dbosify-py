@@ -59,7 +59,6 @@ from typing import (
     Set,
     Tuple,
     Union,
-    cast,
 )
 
 from dbos import DBOS

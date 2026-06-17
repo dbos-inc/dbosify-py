@@ -730,8 +730,13 @@ Edges and gaps:
 
 Temporal's worker-versioning API is mirrored and backed by DBOS's own versioning.
 A **deployment version** is `WorkerDeploymentVersion(deployment_name, build_id)`
-where `deployment_name` is the DBOS application/deployment name and `build_id` is
-the DBOS `application_version`. `Worker(build_id=...)` or
+where `build_id` is the DBOS `application_version` and `deployment_name` is the
+*configured* deployment name — `deployment_config.version.deployment_name` if
+given, else the DBOS application name. Only `build_id` is load-bearing: DBOS
+scopes recovery/dequeue purely on `application_version` and never on the
+deployment name, so a `deployment_config` whose `deployment_name` differs from
+the DBOS app name is reported back verbatim but is cosmetic (it does not
+partition fleets). `Worker(build_id=...)` or
 `Worker(deployment_config=WorkerDeploymentConfig(...))` set that build ID *as the
 DBOS `application_version`* (the two are mutually exclusive; a non-empty build id
 that conflicts with an `application_version` already in the `DBOSConfig` is
@@ -769,6 +774,24 @@ is always `False`. `versioning_intent` (compatible vs. latest for child
 workflows/activities) is accepted but not acted on. Use `patched()` (D28) for
 *in-place* branching across deploys when you need a single running workflow to
 adopt new code rather than staying pinned.
+
+**The build id is read live, not stamped per run — so it is not replay-stable
+across versions.** `get_current_deployment_version()`/`get_current_build_id()`
+return the *executing* worker's `application_version`, not a value checkpointed
+into the run's history. On the normal path this is exactly right (PINNED means
+only a same-version worker ever recovers/continues the run, so live == original).
+But two paths replay a run on a worker whose version may differ from the one that
+first executed it, and there the reported build id reflects the *replaying*
+worker, not the original run: query-on-closed **rehydrate-by-replay** (D27, which
+forks the scratch run version-free so the querying process runs it) and the
+**`Replayer`** (run against today's code). Consequently, workflow code that
+*branches* on `get_current_build_id()` is **not** replay-stable across a version
+change in v1 — unlike Temporal, which records the build id per workflow task in
+history. Treat the in-workflow build id as informational (logging, metrics), not
+as a deterministic branch key; use `patched()` (D28) for code-path branching that
+must survive replay. (Stamping the build id per run — it is `NULL` at client
+enqueue and only fixed at dequeue, so it cannot ride the client-set run
+meta-envelope — is deferred.)
 
 
 ### D30. Current details are in-memory, reconstructed on replay, not in describe()

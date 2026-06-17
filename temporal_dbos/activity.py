@@ -241,6 +241,11 @@ _worker_dbos_config: Optional[Any] = None
 _worker_client: Optional["Client"] = None
 _worker_client_lock = threading.Lock()
 
+# How often the async wait_for_worker_shutdown() re-checks the (threading) event.
+# Worker shutdown is a rare terminal signal, so a coarse poll avoids tying up a
+# shared-pool thread on a blocking wait; the latency is acceptable.
+_WORKER_SHUTDOWN_POLL_SECONDS = 0.1
+
 
 def _on_worker_start(config: Any) -> None:
     """Called by the Worker at construction: arm the worker-lifecycle state for
@@ -260,13 +265,19 @@ def _signal_worker_shutdown() -> None:
 
 def _teardown_worker_state() -> None:
     """Release worker-lifecycle resources after the worker's graceful drain (and
-    on test reset): destroy the lazily-built client and clear stored config. The
-    shutdown event is reset so the next worker starts clean."""
+    on test reset): destroy the lazily-built client and clear stored config.
+
+    The shutdown event is **not** cleared here — it stays set so a straggler
+    activity still draining past the timeout keeps observing a tripped (latched)
+    flag, matching temporalio's set-once semantics; the next worker's
+    :py:func:`_on_worker_start` clears it for its fresh run. Takes
+    ``_worker_client_lock`` so it can't race a concurrent lazy build (which
+    would otherwise leak a pool or hand back a disposed one)."""
     global _worker_client, _worker_dbos_config
-    client = _worker_client
-    _worker_client = None
-    _worker_dbos_config = None
-    _worker_shutdown_event.clear()
+    with _worker_client_lock:
+        client = _worker_client
+        _worker_client = None
+        _worker_dbos_config = None
     if client is not None:
         client._dbos_client.destroy()
 
@@ -448,7 +459,7 @@ async def wait_for_worker_shutdown() -> None:
     # the worker's lifetime, and enough of them would starve it. Shutdown is a
     # rare terminal event, so the small detection latency is acceptable.
     while not event.is_set():
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(_WORKER_SHUTDOWN_POLL_SECONDS)
 
 
 def wait_for_worker_shutdown_sync(

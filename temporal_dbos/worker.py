@@ -128,6 +128,9 @@ def _reset_for_tests() -> None:
     conversion.reset_converter()
     _registry.set_worker_deployment_name(None)
     _activity._teardown_worker_state()
+    # Production teardown leaves the shutdown flag latched (stragglers keep
+    # observing it); for tests, reset it so the next test starts clean.
+    _activity._worker_shutdown_event.clear()
 
 
 @dataclass(frozen=True)
@@ -199,12 +202,17 @@ class Worker:
             raise ValueError("At least one workflow and/or activity must be specified")
         if deployment_config is not None and build_id is not None:
             raise ValueError("Cannot set both build_id and deployment_config")
-        if use_worker_versioning and build_id is None and deployment_config is None:
+        if use_worker_versioning and deployment_config is not None:
+            # Mirror temporalio: use_worker_versioning is the deprecated knob
+            # paired with build_id; it cannot be combined with deployment_config.
+            raise ValueError(
+                "use_worker_versioning cannot be combined with deployment_config"
+            )
+        if use_worker_versioning and build_id is None:
             # Mirror temporalio: opting into versioning with no version to pin to
             # is a silent misconfiguration (the worker would run unversioned).
             raise ValueError(
-                "build_id (or deployment_config) must be specified when "
-                "use_worker_versioning is True"
+                "build_id must be specified when use_worker_versioning is True"
             )
         for key, value in {
             "activity_executor": activity_executor,
@@ -239,11 +247,18 @@ class Worker:
         if explicit_build is not None:
             if not explicit_build:
                 raise ValueError("build_id must be a non-empty string")
-            existing_version = config.get("application_version")
-            if existing_version is not None and existing_version != explicit_build:
+            # A build id IS the DBOS application_version, so a build id alongside
+            # *any* explicitly-set application_version (including ``None`` to opt
+            # into auto-versioning) is contradictory — check key presence, not
+            # just a non-None value, so the auto-versioning combo is caught too.
+            if (
+                "application_version" in config
+                and config["application_version"] != explicit_build
+            ):
                 raise ValueError(
-                    f"build_id {explicit_build!r} conflicts with the "
-                    f"application_version {existing_version!r} already set in the "
+                    f"build id {explicit_build!r} (from build_id/deployment_config) "
+                    f"conflicts with the application_version "
+                    f"{config['application_version']!r} already set in the "
                     "DBOSConfig (a build id IS the DBOS application_version); set "
                     "only one"
                 )

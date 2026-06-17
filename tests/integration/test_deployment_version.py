@@ -20,7 +20,7 @@ from temporal_dbos.common import (
     VersioningBehavior,
     WorkerDeploymentVersion,
 )
-from temporal_dbos.worker import Worker, WorkerDeploymentConfig
+from temporal_dbos.worker import DEFAULT_APP_VERSION, Worker, WorkerDeploymentConfig
 from tests.dbconfig import default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("tdb_env")
@@ -201,6 +201,9 @@ async def test_auto_versioning_reports_computed_version_not_empty() -> None:
         finally:
             dbos_client.destroy()
     assert result["build_id"], "auto-versioned build_id should be the computed hash"
+    # Must be the *computed* code-hash, not a silent fallback to the pinned
+    # default — otherwise this would pass even if auto-versioning regressed.
+    assert result["build_id"] != DEFAULT_APP_VERSION
     probe = DBOSClient(system_database_url=system_database_url())
     try:
         status = probe.retrieve_workflow("dv-autover").get_status()
@@ -237,6 +240,29 @@ def test_worker_rejects_build_id_conflicting_with_config_version() -> None:
     with pytest.raises(ValueError, match="conflicts with"):
         Worker(
             config, task_queue=TASK_QUEUE, workflows=_WORKFLOWS, build_id="bld-other"
+        )
+
+
+def test_worker_rejects_build_id_with_explicit_none_version() -> None:
+    # application_version=None (auto-versioning opt-in) + build_id is
+    # contradictory; the key-presence conflict check must catch the None case.
+    config = default_config()
+    config["application_version"] = None
+    with pytest.raises(ValueError, match="conflicts with"):
+        Worker(config, task_queue=TASK_QUEUE, workflows=_WORKFLOWS, build_id="bld")
+
+
+def test_worker_rejects_use_worker_versioning_with_deployment_config() -> None:
+    deployment_config = WorkerDeploymentConfig(
+        version=WorkerDeploymentVersion("dep", "v1"), use_worker_versioning=True
+    )
+    with pytest.raises(ValueError, match="cannot be combined with deployment_config"):
+        Worker(
+            default_config(),
+            task_queue=TASK_QUEUE,
+            workflows=_WORKFLOWS,
+            deployment_config=deployment_config,
+            use_worker_versioning=True,
         )
 
 
