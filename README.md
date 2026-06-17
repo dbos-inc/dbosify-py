@@ -32,7 +32,7 @@ rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
 `dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
 `message_passing/` corpus passes 5/5.
 
-Current pass rate: **17 of 19 runnable samples** (the rest are blocked on
+Current pass rate: **18 of 19 runnable samples** (the rest are blocked on
 roadmap phases, noted below; 3 samples aren't runnable in any automated
 harness).
 
@@ -55,7 +55,7 @@ harness).
 | hello_continue_as_new | ✅ (10 chained runs) |
 | hello_cron | ✅ (cron chain fires and hops; the sample never exits, so the harness verifies through the database) |
 | hello_search_attributes | ✅ (memo + search attributes on DBOS workflow attributes; set at start, `upsert_*` from inside, read via `describe()`). The sample upserts 2s in and describes 3s later, so its worker opts into near-immediate queue dispatch in the harness — scoped to this one sample (see `tests/conformance/runner.py`). |
-| hello_query | ⬜ Phase 4 (queries on closed workflows — deviation #2) |
+| hello_query | ✅ (queries a completed workflow; answered by rehydrate-by-replay — `Replayer` machinery, deviation #2) |
 | hello_activity_multiprocess | ⬜ multiprocess activity executors unsupported |
 | hello_change_log_level | — never exits by design (also true on Temporal) |
 | hello_mtls | — needs mTLS infrastructure |
@@ -101,7 +101,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | # | Deviation |
 |---|---|
 | 1 | No Temporal server/UI/CLI; no non-Python clients. Operate via DBOS tooling. |
-| 2 | Queries hit Postgres and (v1) require a RUNNING workflow. |
+| 2 | Queries hit Postgres. A RUNNING workflow is queried directly; a *closed* workflow is queried by rehydrate-by-replay (the `Replayer` machinery re-executes its checkpoints to reconstruct final state, answers, and discards the scratch run) — which requires a worker for that type in the querying process. See [DEVIATIONS.md](DEVIATIONS.md) D27. |
 | 3 | No workflow sandbox: determinism violations surface at recovery/replay as `NondeterminismError`, not at development time. |
 | 4 | Memo + search attributes are stored on DBOS workflow attributes (JSONB, GIN-indexed) — set at start, `upsert_*` from inside a workflow, read via `describe()`/`info()`. Search attributes are stored untyped (no cluster-side registration). `list_workflows(query=...)`/`count_workflows` support a documented subset of the visibility query language (a flat `AND` of `WorkflowType`/`WorkflowId`/`ExecutionStatus`/time-range/search-attribute predicates, plus an optional `GROUP BY ExecutionStatus`/`WorkflowType` for `count`; no `OR`/grouping/`ORDER BY`). `count` runs entirely on DBOS's server-side `COUNT`/`GROUP BY` aggregate and rejects (rather than scans) queries it can't express — search-attribute/exact-id/error-status filters and `GROUP BY ExecutionStatus`. See [DEVIATIONS.md](DEVIATIONS.md) D15. |
 | 5 | Default child-workflow IDs are derived from the parent, not random UUIDs. |
@@ -118,7 +118,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 16 | Schedules (`create_schedule`/`ScheduleHandle`) back onto DBOS schedules: a `ScheduleSpec` compiles to one cron expression (intervals that divide a cron boundary are exact, others approximate; calendar `year`/interval `offset` dropped); the schedule's overlap policy honors SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL (CANCEL_OTHER doesn't wait for the cancelled run to finish; detection is grid-based and bounded) but rejects BUFFER_ONE/BUFFER_ALL, and a per-call `trigger`/`backfill` overlap override is not applied (only None/ALLOW_ALL accepted, others raise); `update` is delete-then-recreate and `pause`/`unpause` don't persist their `note`; schedule history (recent actions, action counts) and schedule `memo`/`search_attributes` are not tracked. See [DEVIATIONS.md](DEVIATIONS.md) D22. |
 | 17 | Interceptors cover client (`Client(interceptors=)`), activity, and workflow inbound/outbound (`Worker(interceptors=)`, via `workflow_interceptor_class`). Header-based context propagation works end-to-end (client→workflow→activity/child/signal, re-injected across continue-as-new); header values are `Payload`s, encoded/decoded with `workflow.payload_converter()`/`activity.payload_converter()`. `handle_query`/`handle_update_validator` are synchronous (deviation #11). Nexus interception is unsupported; worker interceptors come only from `Worker(interceptors=)` (the worker has no client to harvest them from). See [DEVIATIONS.md](DEVIATIONS.md) D24. |
 | 18 | Dynamic **signal/query/update handlers** (`dynamic=True`, with `description=` metadata) and dynamic **activities** (`@activity.defn(dynamic=True)`) are supported, including `workflow`/`activity.payload_converter()` for converting their `RawValue` args. Dynamic **workflows** (`@workflow.defn(dynamic=True)`) are **not** supported and raise `NotImplementedError`: a catch-all workflow has no per-type `wf:{type}` DBOS registration (deviation #1 / one-workflow-per-type listing). See [DEVIATIONS.md](DEVIATIONS.md) D25. |
-| 19 | `workflow.patched()` / `deprecate_patch()` are supported (durable checkpoint markers; a False verdict claims no position so pre-patch runs replay the old path). Worker **deployment versioning** (Build IDs / Worker Deployment Versions, `versioning_behavior` on `@workflow.defn`, `versioning_*`/`versioning_override` knobs) is a Temporal-cluster routing concept with no DBOS analog — accepted-and-inert. Use `patched()` for in-code branching across deploys. See [DEVIATIONS.md](DEVIATIONS.md) D27. |
+| 19 | `workflow.patched()` / `deprecate_patch()` are supported (durable checkpoint markers; a False verdict claims no position so pre-patch runs replay the old path). Worker **deployment versioning** (Build IDs / Worker Deployment Versions, `versioning_behavior` on `@workflow.defn`, `versioning_*`/`versioning_override` knobs) is a Temporal-cluster routing concept with no DBOS analog — accepted-and-inert. Use `patched()` for in-code branching across deploys. See [DEVIATIONS.md](DEVIATIONS.md) D28. |
 
 ## Development
 

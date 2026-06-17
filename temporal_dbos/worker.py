@@ -35,6 +35,11 @@ from ._internal.activity_interceptor import (
     ExecuteActivityInput,
     Interceptor,
 )
+from ._internal.replay import (
+    Replayer,
+    WorkflowReplayResult,
+    WorkflowReplayResults,
+)
 from ._internal.serializer import TEMPORAL_SERIALIZER
 from ._internal.workflow_interceptor import (
     ContinueAsNewInput,
@@ -63,6 +68,7 @@ __all__ = [
     "HandleSignalInput",
     "HandleUpdateInput",
     "Interceptor",
+    "Replayer",
     "SignalChildWorkflowInput",
     "SignalExternalWorkflowInput",
     "StartActivityInput",
@@ -71,6 +77,8 @@ __all__ = [
     "WorkflowInboundInterceptor",
     "WorkflowInterceptorClassInput",
     "WorkflowOutboundInterceptor",
+    "WorkflowReplayResult",
+    "WorkflowReplayResults",
     "Worker",
 ]
 
@@ -87,7 +95,7 @@ logger = logging.getLogger("temporal_dbos.worker")
 # Pinning a constant makes all workers agree by default and deploys preserve
 # in-flight work; a genuinely incompatible change then surfaces as a replay
 # ``NondeterminismError`` (the same contract as Temporal, managed with
-# ``workflow.patched()``). See DESIGN §6.8 / DEVIATIONS D27. Distinct apps
+# ``workflow.patched()``). See DESIGN §6.8 / DEVIATIONS D28. Distinct apps
 # sharing one database should set ``application_version`` explicitly to keep
 # their versions apart.
 DEFAULT_APP_VERSION = "0.1"

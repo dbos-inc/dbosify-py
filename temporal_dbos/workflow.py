@@ -42,6 +42,7 @@ from typing import (
     overload,
 )
 
+from . import exceptions
 from ._internal import registry as _registry
 
 if TYPE_CHECKING:
@@ -70,6 +71,7 @@ __all__ = [
     "ContinueAsNewError",
     "defn",
     "deprecate_patch",
+    "NondeterminismError",
     "execute_activity",
     "execute_activity_method",
     "execute_child_workflow",
@@ -1249,6 +1251,15 @@ class ContinueAsNewError(BaseException):
         # Interceptor headers for the new run, in wire form (set by the outbound
         # chain root); the chain's carried headers are dropped unless re-injected.
         self._tdb_headers: Optional[Dict[str, Any]] = None
+
+
+class NondeterminismError(exceptions.TemporalError):
+    """Error thrown during replay when workflow code diverges from the
+    recorded history (mirrors ``temporalio.workflow.NondeterminismError``)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
 
 
 def continue_as_new(

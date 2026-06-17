@@ -467,7 +467,7 @@ Operational requirement and current scope:
   activity-only worker register different function sets — so DBOS's
   auto-computed (code-hash) versions would differ and the activity worker would
   never dequeue the workflow worker's enqueue. The Worker pins a stable default
-  version (`worker.DEFAULT_APP_VERSION`, D27) so all workers agree out of the
+  version (`worker.DEFAULT_APP_VERSION`, D28) so all workers agree out of the
   box; no per-worker version configuration is needed. (Temporal coordinates on
   the task queue alone; this version pin is the DBOS-backed analogue.)
 - **The activity workflow owns the full retry loop** (Design A): the queued
@@ -587,6 +587,45 @@ the SDK so signatures match. Scope and edges:
   calls, not as its own outbound verb. `list_schedules` is an `async` outbound
   (our `Client.list_schedules` is async), where temporalio's is synchronous.
 
+### D27. Replay and queries-on-closed run over DBOS checkpoints, in-process
+
+temporalio's `Replayer` replays a *fetched event history* offline against a
+server's data converter. We have no event history: a run's durable record is its
+DBOS step checkpoints in Postgres. So `Replayer`/`WorkflowHandle.fetch_history`
+are **DB-bound** — `fetch_history()` snapshots a live DBOS run's recorded steps,
+and the `Replayer` verifies it by *forking* that run one step past its last
+checkpoint (copying every recorded step) and re-executing it under the
+currently-registered code. Consequences:
+
+- **No offline JSON portability (v1).** `WorkflowHistory` references a run that
+  still exists in the connected system database; there is no `from_json`/`to_json`
+  round-trip yet. Replay therefore needs a launched DBOS runtime (a `Worker` for
+  the workflow types), not just a history file. The `Replayer` requires those
+  types to already be registered by a `Worker` and **reuses that Worker's
+  process-global configuration** — its data converter, interceptors, and
+  failure-exception types are authoritative; the matching `Replayer` constructor
+  arguments are accepted for API parity but not re-applied (overriding them would
+  clobber the live Worker, since one Worker owns the process).
+- **Non-determinism detection is checkpoint-shaped.** A different step at a
+  recorded position is caught by DBOS itself (`DBOSUnexpectedStepError`); two
+  cases DBOS can't see on its own are caught by a guard the interpreter consults:
+  current code launching a *new* durable operation past the recorded horizon
+  (also prevents the replay from running a real activity), and current code
+  *finishing early* (fewer steps than recorded). A workflow that faithfully
+  re-fails is a *passing* replay — replay verifies determinism, not success.
+- **Queries on closed workflows are answered by rehydrate-by-replay.** Where
+  Temporal serves queries on any workflow within retention, a closed workflow
+  here is forked to a scratch run that replays to its final state, serves the one
+  query against the reconstructed instance (reusing the live query path), and is
+  then discarded. Because DBOS exposes no hook to a workflow's in-memory state
+  from outside the run, this is driven by an in-process rehydrate signal: it works
+  when a worker for the workflow type runs **in the querying process** (the common
+  embedded layout, and what the `hello_query` sample uses). A purely remote client
+  with no co-located worker still gets the v1 "query requires RUNNING" behavior.
+  Only COMPLETED/FAILED/CANCELED runs can be rehydrated; TERMINATED (a native
+  kill leaves only partial checkpoints), TIMED_OUT, and CONTINUED_AS_NEW runs
+  cannot be faithfully reconstructed and a query on them fails clearly.
+
 ### D25. Dynamic handlers and activities are supported; dynamic workflows are not
 
 Dynamic **signal/query/update handlers** and dynamic **activities** work
@@ -631,7 +670,7 @@ that model. Register each workflow type explicitly. (The `dynamic` parameter is
 still accepted on `@workflow.defn` for signature parity — it is rejected, not
 absent.)
 
-### D27. Patching is supported; worker-deployment versioning is not
+### D28. Patching is supported; worker-deployment versioning is not
 
 `workflow.patched(id)` and `workflow.deprecate_patch(id)` work and match
 temporalio's semantics: `patched()` returns `True` on a first (non-replaying)

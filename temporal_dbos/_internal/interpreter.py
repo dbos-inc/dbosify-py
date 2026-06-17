@@ -63,6 +63,7 @@ from typing import (
 
 from dbos import DBOS
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
+from dbos._error import DBOSUnexpectedStepError
 
 from .. import activity as activity_api
 from .. import exceptions
@@ -79,6 +80,7 @@ from ..workflow import (
     ContinueAsNewError,
     HandlerUnfinishedPolicy,
     Info,
+    NondeterminismError,
     UnfinishedSignalHandlersWarning,
     UnfinishedUpdateHandlersWarning,
     _Runtime,
@@ -86,6 +88,7 @@ from ..workflow import (
 from . import activities as activities_mod
 from . import attributes as _attributes
 from . import conversion, ids, inbox
+from . import replay as _replay
 from . import workflow_interceptor as _wfi
 from .payloads import (
     FailureEnvelope,
@@ -820,6 +823,10 @@ class Interpreter(_Runtime):
         self._patches_recorded: Set[str] = set()
         self._patches_memoized: Dict[str, bool] = {}
         self._pending_patches: Dict[int, str] = {}
+        # Set when a rehydrate (query-on-closed replay) scratch run is told to
+        # stop serving queries and complete (see _serve loop in execute()).
+        self._rehydrate_stop = False
+        self._rehydrate_deadline: Optional[float] = None
         self._can_new_run_id: Optional[str] = None
         self._continued_from: Optional[str] = None
         # Decoded memo + search attributes for this run: materialized from the
@@ -941,7 +948,14 @@ class Interpreter(_Runtime):
                     raise WorkflowTaskFailure(self._outcome[1])
                 await self._flush_outbox()
                 if self._outcome is not None:
-                    break
+                    # A rehydrate (query-on-closed) scratch run keeps serving
+                    # queries against its reconstructed state after the run
+                    # method has completed, until the client signals it is done
+                    # (or a serve deadline elapses). Every other run closes.
+                    if self._rehydrate_guard() is None or self._rehydrate_stop:
+                        break
+                    if self._rehydrate_deadline_passed():
+                        break
                 self._ensure_inbox_waiter()
                 # Let newly created tasks claim their function_ids in
                 # creation order before the checkpointed race (see module
@@ -953,7 +967,19 @@ class Interpreter(_Runtime):
                 )
                 await self._deliver(done)
         finally:
-            if self._outcome is not None and self._outcome[0] != "task_failure":
+            # A replay scratch run (verify OR rehydrate) is a read-only
+            # reconstruction of an already-closed workflow: it must NOT emit the
+            # terminal-close side effects below (cancelling the source run's
+            # in-flight activities, applying ParentClosePolicy to its children,
+            # continue-as-new enqueue, failing its abandoned updates, async-gone
+            # events) — those would act on the real chain's runs. Only the
+            # interpreter's own waiter teardown should run.
+            is_replay = _replay.current_guard_for(self._workflow_id) is not None
+            if (
+                not is_replay
+                and self._outcome is not None
+                and self._outcome[0] != "task_failure"
+            ):
                 # Cancel in-flight activities at a terminal close (including
                 # continue-as-new), so a fire-and-forget or still-running
                 # activity does not outlive the workflow. Local attempts are
@@ -974,7 +1000,11 @@ class Interpreter(_Runtime):
                 # Terminal outcome (not a retryable task failure): apply
                 # ParentClosePolicy to still-running children.
                 await self._sweep_children_on_close()
-            if self._outcome is not None and self._outcome[0] == "continue_as_new":
+            if (
+                not is_replay
+                and self._outcome is not None
+                and self._outcome[0] == "continue_as_new"
+            ):
                 # Enqueue the next run BEFORE tearing down waiters: it must
                 # exist before carryover messages can be forwarded to it
                 # (FK), and the earlier it exists the sooner senders resolve
@@ -991,7 +1021,11 @@ class Interpreter(_Runtime):
             self._waiters.clear()
             if self._can_new_run_id is not None:
                 await self._forward_inbox_to(self._can_new_run_id)
-            if self._outcome is not None and self._outcome[0] != "task_failure":
+            if (
+                not is_replay
+                and self._outcome is not None
+                and self._outcome[0] != "task_failure"
+            ):
                 await self._fail_abandoned_updates()
                 for exec_state in self._pending_activities.values():
                     if exec_state.async_pending:
@@ -1008,6 +1042,21 @@ class Interpreter(_Runtime):
         self._warn_if_unfinished_handlers()
         kind, value = self._outcome
         if kind == "ok":
+            # During a verification replay, a clean completion that consumed
+            # fewer steps than were recorded means the replayed code finished
+            # early (e.g. an activity at the tail was removed) — divergence DBOS
+            # cannot see on its own (no step mismatch ever occurred).
+            guard = _replay.current_guard_for(self._workflow_id)
+            if (
+                guard is not None
+                and guard.mode == "verify"
+                and self.runtime_history_length() < guard.horizon
+            ):
+                raise NondeterminismError(
+                    "workflow completed before consuming all recorded history "
+                    f"(workflow type {self._defn.name!r}); the replayed code "
+                    "diverged from the recorded execution"
+                )
             return value
         if kind == "cancelled":
             raise WorkflowCancelled(value)
@@ -1171,6 +1220,16 @@ class Interpreter(_Runtime):
             self._record_workflow_error(err)
 
     def _record_workflow_error(self, err: BaseException) -> None:
+        # During a verification replay, a divergence DBOS detected mid-run
+        # (a different step at a recorded function_id) is terminal — recording
+        # it as a task failure would send the dispatcher into its retry loop
+        # and mask the divergence. Surface it as a workflow failure the engine
+        # recognizes (the dispatcher stamps the nondeterminism marker).
+        if isinstance(err, (DBOSUnexpectedStepError, NondeterminismError)) and (
+            _replay.current_guard_for(self._workflow_id) is not None
+        ):
+            self._set_outcome(("failure", err))
+            return
         if self._cancel_requested and exceptions.is_cancelled_exception(err):
             self._set_outcome(("cancelled", err))
         elif self._is_failure_exception(err):
@@ -1407,6 +1466,43 @@ class Interpreter(_Runtime):
             return
         exec_state.future.cancel()
 
+    def _rehydrate_guard(self) -> Optional["_replay._ReplayGuard"]:
+        """The active guard for this run iff it is a rehydrate (query-on-closed)
+        replay — else None."""
+        guard = _replay.current_guard_for(self._workflow_id)
+        return guard if guard is not None and guard.mode == "rehydrate" else None
+
+    def _rehydrate_deadline_passed(self) -> bool:
+        """Whether the rehydrate serve window has elapsed. A fallback that lets
+        the scratch run complete if the client never sends a stop signal (e.g.
+        it crashed); the normal path stops on the client's stop message."""
+        now = asyncio.get_running_loop().time()
+        if self._rehydrate_deadline is None:
+            self._rehydrate_deadline = now + _replay.REHYDRATE_SERVE_SECONDS
+            return False
+        return now >= self._rehydrate_deadline
+
+    def _check_replay_horizon(self) -> None:
+        """During any replay (verify or rehydrate), refuse to launch a *new*
+        durable operation beyond the recorded checkpoint horizon: that means the
+        replayed code produced commands not in the recorded history (and would
+        run a real activity in the fork). function_ids are 1-based and
+        contiguous, so the workflow context's ``function_id`` equals the count
+        of steps claimed so far; if it has already reached the horizon, the next
+        claim would exceed it. A faithful rehydrate never reaches this (it only
+        replays recorded steps, then serves queries), so the guard is mode-
+        agnostic."""
+        guard = _replay.current_guard_for(self._workflow_id)
+        if guard is None:
+            return
+        ctx = get_local_dbos_context()
+        if ctx is not None and ctx.function_id >= guard.horizon:
+            raise NondeterminismError(
+                "workflow produced new commands beyond its recorded history "
+                f"(workflow type {self._defn.name!r}); the replayed code diverged "
+                "from the recorded execution"
+            )
+
     async def _process_commands(self) -> bool:
         """Turn queued commands into real-loop waiter tasks. Returns True if
         any virtual-loop progress was made without needing a checkpointed
@@ -1422,11 +1518,13 @@ class Interpreter(_Runtime):
                 real_delay = handle.when() - self._vloop.time()
                 if real_delay <= 0:
                     # Already due in virtual time: fire deterministically
-                    # without a durable sleep (e.g. sleep(0) loops).
+                    # without a durable sleep (e.g. sleep(0) loops). No
+                    # function_id is claimed, so it is replay-horizon-neutral.
                     del self._pending_timers[seq]
                     self._vloop.ready.append(handle)
                     progressed = True
                 else:
+                    self._check_replay_horizon()
                     self._launch_waiter("timer", seq, DBOS.sleep_async(real_delay))
             elif kind == "activity":
                 exec_state = self._pending_activities.get(seq)
@@ -1448,6 +1546,7 @@ class Interpreter(_Runtime):
                 # exact checkpoint shape (no extra status read).
                 if exec_state.task_queue is not None:
                     await self._resolve_own_queue()
+                self._check_replay_horizon()
                 if (
                     exec_state.task_queue is None
                     or exec_state.task_queue == self._own_queue_name
@@ -1458,9 +1557,11 @@ class Interpreter(_Runtime):
                     # Cross-queue path (§6.1.2): enqueue on another worker.
                     await self._launch_queued_activity(exec_state)
             elif kind == "child":
+                self._check_replay_horizon()
                 await self._start_child(self._pending_children[seq])
                 progressed = True  # the start future resolved either way
             elif kind == "send":
+                self._check_replay_horizon()
                 target, envelope, future, resolve_chain = self._pending_sends.pop(seq)
                 if isinstance(envelope, dict) and envelope.get("kind") == "signal":
                     # Encode the signal args + headers here (real loop), not in
@@ -1505,14 +1606,18 @@ class Interpreter(_Runtime):
                 encoded = await _attributes.encode_attributes(
                     self._memo or None, self._typed_sa
                 )
+                self._check_replay_horizon()
                 await DBOS.update_workflow_attributes_async(self._workflow_id, encoded)
             elif kind == "patch":
                 # A patched()/deprecate_patch() call took the newer path: persist
                 # its marker durably so future replays rediscover it. Awaited
                 # inline (like "send"/"attributes") so the marker step claims its
                 # function_id at this deterministic position; replay reads the id
-                # back without re-running the body.
+                # back without re-running the body. A replay scratch run that
+                # tries to write a marker past the horizon means the replayed code
+                # diverged (it patched where the recording didn't).
                 patch_id = self._pending_patches.pop(seq)
+                self._check_replay_horizon()
                 await _patch_marker(patch_id)
         return progressed
 
@@ -1866,10 +1971,17 @@ class Interpreter(_Runtime):
 
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):
+            recv_timeout = inbox.RECV_TIMEOUT_SECONDS
+            if self._rehydrate_guard() is not None:
+                # Serving a rehydrate query: poll often so the serve deadline
+                # (re-checked at the loop top) stays effective even if the
+                # client never sends a stop signal — a full RECV_TIMEOUT would
+                # otherwise pin the scratch run alive for an hour.
+                recv_timeout = min(recv_timeout, _replay.REHYDRATE_POLL_SECONDS)
             self._launch_waiter(
                 "inbox",
                 0,
-                DBOS.recv_async(inbox.INBOX_TOPIC, inbox.RECV_TIMEOUT_SECONDS),
+                DBOS.recv_async(inbox.INBOX_TOPIC, recv_timeout),
             )
 
     async def _flush_outbox(self) -> None:
@@ -2179,6 +2291,10 @@ class Interpreter(_Runtime):
             await self._apply_activity_heartbeat(envelope)
         elif kind == "cancel":
             self._apply_cancel(envelope)
+        elif kind == "rehydrate_stop":
+            # The querying client is done with this rehydrated scratch run; let
+            # it stop serving and complete (see the rehydrate serve loop).
+            self._rehydrate_stop = True
         else:
             logger.warning(
                 "Workflow %s: unknown inbox envelope kind %r", self._workflow_id, kind

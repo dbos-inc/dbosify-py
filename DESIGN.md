@@ -402,8 +402,12 @@ as described in §4 (`asyncio.TimeoutError` on timeout, matching temporalio).
 #### 6.1.4 Worker
 See §5. Also: `Worker(activities=...)`-only workers (no workflows) are common — they must
 register the `__temporal_activity` dispatcher + queue and the activity registry only.
-`Replayer` is a Phase 4 stub that raises a clear `NotImplementedError` with a pointer to
-the compat table until then.
+`Replayer` (`temporal_dbos.worker.Replayer`) re-executes a run's DBOS step checkpoints
+under the currently-registered code to detect non-determinism: it forks the source run one
+step past its last checkpoint (copying every recorded step) and re-runs it, mapping DBOS's
+`DBOSUnexpectedStepError` (plus an interpreter guard for "new step past the horizon" and
+"finished early") to `workflow.NondeterminismError`. Histories come from
+`WorkflowHandle.fetch_history()` (DB-bound; no offline JSON in v1 — DEVIATIONS D27).
 
 ### 6.2 Client, handles, status, visibility
 
@@ -430,9 +434,10 @@ the compat table until then.
   itself a checkpointed step (`__tdb_upd_validate`), so validators run exactly once and
   replay reads the recorded verdict — Temporal's semantics (acceptance lives in history;
   validators are skipped on replay). Query reply via a per-request
-  event key. **DEVIATION:** queries require an *active* (RUNNING) workflow in v1 and write
-  to the system DB; Temporal serves queries on closed workflows within retention —
-  Phase 4 adds rehydrate-by-replay (re-execute from checkpoints read-only, answer, discard).
+  event key. **DEVIATION:** a RUNNING workflow is queried directly; a *closed* workflow is
+  served by rehydrate-by-replay — fork the run, replay its checkpoints to reconstruct final
+  state, serve the one query against it (reusing the live query path), then discard the
+  scratch run. Requires a worker for the type in the querying process (DEVIATIONS D27).
 - `handle.cancel(reason)` / `handle.terminate(reason)` → §6.5.
 - `handle.describe()` → synthesize `WorkflowExecutionDescription` from DBOS
   `get_workflow_status`. **Status mapping** (`_internal/status.py`):
@@ -650,7 +655,7 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   `patch_async` (`enable_patching` in `dbos/_dbos_config.py`): it is async and assumes
   function_id == sequential code position, which our virtual-loop/command-queue split
   decouples, and it pins `app_version` to `"PATCHING_ENABLED"`. See `_internal/interpreter.py`
-  (`_patch`, `_patch_marker`, the `execute()` scan) and [DEVIATIONS.md](DEVIATIONS.md) D27.
+  (`_patch`, `_patch_marker`, the `execute()` scan) and [DEVIATIONS.md](DEVIATIONS.md) D28.
 - `workflow.unsafe.*`: `imports_passed_through()` → no-op context manager; `is_replaying()`
   real (§4.2); `in_sandbox()` → False; the rest no-ops.
 - Interceptors (client `Interceptor/OutboundInterceptor`, worker
@@ -846,7 +851,9 @@ pydantic), memo/search-attribute storage. **Exit:** `samples-python` `schedules/
 `activity_worker/`, expanded conformance matrix published in README.
 
 **Phase 4 — Ecosystem & polish.** Time-skipping `WorkflowEnvironment`, `Replayer` over
-DBOS step checkpoints (pairs with `fork_workflow`), `patched()`/versioning, workflow
+DBOS step checkpoints via `fork_workflow` (**done**: non-determinism verification +
+`WorkflowHandle.fetch_history`, plus rehydrate-by-replay answering queries on closed
+workflows — flipped `hello_query`, DEVIATIONS D27), `patched()`/versioning, workflow
 interceptors (**done**: inbound/outbound + header propagation, DEVIATIONS D24),
 the `temporalio` alias shim + `python -m temporal_dbos run`, perf work
 (micro-checkpoint batching), signature-parity CI (introspect installed `temporalio` as a

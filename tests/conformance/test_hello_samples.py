@@ -103,9 +103,9 @@ EXPECTATIONS = {
         skip="multi-invocation versioning walkthrough; patched() is Phase 4"
     ),
     "hello_query": Expectation(
-        xfail="queries a completed workflow: v1 requires RUNNING (README "
-        "deviation #2; rehydrate-by-replay is Phase 4)",
-        timeout=10,
+        # The second query hits a *completed* workflow; rehydrate-by-replay
+        # reconstructs its final state to answer it (README deviation #2).
+        expect_output="Second greeting result: Goodbye, World!",
     ),
     "hello_search_attributes": Expectation(
         # Starts with an (untyped) search attribute, upserts it from inside the
