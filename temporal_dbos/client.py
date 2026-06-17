@@ -607,6 +607,13 @@ class WithStartWorkflowOperation:
         """The handle for the started (or attached-to) workflow. Available
         once the operation has been used, even if the update failed."""
         if self._handle is None:
+            if self._used:
+                # Used, but the workflow start itself raised (e.g. a FAIL /
+                # REJECT_DUPLICATE conflict), so no run was started/attached.
+                raise RuntimeError(
+                    "WithStartWorkflowOperation was used but the workflow "
+                    "start did not complete; no handle is available"
+                )
             raise RuntimeError(
                 "WithStartWorkflowOperation has not been used in an "
                 "update-with-start call yet"
