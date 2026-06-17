@@ -913,4 +913,12 @@ parameter is left unclassified), in two groups:
   `interceptors=`), and `nexus_service_handlers` (Nexus, DESIGN §1).
 
 `Client.connect`'s gRPC connection/auth/runtime options are likewise N/A — the
-`Client` wraps an already-built `DBOSClient` (D2).
+`Client` wraps an already-built `DBOSClient` (D2). Every `Client` parameter is
+classified the same way (`tests/unit/test_client_param_audit.py`): `Client`
+honors `data_converter` / `interceptors` /
+`default_workflow_query_reject_condition`, replaces `target_host` / `service_client`
+with the `dbos_client`, and *subsumes* the connection / transport / auth /
+runtime options into the DBOSClient. Because `Client` has **no `**kwargs`
+catch-all** (unlike `Worker`), passing one of those subsumed options raises a
+loud `TypeError` instead of being silently ignored — so the Client surface needs
+no explicit-reject list.
