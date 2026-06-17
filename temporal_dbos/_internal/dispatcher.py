@@ -101,6 +101,8 @@ def _reset_for_tests() -> None:
     registry._dynamic_activity = None
     registry.worker_failure_exception_types = ()
     registry.worker_interceptors = ()
+    registry.set_worker_task_queue(None)
+    registry.set_worker_namespace(None)
     activities_mod._attempt_steps.clear()
     activities_mod._dynamic_attempt_step = None
     interpreter._init_step = None
