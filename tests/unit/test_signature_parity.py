@@ -159,8 +159,11 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     },
     # We have no archival tier; fetch_history reads DBOS step checkpoints.
     "client.WorkflowHandle.fetch_history": {"skip_archival"},
-    # Callbacks/links/stack_level are gRPC-era plumbing; versioning
-    # overrides are Phase 4.
+    # Callbacks/links/stack_level are gRPC-era plumbing. versioning_override is
+    # a worker-deployment-versioning pin (temporalio.common.VersioningOverride);
+    # like versioning_behavior it has no DBOS analog (D27/D28) — patched()
+    # covers in-code branching. It changes dispatch behavior, so it is rejected
+    # (TypeError) rather than silently accepted.
     "client.Client.start_workflow": {
         "callbacks",
         "links",
@@ -184,15 +187,17 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     # External storage and payload-size limits are not implemented (DESIGN §6.9
     # scope); proto/search-attribute helpers are intentionally absent.
     "converter.DataConverter.__init__": {"external_storage", "payload_limits"},
-    # Schedules (DESIGN §6.7). Search attributes, raw protobuf, and the data
-    # converter handle on describe/list results are not stored/exposed yet;
-    # headers/raw_info/search-attribute action fields are likewise absent.
+    # Schedules (DESIGN §6.7). The action's typed/untyped search attributes are
+    # now applied to the workflows it starts (alongside memo); headers
+    # (interceptor headers on scheduled starts) and raw_info (protobuf) remain
+    # absent.
     "client.ScheduleActionStartWorkflow.__init__": {
         "headers",
         "raw_info",
-        "typed_search_attributes",
-        "untyped_search_attributes",
     },
+    # The schedule *entity's* own search attributes: we don't model schedules as
+    # searchable entities, so they aren't stored/exposed. data_converter (a
+    # decode handle) and raw_* (protobuf) likewise have no analog.
     "client.ScheduleDescription.__init__": {
         "data_converter",
         "raw_description",

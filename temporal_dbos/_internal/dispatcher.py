@@ -577,6 +577,10 @@ async def _start_scheduled_action(action: Dict[str, Any], fired_at: datetime) ->
         meta.retry_policy = action["retry_policy"]
     if action.get("run_timeout") is not None:
         meta.run_timeout = action["run_timeout"]
+    # The action's memo + search attributes (encoded at create time), applied
+    # to every workflow this schedule starts.
+    if action.get("attributes"):
+        meta.attributes = action["attributes"]
     occurrence_id = f"{action['id']}-{int(fired_at.timestamp())}"
     payload = wrap_input(action.get("args", []), meta)
     queue = await DBOS.retrieve_queue_async(action["task_queue"])
@@ -586,7 +590,15 @@ async def _start_scheduled_action(action: Dict[str, Any], fired_at: datetime) ->
         if meta.run_timeout is not None
         else nullcontext()
     )
-    with SetWorkflowID(occurrence_id), timeout_ctx:
+    # Write memo + SAs to the started workflow's DBOS attributes column
+    # (describe()/visibility); the envelope already carries them for in-workflow
+    # info()/memo().
+    attrs_ctx = (
+        SetWorkflowAttributes(meta.attributes)
+        if meta.attributes is not None
+        else nullcontext()
+    )
+    with SetWorkflowID(occurrence_id), timeout_ctx, attrs_ctx:
         await queue.enqueue_async(dispatch_fn, payload)
 
 

@@ -36,6 +36,7 @@ from typing import (
     Union,
 )
 
+from ._internal import attributes as _attributes
 from ._internal import conversion
 from ._internal import registry as _registry
 from ._internal import schedules as _schedules
@@ -49,7 +50,7 @@ from ._internal.client_interceptor import (
     UpdateScheduleInput,
 )
 from ._internal.payloads import serialize_retry_policy
-from .common import RetryPolicy
+from .common import RetryPolicy, SearchAttributes, TypedSearchAttributes
 
 if TYPE_CHECKING:
     from .client import Client
@@ -216,6 +217,8 @@ class ScheduleActionStartWorkflow(ScheduleAction):
         task_timeout: Optional[timedelta] = None,
         retry_policy: Optional[RetryPolicy] = None,
         memo: Optional[Mapping[str, Any]] = None,
+        typed_search_attributes: TypedSearchAttributes = TypedSearchAttributes.empty,
+        untyped_search_attributes: SearchAttributes = {},
         static_summary: Optional[str] = None,
         static_details: Optional[str] = None,
         priority: Optional[Any] = None,
@@ -234,6 +237,8 @@ class ScheduleActionStartWorkflow(ScheduleAction):
         self.task_timeout = task_timeout
         self.retry_policy = retry_policy
         self.memo = memo
+        self.typed_search_attributes = typed_search_attributes
+        self.untyped_search_attributes = untyped_search_attributes
         self.static_summary = static_summary
         self.static_details = static_details
         self.priority = priority
@@ -742,8 +747,35 @@ def serialize_schedule_context(schedule: Schedule) -> Dict[str, Any]:
     }
 
 
+async def encode_action_attributes(
+    action: ScheduleActionStartWorkflow,
+) -> Optional[Dict[str, Any]]:
+    """Encode the action's memo + search attributes into the DBOS attributes
+    dict applied to each workflow the schedule starts (the same namespaced
+    form ``RunMeta.attributes`` carries). Typed attributes win over untyped on
+    a name clash, mirroring temporalio."""
+    sa = {
+        **_attributes.encode_search_attributes(action.untyped_search_attributes),
+        **_attributes.encode_search_attributes(action.typed_search_attributes),
+    }
+    out: Dict[str, Any] = {}
+    if action.memo:
+        out[_attributes.MEMO_KEY] = await _attributes.encode_memo(action.memo)
+    if sa:
+        out[_attributes.SEARCH_ATTRIBUTES_KEY] = sa
+    return out or None
+
+
 def _action_from_context(ctx: Mapping[str, Any]) -> ScheduleActionStartWorkflow:
     a = ctx["action"]
+    # Round-trip the schedule's typed search attributes for describe() (sync
+    # decode); memo round-trips only onto the started workflow, not the
+    # reconstructed action (its decode is async, like retry_policy it is lossy
+    # here).
+    stored_attrs = a.get("attributes") or {}
+    typed_sa = _attributes.decode_search_attributes(
+        stored_attrs.get(_attributes.SEARCH_ATTRIBUTES_KEY, {})
+    )
     return ScheduleActionStartWorkflow(
         a["workflow"],
         args=[conversion.decode_value_sync(p) for p in a.get("args", [])],
@@ -752,6 +784,7 @@ def _action_from_context(ctx: Mapping[str, Any]) -> ScheduleActionStartWorkflow:
         execution_timeout=_td(a.get("execution_timeout")),
         run_timeout=_td(a.get("run_timeout")),
         task_timeout=_td(a.get("task_timeout")),
+        typed_search_attributes=typed_sa,
     )
 
 
@@ -933,6 +966,11 @@ async def create_schedule_row(
     _ids.validate_workflow_id(schedule.action.id)
     cron, tz_name = compile_spec(schedule.spec)
     context = serialize_schedule_context(schedule)
+    # Encode the action's memo + search attributes once at create time (memo
+    # rides the async converter); the fire path applies them to each start.
+    action_attributes = await encode_action_attributes(schedule.action)
+    if action_attributes is not None:
+        context["action"]["attributes"] = action_attributes
     # The fire dispatcher needs the compiled cron + timezone to walk prior
     # occurrences for overlap handling, and created_at to bound that walk
     # (and to back describe()'s ScheduleInfo.created_at).
