@@ -54,7 +54,29 @@ class PinnedWorkflow:
         return "pinned-ok"
 
 
-_WORKFLOWS = [DeploymentInfoWorkflow, PinnedWorkflow]
+@workflow.defn(versioning_behavior=VersioningBehavior.AUTO_UPGRADE)
+class AutoUpgradeWorkflow:
+    @workflow.run
+    async def run(self) -> str:
+        # AUTO_UPGRADE has no DBOS analog and degrades to pinned; accepted, runs.
+        return "auto-ok"
+
+
+@workflow.defn
+class CANOnceWorkflow:
+    @workflow.run
+    async def run(self, n: int) -> str:
+        if n == 0:
+            workflow.continue_as_new(1)
+        return f"done-{n}"
+
+
+_WORKFLOWS = [
+    DeploymentInfoWorkflow,
+    PinnedWorkflow,
+    AutoUpgradeWorkflow,
+    CANOnceWorkflow,
+]
 
 
 @asynccontextmanager
@@ -132,6 +154,34 @@ async def test_pinned_versioning_behavior_runs() -> None:
             PinnedWorkflow.run, id="dv-pinned", task_queue=TASK_QUEUE
         )
     assert result == "pinned-ok"
+
+
+async def test_auto_upgrade_behavior_accepted_and_degrades_to_pinned() -> None:
+    # AUTO_UPGRADE has no DBOS analog; it is accepted and the workflow runs
+    # (pinned), rather than erroring.
+    async with _env() as client:
+        result = await client.execute_workflow(
+            AutoUpgradeWorkflow.run, id="dv-auto", task_queue=TASK_QUEUE
+        )
+    assert result == "auto-ok"
+
+
+async def test_continue_as_new_successor_inherits_build_id() -> None:
+    # A continue-as-new run is a fresh workflow enqueued from inside the worker,
+    # so DBOS stamps it with the worker's application_version (= build_id): the
+    # successor run is pinned to the same build ID as its predecessor.
+    async with _env(build_id="can-build") as client:
+        result = await client.execute_workflow(
+            CANOnceWorkflow.run, 0, id="dv-can", task_queue=TASK_QUEUE
+        )
+    assert result == "done-1"
+    probe = DBOSClient(system_database_url=system_database_url())
+    try:
+        # Run-chain id scheme (§6.4): successor run n=1 is "<id>--r1".
+        successor = probe.retrieve_workflow("dv-can--r1").get_status()
+    finally:
+        probe.destroy()
+    assert successor.app_version == "can-build"
 
 
 def test_worker_rejects_build_id_and_deployment_config_together() -> None:
