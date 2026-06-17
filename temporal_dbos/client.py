@@ -1107,6 +1107,7 @@ class Client:
         request_eager_start: bool = False,
         priority: Optional[Any] = None,
         request_id: Optional[str] = None,
+        _with_start_update: Optional[Tuple[Any, str, str]] = None,
         **unsupported: Any,
     ) -> "WorkflowHandle":
         """Start a workflow and return its handle.
@@ -1161,6 +1162,7 @@ class Client:
             links=[],
             request_id=request_id,
             versioning_override=None,
+            with_start_update=_with_start_update,
         )
         return await self._impl.start_workflow(input)
 
@@ -1288,31 +1290,40 @@ class Client:
         if meta.attributes is not None:
             options["attributes"] = meta.attributes
         payload = wrap_input(await conversion.encode_values(workflow_args), meta)
-        if start_signal is None:
+        # Messages to deliver in the same system-database transaction as a fresh
+        # start, so a crash can't leave the run started without them — Temporal's
+        # atomic signal-/update-with-start (DEVIATIONS D7). Each is
+        # ``(envelope, topic, idempotency_key)``; the encoded envelopes are built
+        # here (async) and the commit runs in a thread, mirroring how
+        # enqueue_async/send_async bridge to the sync DBOS client.
+        with_start_msgs: List[Tuple[Any, str, Optional[str]]] = []
+        if start_signal is not None:
+            with_start_msgs.append(
+                (
+                    inbox.signal_envelope(
+                        start_signal,
+                        await conversion.encode_values(start_signal_args),
+                        headers=await conversion.encode_headers(input.headers),
+                    ),
+                    inbox.INBOX_TOPIC,
+                    None,
+                )
+            )
+        if input.with_start_update is not None:
+            with_start_msgs.append(input.with_start_update)
+
+        if not with_start_msgs:
             await self._dbos_client.enqueue_async(options, payload)
         else:
-            # signal-with-start: enqueue the run and deliver the start signal in
-            # a single system-database transaction, so a crash between the two
-            # can't leave the workflow started but un-signaled — matching
-            # Temporal's atomic signal-with-start (DEVIATIONS D7). The encoded
-            # signal envelope is built here (async) and the commit runs in a
-            # thread, mirroring how enqueue_async/send_async bridge to the sync
-            # DBOS client.
-            signal_env = inbox.signal_envelope(
-                start_signal,
-                await conversion.encode_values(start_signal_args),
-                headers=await conversion.encode_headers(input.headers),
-            )
             dbos_client = self._dbos_client
 
-            def _enqueue_with_signal() -> None:
+            def _enqueue_with_messages() -> None:
                 with dbos_client._sys_db.engine.begin() as conn:
                     dbos_client.enqueue_in_transaction(conn, options, payload)
-                    dbos_client.send_in_transaction(
-                        conn, dbos_id, signal_env, inbox.INBOX_TOPIC
-                    )
+                    for env, topic, idem in with_start_msgs:
+                        dbos_client.send_in_transaction(conn, dbos_id, env, topic, idem)
 
-            await asyncio.to_thread(_enqueue_with_signal)
+            await asyncio.to_thread(_enqueue_with_messages)
         # Like temporalio, the returned handle is NOT run-bound: signals,
         # queries, and updates resolve the chain's *current* run at call
         # time, so they keep routing correctly across continue-as-new (a
@@ -1549,9 +1560,13 @@ class Client:
     ) -> WorkflowUpdateHandle:
         """Start a workflow (per the operation's id_conflict_policy,
         typically USE_EXISTING) and send it an update, waiting for
-        ``wait_for_stage``. Not atomic: the start commits before the update
-        is sent (DEVIATIONS.md D7 family); the operation's workflow handle
-        is available even if the update fails.
+        ``wait_for_stage``. When the operation starts a *fresh* run the start
+        enqueue and the update request commit in one system-database
+        transaction, so a crash can't leave the workflow started without its
+        update (Temporal's atomic update-with-start, DEVIATIONS.md D7). On the
+        USE_EXISTING path that attaches to an already-running run there is no
+        enqueue to bundle with, so the update is delivered by the follow-up
+        ``start_update`` — the same as before.
         """
         op = start_workflow_operation
         if op._used:
@@ -1559,15 +1574,34 @@ class Client:
         op._used = True
         start_args = op._start_kwargs["args"]
         start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
+        # Build the update request up front so it can ride the start's
+        # transaction on a fresh start. ``start_update`` below re-sends the same
+        # request keyed by this id; DBOS dedupes the duplicate, so a fresh start
+        # delivers atomically (transaction wins, re-send is a no-op) while a
+        # USE_EXISTING attach — which enqueues nothing — delivers via the re-send.
+        update_id = id or str(uuid_mod.uuid4())
+        update_request = (
+            inbox.update_envelope(
+                _update_name(update),
+                await conversion.encode_values(_resolve_args(arg, args)),
+                update_id,
+                headers=await conversion.encode_headers({}),
+            ),
+            inbox.INBOX_TOPIC,
+            update_id,
+        )
         op._handle = await self.start_workflow(
-            op._workflow, args=start_args, **start_kwargs
+            op._workflow,
+            args=start_args,
+            **start_kwargs,
+            _with_start_update=update_request,
         )
         return await op._handle.start_update(
             update,
             arg,
             wait_for_stage=wait_for_stage,
             args=args,
-            id=id,
+            id=update_id,
             result_type=result_type,
             rpc_metadata=rpc_metadata,
             rpc_timeout=rpc_timeout,

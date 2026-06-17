@@ -153,14 +153,15 @@ check) are check-then-start from the client or parent worker, leaving small
 race windows under concurrent starts (DESIGN §6.4; narrowable with claim
 rows, not eliminable without a central arbiter). The terminate-vs-child-start
 window is closed by claim-then-start ordering; the others remain. Compound
-signal-with-start *is* atomic: the start enqueue and the start signal commit
-in one system-database transaction (DBOS `enqueue_in_transaction` +
-`send_in_transaction`), so a client crash never leaves the workflow started
-without its signal. Update-with-start remains non-atomic — the start commits,
-then the update is sent and awaited (the workflow must be running to process
-it, so it can't ride the start's transaction); a crash between the two leaves
-the workflow started without its update, where Temporal's is a single atomic
-request.
+signal-with-start and update-with-start *are* atomic when they start a fresh
+run: the start enqueue and the signal/update request commit in one
+system-database transaction (DBOS `enqueue_in_transaction` +
+`send_in_transaction`), so a client crash can't leave the workflow started
+without its signal/update. On the USE_EXISTING path that attaches to an
+already-running run there is no enqueue to bundle with, so the message is
+delivered by a follow-up send (idempotent by id) — which is fine, since that
+run is already running. (Update-with-start still then awaits the update's
+acceptance/result, as Temporal does; only the delivery is made atomic.)
 
 ### D8. Blocking workflow code stalls the whole worker
 

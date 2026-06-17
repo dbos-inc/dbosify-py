@@ -37,6 +37,7 @@ from typing import (
     Mapping,
     Optional,
     Sequence,
+    Tuple,
 )
 
 from ..common import (
@@ -125,6 +126,13 @@ class StartWorkflowInput:
     links: Sequence[Any]
     request_id: Optional[str]
     versioning_override: Optional[Any] = None
+    # An update request as ``(envelope, topic, idempotency_key)`` to deliver in
+    # the same system-database transaction as a *fresh* start — Temporal's
+    # atomic update-with-start. The follow-up ``start_update`` re-sends the same
+    # request (deduped by idempotency key), so the USE_EXISTING-attach path,
+    # which doesn't enqueue, is delivered there instead. Internal; not part of
+    # the temporalio interceptor surface.
+    with_start_update: Optional[Tuple[Any, str, str]] = None
 
 
 @dataclass
