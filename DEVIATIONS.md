@@ -158,10 +158,11 @@ run: the start enqueue and the signal/update request commit in one
 system-database transaction (DBOS `enqueue_in_transaction` +
 `send_in_transaction`), so a client crash can't leave the workflow started
 without its signal/update. On the USE_EXISTING path that attaches to an
-already-running run there is no enqueue to bundle with, so the message is
-delivered by a follow-up send (idempotent by id) — which is fine, since that
-run is already running. (Update-with-start still then awaits the update's
-acceptance/result, as Temporal does; only the delivery is made atomic.)
+already-running run there is no enqueue to bundle with, so the message is sent
+to that (already-running) run as part of the start — fine, since the run is
+already up. Either way the message is delivered exactly once by the start
+itself. (Update-with-start then awaits the update's acceptance/result, as
+Temporal does; only the delivery is made atomic.)
 
 ### D8. Blocking workflow code stalls the whole worker
 

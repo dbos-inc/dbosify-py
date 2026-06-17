@@ -1237,6 +1237,28 @@ class Client:
         # into the run as ExecuteWorkflowInput.headers (DEVIATIONS D24).
         meta.headers = (await conversion.encode_headers(input.headers)) or None
 
+        # Messages to deliver with the start — Temporal's atomic
+        # signal-/update-with-start (DEVIATIONS D7): the start signal and/or an
+        # update request, each ``(envelope, topic, idempotency_key)``. Built
+        # before conflict resolution so they ride whichever path the start
+        # takes: bundled into the enqueue transaction on a fresh start, or sent
+        # to the run we attach to under USE_EXISTING.
+        with_start_msgs: List[Tuple[Any, str, Optional[str]]] = []
+        if start_signal is not None:
+            with_start_msgs.append(
+                (
+                    inbox.signal_envelope(
+                        start_signal,
+                        await conversion.encode_values(start_signal_args),
+                        headers=await conversion.encode_headers(input.headers),
+                    ),
+                    inbox.INBOX_TOPIC,
+                    None,
+                )
+            )
+        if input.with_start_update is not None:
+            with_start_msgs.append(input.with_start_update)
+
         current = await self._current_run(id)
         run_index = 0
         if current is not None:
@@ -1245,6 +1267,12 @@ class Client:
                 # Conflict policies (vs a RUNNING run). There is an inherent
                 # TOCTOU window here, accepted for v1 (DESIGN §6.4).
                 if id_conflict_policy == WorkflowIDConflictPolicy.USE_EXISTING:
+                    # Attaching to the running run: deliver the with-start
+                    # messages to it (there is no enqueue to bundle with).
+                    for env, topic, idem in with_start_msgs:
+                        await self._dbos_client.send_async(
+                            current_status.workflow_id, env, topic, idempotency_key=idem
+                        )
                     return WorkflowHandle(
                         self,
                         id,
@@ -1290,28 +1318,10 @@ class Client:
         if meta.attributes is not None:
             options["attributes"] = meta.attributes
         payload = wrap_input(await conversion.encode_values(workflow_args), meta)
-        # Messages to deliver in the same system-database transaction as a fresh
-        # start, so a crash can't leave the run started without them — Temporal's
-        # atomic signal-/update-with-start (DEVIATIONS D7). Each is
-        # ``(envelope, topic, idempotency_key)``; the encoded envelopes are built
-        # here (async) and the commit runs in a thread, mirroring how
+        # Fresh start: bundle the enqueue and any with-start messages into one
+        # system-database transaction so a crash can't leave the run started
+        # without them. The commit runs in a thread, mirroring how
         # enqueue_async/send_async bridge to the sync DBOS client.
-        with_start_msgs: List[Tuple[Any, str, Optional[str]]] = []
-        if start_signal is not None:
-            with_start_msgs.append(
-                (
-                    inbox.signal_envelope(
-                        start_signal,
-                        await conversion.encode_values(start_signal_args),
-                        headers=await conversion.encode_headers(input.headers),
-                    ),
-                    inbox.INBOX_TOPIC,
-                    None,
-                )
-            )
-        if input.with_start_update is not None:
-            with_start_msgs.append(input.with_start_update)
-
         if not with_start_msgs:
             await self._dbos_client.enqueue_async(options, payload)
         else:
@@ -1560,51 +1570,37 @@ class Client:
     ) -> WorkflowUpdateHandle:
         """Start a workflow (per the operation's id_conflict_policy,
         typically USE_EXISTING) and send it an update, waiting for
-        ``wait_for_stage``. When the operation starts a *fresh* run the start
-        enqueue and the update request commit in one system-database
-        transaction, so a crash can't leave the workflow started without its
-        update (Temporal's atomic update-with-start, DEVIATIONS.md D7). On the
-        USE_EXISTING path that attaches to an already-running run there is no
-        enqueue to bundle with, so the update is delivered by the follow-up
-        ``start_update`` — the same as before.
+        ``wait_for_stage``. The update rides the start: on a *fresh* run the
+        start enqueue and the update request commit in one system-database
+        transaction (Temporal's atomic update-with-start, DEVIATIONS.md D7); on
+        a USE_EXISTING attach it is sent to the already-running run as part of
+        the start. The request is routed through the update outbound
+        interceptors first, so their modifications apply on both paths.
         """
         op = start_workflow_operation
         if op._used:
             raise RuntimeError("WithStartWorkflowOperation cannot be reused")
         op._used = True
-        start_args = op._start_kwargs["args"]
-        start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
-        # Build the update request up front so it can ride the start's
-        # transaction on a fresh start. ``start_update`` below re-sends the same
-        # request keyed by this id; DBOS dedupes the duplicate, so a fresh start
-        # delivers atomically (transaction wins, re-send is a no-op) while a
-        # USE_EXISTING attach — which enqueues nothing — delivers via the re-send.
-        update_id = id or str(uuid_mod.uuid4())
-        update_request = (
-            inbox.update_envelope(
-                _update_name(update),
-                await conversion.encode_values(_resolve_args(arg, args)),
-                update_id,
-                headers=await conversion.encode_headers({}),
-            ),
-            inbox.INBOX_TOPIC,
-            update_id,
-        )
-        op._handle = await self.start_workflow(
-            op._workflow,
-            args=start_args,
-            **start_kwargs,
-            _with_start_update=update_request,
-        )
-        return await op._handle.start_update(
-            update,
-            arg,
-            wait_for_stage=wait_for_stage,
-            args=args,
-            id=update_id,
-            result_type=result_type,
-            rpc_metadata=rpc_metadata,
-            rpc_timeout=rpc_timeout,
+        # Route through the update interceptor chain; its terminal
+        # (_start_update_impl, with ``with_start_op`` set) builds the
+        # post-interceptor envelope and performs the start that delivers it,
+        # then awaits the reply. The start half still runs the start
+        # interceptors. op._handle is set by the terminal.
+        return await self._impl.start_workflow_update(
+            StartWorkflowUpdateInput(
+                id=op._start_kwargs["id"],
+                run_id=None,
+                first_execution_run_id=None,
+                update_id=id,
+                update=_update_name(update),
+                args=_resolve_args(arg, args),
+                wait_for_stage=wait_for_stage,
+                headers={},
+                ret_type=_ref_ret_type(update, result_type),
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                with_start_op=op,
+            )
         )
 
     async def execute_update_with_start_workflow(
@@ -2227,20 +2223,35 @@ class WorkflowHandle:
         ):
             raise ValueError("Admitted wait stage not supported")
         update_id = input.update_id or str(uuid_mod.uuid4())
-        client = self._client._dbos_client
-        target = await self._target()
         timeout = input.rpc_timeout.total_seconds() if input.rpc_timeout else 60.0
-        await client.send_async(
-            target,
-            inbox.update_envelope(
-                input.update,
-                await conversion.encode_values(input.args),
-                update_id,
-                headers=await conversion.encode_headers(input.headers),
-            ),
-            inbox.INBOX_TOPIC,
-            idempotency_key=update_id,
+        # Built from the (post-interceptor) input, so interceptor modifications
+        # ride along whether the update is delivered atomically with a fresh
+        # start or sent to an already-running run.
+        envelope = inbox.update_envelope(
+            input.update,
+            await conversion.encode_values(input.args),
+            update_id,
+            headers=await conversion.encode_headers(input.headers),
         )
+        op = input.with_start_op
+        if op is not None:
+            # update-with-start: the start delivers the update — atomically in
+            # the enqueue transaction on a fresh run, or to the attached run
+            # under USE_EXISTING (see Client._start_workflow_impl).
+            start_args = op._start_kwargs["args"]
+            start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
+            op._handle = await self._client.start_workflow(
+                op._workflow,
+                args=start_args,
+                **start_kwargs,
+                _with_start_update=(envelope, inbox.INBOX_TOPIC, update_id),
+            )
+            target = await op._handle._target()
+        else:
+            target = await self._target()
+            await self._client._dbos_client.send_async(
+                target, envelope, inbox.INBOX_TOPIC, idempotency_key=update_id
+            )
         handle = WorkflowUpdateHandle(
             self._client,
             update_id,

@@ -126,12 +126,11 @@ class StartWorkflowInput:
     links: Sequence[Any]
     request_id: Optional[str]
     versioning_override: Optional[Any] = None
-    # An update request as ``(envelope, topic, idempotency_key)`` to deliver in
-    # the same system-database transaction as a *fresh* start — Temporal's
-    # atomic update-with-start. The follow-up ``start_update`` re-sends the same
-    # request (deduped by idempotency key), so the USE_EXISTING-attach path,
-    # which doesn't enqueue, is delivered there instead. Internal; not part of
-    # the temporalio interceptor surface.
+    # An update request as ``(envelope, topic, idempotency_key)`` delivered by
+    # the start itself — bundled into the enqueue transaction on a fresh start,
+    # or sent to the attached run under USE_EXISTING (see
+    # ``Client._start_workflow_impl``). Set by update-with-start. Internal; not
+    # part of the temporalio interceptor surface.
     with_start_update: Optional[Tuple[Any, str, str]] = None
 
 
@@ -214,6 +213,11 @@ class StartWorkflowUpdateInput:
     ret_type: Optional[type]
     rpc_metadata: Mapping[str, Any]
     rpc_timeout: Optional[timedelta]
+    # When set, this is an update-with-start: the terminal starts the workflow
+    # (delivering this update atomically with a fresh run, or to the attached
+    # run) instead of sending to an already-resolved run. Carries the
+    # WithStartWorkflowOperation. Internal; not part of the temporalio surface.
+    with_start_op: Optional[Any] = None
 
 
 # --------------------------------------------------------------------------
