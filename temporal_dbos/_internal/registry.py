@@ -97,8 +97,9 @@ class WorkflowDefinition:
     # infer the result type when none is passed.
     arg_types: Optional[List[type]] = None
     ret_type: Optional[type] = None
-    # @workflow.defn(versioning_behavior=...): accepted for parity, inert —
-    # DBOS pins dequeue to application_version regardless (DEVIATIONS D29).
+    # @workflow.defn(versioning_behavior=...): stored for parity. PINNED is what
+    # DBOS enforces anyway (recovery/dequeue scoped to application_version);
+    # AUTO_UPGRADE has no DBOS analog (DEVIATIONS D29).
     versioning_behavior: Optional[int] = None
 
 
@@ -204,9 +205,9 @@ def set_worker_task_queue(task_queue: Optional[str]) -> None:
 # This process's worker deployment version, backing
 # workflow.Info.get_current_deployment_version()/get_current_build_id(). Set by
 # the Worker from Worker(deployment_config=)/Worker(build_id=), else derived
-# from the DBOS application name + application_version. Inert for scheduling
-# (DEVIATIONS D29). Stored as an opaque object to avoid importing the public
-# common types into this internal module.
+# from the DBOS application name + application_version. The build_id is the DBOS
+# application_version DBOS pins recovery/dequeue to (DEVIATIONS D29). Stored as
+# an opaque object to avoid importing the public common types here.
 worker_deployment_version: Optional[Any] = None
 
 

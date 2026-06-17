@@ -1140,8 +1140,8 @@ class Client:
             "request_eager_start": request_eager_start or None,
             "priority": priority,
             "request_id": request_id,
-            # Accepted for parity; inert — DBOS pins dequeue to
-            # application_version regardless (DEVIATIONS D29).
+            # PinnedVersioningOverride matches the enforced default; the
+            # auto-upgrade override has no DBOS analog (DEVIATIONS D29).
             "versioning_override": versioning_override,
             **unsupported,
         }.items():

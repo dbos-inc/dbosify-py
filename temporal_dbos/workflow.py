@@ -216,7 +216,9 @@ class ContinueAsNewVersioningBehavior(IntEnum):
     """Versioning behavior for the run created by :py:func:`continue_as_new`,
     mirroring ``temporalio.workflow.ContinueAsNewVersioningBehavior``.
 
-    Accepted for parity; inert in temporal-dbos (DEVIATIONS D29).
+    A continue-as-new run is a fresh DBOS workflow enqueued by the current
+    worker, so it takes that worker's build ID (pinned). ``AUTO_UPGRADE`` /
+    ``USE_RAMPING_VERSION`` have no DBOS analog (DEVIATIONS D29).
     """
 
     UNSPECIFIED = 0
@@ -256,9 +258,10 @@ def defn(
     """Decorator for workflow classes. ``sandboxed`` is accepted and ignored
     (temporal-dbos runs no sandbox — see the README deviations table).
 
-    ``versioning_behavior`` is accepted and stored for parity but is inert:
-    DBOS pins workflow recovery/dequeue to ``application_version`` regardless
-    of the requested pin/auto-upgrade behavior (DEVIATIONS D29).
+    ``versioning_behavior`` is accepted and stored. ``PINNED`` is what
+    temporal-dbos enforces anyway (DBOS pins recovery/dequeue to the build ID =
+    ``application_version``); ``AUTO_UPGRADE`` has no DBOS analog and degrades to
+    pinned (DEVIATIONS D29).
 
     ``dynamic`` is **not supported**: a catch-all workflow has no
     ``wf:{type}`` registration to dispatch to, which conflicts with the
@@ -640,8 +643,8 @@ class Info:
 
     def get_current_build_id(self) -> str:
         """The build id of the worker executing this run — the DBOS
-        ``application_version`` (DEVIATIONS D29). Empty string when no worker
-        deployment version is set.
+        ``application_version`` DBOS pins recovery/dequeue to (DEVIATIONS D29).
+        Empty string when no worker deployment version is set.
 
         .. deprecated::
             Use :py:meth:`get_current_deployment_version` instead.
@@ -650,17 +653,18 @@ class Info:
         return version.build_id if version is not None else ""
 
     def get_current_deployment_version(self) -> Optional[WorkerDeploymentVersion]:
-        """The deployment version of the worker executing this run, derived
-        from DBOS (deployment name = DBOS application name, build id = DBOS
-        ``application_version``). None when no worker deployment version is set
-        (e.g. the in-process dispatcher harness). DEVIATIONS D29.
+        """The deployment version of the worker executing this run (deployment
+        name = DBOS application/deployment name, build id = the DBOS
+        ``application_version`` DBOS pins recovery/dequeue to). None when no
+        worker deployment version is set (e.g. the in-process dispatcher
+        harness). DEVIATIONS D29.
         """
         return _runtime().runtime_get_current_deployment_version()
 
     def is_target_worker_deployment_version_changed(self) -> bool:
         """Whether the target worker deployment version has changed
-        (upgrade-on-continue-as-new). Always False in temporal-dbos: there is
-        no version-based routing to upgrade across (DEVIATIONS D29)."""
+        (upgrade-on-continue-as-new). Always False in temporal-dbos: workflows
+        are pinned to their build id and never auto-upgrade (DEVIATIONS D29)."""
         return False
 
 
@@ -1396,7 +1400,8 @@ def continue_as_new(
     raised :py:class:`ContinueAsNewError` must not be caught.
 
     ``versioning_intent``/``initial_versioning_behavior`` are accepted for
-    parity but inert (DEVIATIONS D29).
+    parity; the new run is pinned to the enqueuing worker's build ID, and the
+    auto-upgrade/ramping variants have no DBOS analog (DEVIATIONS D29).
     """
     for key, value in {
         "task_timeout": task_timeout,

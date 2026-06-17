@@ -3029,7 +3029,8 @@ class Interpreter(_Runtime):
     def runtime_get_current_deployment_version(
         self,
     ) -> Optional[WorkerDeploymentVersion]:
-        # Process-global, set by the Worker from its deployment config or the
+        # Process-global, set by the Worker from its build_id/deployment_config
+        # (= the DBOS application_version DBOS pins recovery/dequeue to) or the
         # DBOS application name + application_version (DEVIATIONS D29).
         from . import registry
 

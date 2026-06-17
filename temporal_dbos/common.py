@@ -561,22 +561,23 @@ def _warn_on_deprecated_search_attributes(
 #
 # Temporal's Worker Deployment Versioning lets a workflow be pinned to (or
 # auto-upgraded across) worker build versions for safe rolling deploys. In
-# temporal-dbos a "deployment version" is derived from DBOS's own versioning:
+# temporal-dbos a "deployment version" maps onto DBOS's own versioning:
 # ``deployment_name`` is the DBOS application name and ``build_id`` is the DBOS
-# ``application_version`` (which already scopes recovery and queue dequeuing).
-# These types mirror ``temporalio.common`` for signature parity; the behavior
-# they request (pin vs. auto-upgrade routing) is inert — DBOS pins dequeue to
-# ``application_version`` regardless — so they are accepted and surfaced (e.g.
-# ``workflow.Info.get_current_deployment_version()``) but do not change
-# scheduling (see DEVIATIONS D29).
+# ``application_version``. DBOS scopes both workflow recovery and queue dequeue
+# to ``application_version``, so a workflow is recovered/continued only on
+# workers of its build ID — which *is* Temporal's PINNED behavior, enforced.
+# What DBOS has no analog for is AUTO_UPGRADE (migrating a running workflow to a
+# newer version) and the cluster routing-fleet / ramping concepts. See
+# DEVIATIONS D29.
 
 
 class VersioningBehavior(IntEnum):
     """Specifies when a workflow might move from a worker of one Build Id to
     another, mirroring ``temporalio.common.VersioningBehavior``.
 
-    Accepted for parity; inert in temporal-dbos (DBOS pins dequeue to
-    ``application_version`` — see DEVIATIONS D29).
+    ``PINNED`` is temporal-dbos's enforced behavior (DBOS pins recovery/dequeue
+    to ``application_version`` = the build ID). ``AUTO_UPGRADE`` has no DBOS
+    analog and degrades to pinned. See DEVIATIONS D29.
     """
 
     UNSPECIFIED = 0
@@ -623,7 +624,8 @@ class VersioningOverride(ABC):
     """Represents the override of a worker's versioning behavior for a workflow
     execution, mirroring ``temporalio.common.VersioningOverride``.
 
-    Accepted for parity; inert in temporal-dbos (DEVIATIONS D29).
+    ``PinnedVersioningOverride`` matches temporal-dbos's enforced default;
+    ``AutoUpgradeVersioningOverride`` has no DBOS analog (DEVIATIONS D29).
     """
 
 

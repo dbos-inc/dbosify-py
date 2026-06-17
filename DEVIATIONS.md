@@ -670,7 +670,7 @@ that model. Register each workflow type explicitly. (The `dynamic` parameter is
 still accepted on `@workflow.defn` for signature parity — it is rejected, not
 absent.)
 
-### D28. Patching is supported; worker-deployment versioning is surfaced but inert (D29)
+### D28. Patching is supported; worker-deployment versioning maps to DBOS versioning (D29)
 
 `workflow.patched(id)` and `workflow.deprecate_patch(id)` work and match
 temporalio's semantics: `patched()` returns `True` on a first (non-replaying)
@@ -718,35 +718,51 @@ Edges and gaps:
   (its whole purpose), and removing a patch branch while pre-patch runs are still
   open will diverge from their recorded history — the standard non-determinism
   hazard, surfaced at replay (D13), not at development time.
-- **Worker deployment versioning maps to DBOS app version (D29).** Temporal's
-  Build IDs / Worker Deployment Versions are a cluster concept (the server routes
-  tasks to compatible worker fleets); DBOS has a single `app_version` per
-  deployment and no task-routing fleet model. We surface a deployment *identity*
-  derived from DBOS but do not implement version-based routing — see D29. Use
-  `patched()` for in-code branching across deploys.
+- **Worker deployment versioning maps to DBOS versioning (D29).** A build ID is
+  the DBOS `application_version`, and DBOS scopes recovery and queue dequeue to
+  it — so PINNED (a workflow stays on its build ID for life) is the *enforced*
+  default, not a no-op. What's unsupported is AUTO_UPGRADE (migrating a running
+  workflow to a newer version) and the cluster ramping/routing concepts; see D29.
+  `patched()` is the tool for in-place branching when you *don't* want pinning.
 
 
-### D29. Worker deployment version is derived from DBOS, and is inert
+### D29. Worker deployment versioning = DBOS versioning: PINNED is enforced, AUTO_UPGRADE is not
 
-Temporal's worker-versioning API is mirrored and given a concrete, honest
-backing: a **deployment version** is `WorkerDeploymentVersion(deployment_name,
-build_id)` where `deployment_name` is the DBOS application name and `build_id`
-is the DBOS `application_version` (the same string that scopes recovery and
-queue dequeuing — D28). `Worker(build_id=...)` or
-`Worker(deployment_config=WorkerDeploymentConfig(...))` override the derived
-version; the two are mutually exclusive. The version is readable in-workflow via
-`workflow.info().get_current_deployment_version()` (and the deprecated
-`get_current_build_id()`), which return the process-global value the Worker set.
+Temporal's worker-versioning API is mirrored and backed by DBOS's own versioning.
+A **deployment version** is `WorkerDeploymentVersion(deployment_name, build_id)`
+where `deployment_name` is the DBOS application/deployment name and `build_id` is
+the DBOS `application_version`. `Worker(build_id=...)` or
+`Worker(deployment_config=WorkerDeploymentConfig(...))` set that build ID *as the
+DBOS `application_version`* (the two are mutually exclusive); absent both, it is
+derived from the configured `application_version` (default `DEFAULT_APP_VERSION`,
+D28). The version is readable in-workflow via
+`workflow.info().get_current_deployment_version()` / `get_current_build_id()`.
 
-What is **inert** (accepted for signature parity, carried but not acted on):
-`VersioningBehavior` (PINNED / AUTO_UPGRADE) on `@workflow.defn`,
-`ContinueAsNewVersioningBehavior` on `continue_as_new`, `VersioningOverride`
-(`PinnedVersioningOverride` / `AutoUpgradeVersioningOverride`) on client
-`start_workflow`/`execute_workflow`, and `versioning_intent`. DBOS pins dequeue
-to `application_version` regardless of any pin/auto-upgrade request, and there is
-no fleet to route between. `is_target_worker_deployment_version_changed()` always
-returns `False` (no upgrade-on-continue-as-new). Use `patched()` (D28) for
-in-code branching across deploys.
+**PINNED is real and enforced, not inert.** DBOS scopes both workflow recovery
+(`get_pending_workflows` filters `application_version == <worker version>`) and
+queue dequeue (`start_queued_workflows` filters
+`application_version == <worker version> OR IS NULL`) by `application_version`.
+So once a workflow is stamped with a version, it is recovered and continued
+**only** on workers of that build ID, and never migrates to a newer one — which
+is exactly Temporal's PINNED behavior. A freshly-enqueued, not-yet-stamped
+workflow (version `NULL`) is claimed by any worker and stamped with that worker's
+version, mirroring Temporal assigning the task queue's current build ID at start.
+Two workers on the same database with different `build_id`s therefore form two
+pinned fleets that don't recover or dequeue each other's workflows.
+
+**What has no DBOS analog (the genuinely unsupported part):** `AUTO_UPGRADE` —
+migrating a *running* workflow to a newer worker version on its next task. DBOS
+has no mechanism to move a pending workflow across versions (a newer-version
+worker won't even recover/dequeue it), so a requested `AUTO_UPGRADE`
+(`VersioningBehavior.AUTO_UPGRADE` on `@workflow.defn`,
+`AutoUpgradeVersioningOverride`, `ContinueAsNewVersioningBehavior.AUTO_UPGRADE` /
+`USE_RAMPING_VERSION`) degrades to pinned. The cluster routing-fleet, gradual
+**ramping** (percentage rollout), and "default/target version of a task queue"
+concepts likewise have no analog, so `is_target_worker_deployment_version_changed()`
+is always `False`. `versioning_intent` (compatible vs. latest for child
+workflows/activities) is accepted but not acted on. Use `patched()` (D28) for
+*in-place* branching across deploys when you need a single running workflow to
+adopt new code rather than staying pinned.
 
 
 ### D30. Current details are in-memory, reconstructed on replay, not in describe()

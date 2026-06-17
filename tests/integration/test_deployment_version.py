@@ -1,8 +1,10 @@
 """Worker deployment versioning (audit item 2), built on DBOS versioning
-(DEVIATIONS D29): the deployment version is derived from the DBOS application
-name + ``application_version`` (or an explicit ``build_id`` / ``deployment_config``),
-surfaced via ``workflow.Info.get_current_deployment_version()`` and inert for
-scheduling. These deployment-version accessors use the workflow runtime, so the
+(DEVIATIONS D29): a build ID *is* the DBOS ``application_version`` (set via
+``build_id`` / ``deployment_config``, else derived from the app name +
+``application_version``), surfaced via
+``workflow.Info.get_current_deployment_version()``. Because DBOS scopes recovery
+and queue dequeue to ``application_version``, PINNED is the enforced default;
+AUTO_UPGRADE has no analog. These accessors use the workflow runtime, so the
 workflow returns them from ``run()`` rather than a query.
 """
 
@@ -47,7 +49,8 @@ class DeploymentInfoWorkflow:
 class PinnedWorkflow:
     @workflow.run
     async def run(self) -> str:
-        # versioning_behavior is accepted-and-inert; the workflow still runs.
+        # PINNED is what DBOS enforces by default (recovery/dequeue scoped to
+        # application_version); the workflow runs normally.
         return "pinned-ok"
 
 
@@ -84,6 +87,16 @@ async def test_explicit_build_id() -> None:
     assert result["build_id"] == "bld-xyz"
     assert result["build_id_method"] == "bld-xyz"
     assert result["target_changed"] is False
+    # The build_id IS the DBOS application_version — the version DBOS scopes
+    # recovery and queue dequeue to. That equality is what makes the reported
+    # deployment version the *actual* pinned routing version (PINNED is real,
+    # not cosmetic). See DEVIATIONS D29.
+    probe = DBOSClient(system_database_url=system_database_url())
+    try:
+        status = probe.retrieve_workflow("dv-build-id").get_status()
+    finally:
+        probe.destroy()
+    assert status.app_version == "bld-xyz"
 
 
 async def test_default_build_id_from_application_version() -> None:
@@ -111,7 +124,9 @@ async def test_deployment_config() -> None:
     assert result["build_id"] == "42"
 
 
-async def test_versioning_behavior_is_inert() -> None:
+async def test_pinned_versioning_behavior_runs() -> None:
+    # versioning_behavior=PINNED is exactly what DBOS enforces by default
+    # (recovery/dequeue scoped to application_version); the workflow runs.
     async with _env() as client:
         result = await client.execute_workflow(
             PinnedWorkflow.run, id="dv-pinned", task_queue=TASK_QUEUE

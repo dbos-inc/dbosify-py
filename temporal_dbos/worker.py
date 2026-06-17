@@ -158,10 +158,10 @@ class WorkerDeploymentConfig:
     """Options for configuring the Worker Versioning feature, mirroring
     ``temporalio.worker.WorkerDeploymentConfig``.
 
-    Accepted for parity. The deployment ``version`` is surfaced through
-    ``workflow.Info.get_current_deployment_version()``, but the versioning
-    behavior it requests is inert: DBOS pins workflow recovery/dequeue to
-    ``application_version`` regardless (DEVIATIONS D29).
+    The ``version.build_id`` becomes the DBOS ``application_version``, which DBOS
+    uses to pin workflow recovery/dequeue — i.e. Temporal's PINNED behavior,
+    enforced. ``default_versioning_behavior`` / ``use_worker_versioning`` are
+    accepted for parity; AUTO_UPGRADE has no DBOS analog (DEVIATIONS D29).
     """
 
     version: WorkerDeploymentVersion
@@ -198,12 +198,17 @@ class Worker:
         activity types, the task queue) happens at construction; execution
         and recovery start at :py:meth:`run`.
 
-        ``build_id`` / ``deployment_config`` / ``use_worker_versioning`` are
-        accepted for parity and feed the worker's deployment version (surfaced
-        via ``workflow.Info.get_current_deployment_version()``), but do not
-        change scheduling — DBOS pins dequeue to ``application_version``
-        regardless (DEVIATIONS D29). When neither is given, the deployment
-        version is derived from the DBOS application name + application_version.
+        ``build_id`` / ``deployment_config`` set the worker's deployment version
+        (surfaced via ``workflow.Info.get_current_deployment_version()``). The
+        build ID becomes the DBOS ``application_version``, which DBOS uses to
+        scope workflow recovery and queue dequeue — so a workflow is recovered
+        and continued only on workers of its build ID. That pinning *is*
+        Temporal's PINNED versioning behavior, enforced. What DBOS has no analog
+        for is AUTO_UPGRADE (moving a running workflow to a newer version) and
+        the cluster routing-fleet / ramping concepts; see DEVIATIONS D29.
+        ``use_worker_versioning`` is accepted for parity. When neither build_id
+        nor deployment_config is given, the deployment version is derived from
+        the DBOS application name + application_version.
         """
         global _live_worker
         if not task_queue or not isinstance(task_queue, str):
@@ -235,14 +240,26 @@ class Worker:
         # JSON transport (replaces DBOS's default pickle). All processes on the
         # database must share this serializer's name (see serializer.py).
         config = {**config, "serializer": TEMPORAL_SERIALIZER}
-        # Pin a stable app version so redeploys don't strand in-flight workflows
-        # and workflow.patched() actually reaches pre-patch runs (DEFAULT_APP_VERSION).
+        # An explicit build_id / deployment_config IS the DBOS application_version
+        # (build IDs map to DBOS versions, DEVIATIONS D29): DBOS scopes both
+        # workflow recovery and queue dequeue to application_version, so setting
+        # it here makes the requested build ID the version DBOS actually pins to
+        # — that pinning *is* Temporal's PINNED behavior, enforced. Without an
+        # explicit build, pin a stable default so redeploys don't strand in-flight
+        # workflows and workflow.patched() reaches pre-patch runs (DEFAULT_APP_VERSION).
+        explicit_build = (
+            deployment_config.version.build_id
+            if deployment_config is not None
+            else build_id
+        )
+        if explicit_build is not None:
+            config = {**config, "application_version": explicit_build}
         config = _with_default_app_version(config)
         DBOS(config=config)
-        # Resolve this process's worker deployment version (DEVIATIONS D29):
-        # explicit deployment_config/build_id wins, else derive it from the DBOS
-        # application name + application_version. Surfaced via
-        # workflow.Info.get_current_deployment_version(); inert for scheduling.
+        # The worker deployment version surfaced via
+        # workflow.Info.get_current_deployment_version(): build_id = the DBOS
+        # application_version DBOS pins on, deployment_name = the app/deployment
+        # name (DEVIATIONS D29).
         _registry.set_worker_deployment_version(
             _resolve_deployment_version(config, deployment_config, build_id)
         )
