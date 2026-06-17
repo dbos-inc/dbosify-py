@@ -86,6 +86,28 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
         "pages via DBOS limit/offset (DESIGN §6.2) instead of a gRPC cursor + "
         "ListWorkflowsInput; the async-iteration contract is identical"
     ),
+    "worker.Replayer.__init__": (
+        "re-executes DBOS step checkpoints in this process's runtime (DEVIATIONS "
+        "D27); server/sandbox params (namespace, build_id, identity, "
+        "workflow_runner, debug_mode, runtime, plugins, ...) have no analog and "
+        "are accepted-and-ignored — honored params guarded by "
+        "EXPLICITLY_ACCEPTED_PARAMS"
+    ),
+    "client.WorkflowHistory.__init__": (
+        "DB-bound: carries a run's DBOS step checkpoints (run_id, workflow_type, "
+        "recorded_steps, attributes, app_version), not a Temporal event log "
+        "(DEVIATIONS D27)"
+    ),
+    "client.WorkflowHistory.replay_horizon": (
+        "DBOS-native helper: the recorded checkpoint horizon (max function_id)"
+    ),
+    "client.WorkflowHistory.step_count": (
+        "DBOS-native helper: number of recorded step checkpoints"
+    ),
+    "client.WorkflowHandle.fetch_history_events": (
+        "no Temporal event history; raises NotImplementedError pointing at "
+        "fetch_history (DEVIATIONS D27)"
+    ),
 }
 
 # temporalio parameters not accepted yet, recorded exactly. qualname ->
@@ -145,6 +167,8 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     "client.WorkflowHandle.__init__": {
         "start_workflow_response",
     },
+    # We have no archival tier; fetch_history reads DBOS step checkpoints.
+    "client.WorkflowHandle.fetch_history": {"skip_archival"},
     # Callbacks/links/stack_level are gRPC-era plumbing; versioning
     # overrides are Phase 4.
     "client.Client.start_workflow": {
@@ -214,6 +238,12 @@ EXPLICITLY_ACCEPTED_PARAMS: Dict[str, Set[str]] = {
     },
     "client.Client.__init__": {"data_converter", "interceptors"},
     "client.Client.connect": {"data_converter", "interceptors"},
+    "worker.Replayer.__init__": {
+        "workflows",
+        "data_converter",
+        "interceptors",
+        "workflow_failure_exception_types",
+    },
 }
 
 

@@ -35,6 +35,11 @@ from ._internal.activity_interceptor import (
     ExecuteActivityInput,
     Interceptor,
 )
+from ._internal.replay import (
+    Replayer,
+    WorkflowReplayResult,
+    WorkflowReplayResults,
+)
 from ._internal.serializer import TEMPORAL_SERIALIZER
 from ._internal.workflow_interceptor import (
     ContinueAsNewInput,
@@ -63,6 +68,7 @@ __all__ = [
     "HandleSignalInput",
     "HandleUpdateInput",
     "Interceptor",
+    "Replayer",
     "SignalChildWorkflowInput",
     "SignalExternalWorkflowInput",
     "StartActivityInput",
@@ -71,6 +77,8 @@ __all__ = [
     "WorkflowInboundInterceptor",
     "WorkflowInterceptorClassInput",
     "WorkflowOutboundInterceptor",
+    "WorkflowReplayResult",
+    "WorkflowReplayResults",
     "Worker",
 ]
 

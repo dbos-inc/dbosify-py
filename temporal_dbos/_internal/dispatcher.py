@@ -40,14 +40,18 @@ from dbos import (
     WorkflowHandle,
 )
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
+from dbos._error import DBOSUnexpectedStepError
 
 from .. import exceptions
 
 # Re-exported here for the Phase 0 helper API; the canonical home mirrors
 # temporalio.client.WorkflowUpdateFailedError.
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
+from ..workflow import NondeterminismError
 from . import activities as activities_mod
-from . import conversion, ids, inbox, registry, schedules
+from . import conversion, ids, inbox, registry
+from . import replay as _replay
+from . import schedules
 from . import status as _status
 from .activity_workflow import register_activity_dispatcher
 from .interpreter import (
@@ -174,6 +178,34 @@ def _make_dbos_workflow(
             # semantics).
             raise SerializedWorkflowCancellation(
                 serialize_failure(cancelled.cause)
+            ) from None
+        except (NondeterminismError, DBOSUnexpectedStepError) as nde:
+            # A replay diverged — verification OR rehydrate (the interpreter
+            # guard fired, or DBOS saw a different step at a recorded
+            # function_id). Record it in the failure envelope under the
+            # nondeterminism marker so the replay engine / rehydrate query can
+            # tell divergence apart from a faithfully-replayed genuine failure.
+            # No chain continuation — replay never retries.
+            # Only convert when a replay guard is active for this run; outside a
+            # replay, a DBOSUnexpectedStepError is a real non-determinism bug and
+            # a user-raised NondeterminismError is an ordinary error — both keep
+            # their prior propagation rather than being stamped as a divergence.
+            dispatch_ctx = get_local_dbos_context()
+            in_replay = (
+                dispatch_ctx is not None
+                and _replay.current_guard_for(dispatch_ctx.workflow_id) is not None
+            )
+            if not in_replay:
+                raise
+            raise SerializedWorkflowFailure(
+                {
+                    "cls": "ApplicationError",
+                    "type": _replay.NONDETERMINISM_MARKER,
+                    "message": str(nde),
+                    "details": [],
+                    "non_retryable": True,
+                    "next_retry_delay": None,
+                }
             ) from None
         except exceptions.FailureError as err:
             # Record workflow failures in the stable envelope format so
