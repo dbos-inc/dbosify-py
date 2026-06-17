@@ -893,12 +893,24 @@ pools, so a few have caveats:
 - **`activity_executor`** is honored: sync activities run on the provided executor
   (with the activity context copied in), instead of the event loop's default pool.
 
-The remaining Worker options have no DBOS analog and stay accepted-and-ignored:
-`tuner` and the slot-supplier classes, all poller-behavior / poll-count knobs,
-sticky-cache options (`max_cached_workflows`, eviction, sticky timeouts), the
-sandbox runners, `shared_state_manager` (multiprocess activities, D9), the
-heartbeat-throttle intervals (our heartbeat model is in-memory, D6), Nexus
-options, and server-side optimization flags (`disable_eager_activity_execution`,
-`debug_mode`, payload-limit/external-storage knobs). `Client.connect`'s gRPC
-connection/auth options are likewise N/A — the `Client` wraps an already-built
-`DBOSClient` (D2).
+`on_fatal_error` is honored: an unrecoverable error from the run loop is passed
+to the callback before it propagates.
+
+Every other Worker option is **classified and machine-checked**
+(`tests/unit/test_worker_param_audit.py` fails if a new temporalio Worker
+parameter is left unclassified), in two groups:
+
+- **Inert** (no DBOS analog; accepted-and-ignored with a debug log): all
+  poller-behavior / poll-count knobs, sticky-cache options (`max_cached_workflows`,
+  eviction, sticky timeouts), the sandbox runners, `workflow_task_executor`,
+  `shared_state_manager` (multiprocess activities, D9), the heartbeat-throttle
+  intervals (in-memory heartbeat model, D6), Nexus executors/poll knobs, and
+  server-side optimization flags (`disable_eager_activity_execution`,
+  `debug_mode`, payload-limit / external-storage knobs).
+- **Rejected** (behavior-changing AND unfulfilable → `Worker(...)` raises
+  `NotImplementedError` instead of silently no-op'ing): `tuner` (resource-based
+  slot tuning has no DBOS analog — use `max_concurrent_*`), `plugins` (use
+  `interceptors=`), and `nexus_service_handlers` (Nexus, DESIGN §1).
+
+`Client.connect`'s gRPC connection/auth/runtime options are likewise N/A — the
+`Client` wraps an already-built `DBOSClient` (D2).

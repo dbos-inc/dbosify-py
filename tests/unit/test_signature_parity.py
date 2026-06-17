@@ -211,6 +211,7 @@ EXPLICITLY_ACCEPTED_PARAMS: Dict[str, Set[str]] = {
         "max_task_queue_activities_per_second",
         "activity_executor",
         "identity",
+        "on_fatal_error",
     },
     "client.Client.__init__": {"data_converter", "interceptors"},
     "client.Client.connect": {"data_converter", "interceptors"},

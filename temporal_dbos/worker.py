@@ -20,9 +20,14 @@ execution (and the activity queue's ``worker_concurrency`` for an activities-onl
 worker); ``max_activities_per_second`` / ``max_task_queue_activities_per_second``
 -> the activity queue's rate ``limiter``; ``activity_executor`` -> the executor
 sync activities run on; ``identity`` -> the DBOS ``executor_id``;
-``graceful_shutdown_timeout`` -> ``DBOS.destroy(workflow_completion_timeout_sec)``.
-Tuner/poller/sandbox/sticky-cache arguments have no DBOS analog and are accepted
-and ignored with a debug log.
+``graceful_shutdown_timeout`` -> ``DBOS.destroy(workflow_completion_timeout_sec)``;
+``on_fatal_error`` -> called if the run loop raises. Every other temporalio
+Worker option is classified (and the classification is machine-checked by
+``tests/unit/test_worker_param_audit.py``): poller/sandbox/sticky-cache/heartbeat
+options have no DBOS analog and are accepted-and-ignored (inert) with a debug
+log, while behavior-changing options we can't fulfil — ``tuner``, ``plugins``,
+``nexus_service_handlers`` — are **rejected** (raise) rather than silently
+no-op'd.
 """
 
 import asyncio
@@ -30,7 +35,7 @@ import concurrent.futures
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Callable, Optional, Sequence, Type
+from typing import Any, Awaitable, Callable, Optional, Sequence, Type
 
 from dbos import DBOS, DBOSConfig
 from dbos._queue import QueueRateLimit
@@ -112,6 +117,16 @@ logger = logging.getLogger("temporal_dbos.worker")
 # their versions apart.
 DEFAULT_APP_VERSION = "0.1"
 
+# Worker options that are behavior-changing AND unsupported: passing them (a
+# non-default value) raises rather than silently no-ops. arg name -> hint. They
+# arrive via the ``**unsupported`` catch-all (not explicit params).
+_REJECTED_OPTIONS = {
+    "nexus_service_handlers": "Nexus is not supported (DESIGN §1)",
+    "tuner": "resource-based slot tuning has no DBOS analog; use "
+    "max_concurrent_workflow_tasks / max_concurrent_activities (DEVIATIONS D34)",
+    "plugins": "Worker plugins are not supported; use interceptors= (DEVIATIONS D24)",
+}
+
 # The one live Worker in this process (see module docstring).
 _live_worker: Optional["Worker"] = None
 
@@ -189,6 +204,7 @@ class Worker:
         max_activities_per_second: Optional[float] = None,
         max_task_queue_activities_per_second: Optional[float] = None,
         identity: Optional[str] = None,
+        on_fatal_error: Optional[Callable[[BaseException], Awaitable[None]]] = None,
         graceful_shutdown_timeout: timedelta = timedelta(),
         workflow_failure_exception_types: Sequence[Type[BaseException]] = [],
         data_converter: DataConverter = DataConverter.default,
@@ -238,13 +254,23 @@ class Worker:
             raise ValueError(
                 "build_id must be specified when use_worker_versioning is True"
             )
+        # Behavior-changing options we can't fulfil are *rejected*, not silently
+        # ignored (the accepted-param audit's whole point — DEVIATIONS D34): a
+        # user passing these expects an effect we can't deliver.
+        for key, hint in _REJECTED_OPTIONS.items():
+            if unsupported.get(key):
+                raise NotImplementedError(
+                    f"Worker(...) {key}= is not supported: {hint}"
+                )
+        # Inert options (no DBOS analog) are accepted and ignored with a debug log.
         for key, value in {
             "workflow_task_executor": workflow_task_executor,
             **unsupported,
         }.items():
             if value is not None:
-                logger.debug("Worker: ignoring unsupported option %r", key)
+                logger.debug("Worker: ignoring unsupported (inert) option %r", key)
 
+        self._on_fatal_error = on_fatal_error
         self._task_queue = task_queue
         self._max_concurrent_workflow_tasks = max_concurrent_workflow_tasks
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
@@ -393,6 +419,14 @@ class Worker:
                 limiter=_rate_limiter(self._activity_rate_per_second),
             )
             await self._shutdown_event.wait()
+        except Exception as exc:
+            # Surface an unrecoverable worker error to on_fatal_error before it
+            # propagates (the teardown finally still runs). A normal shutdown
+            # returns from wait() without raising, so the callback never fires;
+            # cancellation (a BaseException) is excluded.
+            if self._on_fatal_error is not None:
+                await self._on_fatal_error(exc)
+            raise
         finally:
             self._shutdown_event = None
             self._finished = True
