@@ -574,6 +574,7 @@ class WithStartWorkflowOperation:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
         priority: Optional[Any] = None,
+        versioning_override: Optional[VersioningOverride] = None,
     ) -> None:
         # Required (no default), matching temporalio; explicit UNSPECIFIED
         # is also rejected.
@@ -599,6 +600,7 @@ class WithStartWorkflowOperation:
             rpc_metadata=rpc_metadata,
             rpc_timeout=rpc_timeout,
             priority=priority,
+            versioning_override=versioning_override,
         )
         self._workflow = workflow
         self._handle: Optional["WorkflowHandle"] = None

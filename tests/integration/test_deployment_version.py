@@ -267,7 +267,9 @@ def test_worker_rejects_use_worker_versioning_with_deployment_config() -> None:
 
 
 def test_worker_rejects_use_worker_versioning_without_build_id() -> None:
-    with pytest.raises(ValueError, match="use_worker_versioning"):
+    # Match the specific message — "use_worker_versioning" alone appears in both
+    # versioning-validation errors, so it wouldn't pin this branch.
+    with pytest.raises(ValueError, match="build_id must be specified"):
         Worker(
             default_config(),
             task_queue=TASK_QUEUE,

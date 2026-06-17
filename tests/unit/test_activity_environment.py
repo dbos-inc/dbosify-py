@@ -80,9 +80,8 @@ def test_client_helper_returns_environment_client() -> None:
 
 
 def test_client_helper_raises_when_unavailable() -> None:
-    # No environment client and no worker config registered in this process.
-    activity._worker_dbos_config = None
-    activity._worker_client = None
+    # An ActivityEnvironment with no client has no client and no worker_state, so
+    # activity.client() raises regardless of any worker in the process.
     env = ActivityEnvironment()
     with pytest.raises(RuntimeError, match="No client available"):
         env.run(client_activity)
@@ -91,6 +90,30 @@ def test_client_helper_raises_when_unavailable() -> None:
 def test_is_worker_shutdown_requires_activity_context() -> None:
     with pytest.raises(RuntimeError, match="Not in activity context"):
         activity.is_worker_shutdown()
+
+
+def test_worker_states_have_independent_latched_events() -> None:
+    # Each Worker gets its own _ActivityWorkerState with a fresh shutdown event:
+    # tripping one never affects another (a straggler from a prior worker keeps
+    # its own flag), and the flag is latched (no clear path). A context bound to
+    # a shut-down worker's state observes is_worker_shutdown() == True.
+    s1 = activity._ActivityWorkerState({"name": "app"})
+    s2 = activity._ActivityWorkerState({"name": "app"})
+    assert not s1.shutdown_event.is_set()
+    assert not s2.shutdown_event.is_set()
+
+    s1.shutdown_event.set()
+    assert s1.shutdown_event.is_set()
+    assert not s2.shutdown_event.is_set()  # per-worker isolation (#4)
+
+    ctx = activity._Context(
+        info=activity.Info(), on_heartbeat=lambda *a: None, worker_state=s1
+    )
+    token = activity._current_context.set(ctx)
+    try:
+        assert activity.is_worker_shutdown() is True
+    finally:
+        activity._current_context.reset(token)
 
 
 def test_default_info_parity_fields() -> None:

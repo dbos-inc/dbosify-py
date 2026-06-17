@@ -127,10 +127,9 @@ def _reset_for_tests() -> None:
     _dispatcher._reset_for_tests()
     conversion.reset_converter()
     _registry.set_worker_deployment_name(None)
-    _activity._teardown_worker_state()
-    # Production teardown leaves the shutdown flag latched (stragglers keep
-    # observing it); for tests, reset it so the next test starts clean.
-    _activity._worker_shutdown_event.clear()
+    detached_client = _activity._teardown_worker_state()
+    if detached_client is not None:
+        detached_client._dbos_client.destroy()
 
 
 @dataclass(frozen=True)
@@ -359,6 +358,15 @@ class Worker:
                         )
                     ),
                 )
+                # Detach the activity client only AFTER the graceful drain above,
+                # so an activity reacting to shutdown could still use
+                # activity.client() while draining; dispose it off the loop
+                # (destroy() does blocking pool I/O), reusing this thread.
+                detached_client = _activity._teardown_worker_state()
+                if detached_client is not None:
+                    await loop.run_in_executor(
+                        shutdown_pool, detached_client._dbos_client.destroy
+                    )
             if original_executor is None or getattr(
                 original_executor, "_shutdown", False
             ):
@@ -367,10 +375,6 @@ class Worker:
                     thread_name_prefix="asyncio"
                 )
             loop.set_default_executor(original_executor)
-            # Tear down activity worker-lifecycle state only AFTER the graceful
-            # drain above, so an activity reacting to shutdown could still use
-            # activity.client() while it was draining.
-            _activity._teardown_worker_state()
             _registry.set_worker_deployment_name(None)
             _live_worker = None
 

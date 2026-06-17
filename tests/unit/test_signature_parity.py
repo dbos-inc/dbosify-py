@@ -148,10 +148,10 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
         "links",
         "stack_level",
     },
-    # gRPC-era stack_level; versioning_override: no DBOS analog (D27/D28)
+    # gRPC-era stack_level (versioning_override is accepted and inert, like
+    # start_workflow — DEVIATIONS D29)
     "client.WithStartWorkflowOperation.__init__": {
         "stack_level",
-        "versioning_override",
     },
     # ActivityCancellationDetails (the cancel reason) not implemented
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
