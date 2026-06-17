@@ -36,6 +36,7 @@ from typing import (
 
 from . import exceptions
 from ._internal import registry as _registry
+from ._internal.namespaces import DEFAULT_NAMESPACE
 from .common import Priority, RetryPolicy
 from .converter import PayloadConverter
 
@@ -362,6 +363,8 @@ def _make_info(meta: dict[str, Any]) -> Info:
         current_attempt_scheduled_time=now,
         heartbeat_details=heartbeat_details,
         heartbeat_timeout=_seconds_to_timedelta(meta.get("heartbeat_timeout")),
+        namespace=_registry.worker_namespace or DEFAULT_NAMESPACE,
+        workflow_namespace=_registry.worker_namespace or DEFAULT_NAMESPACE,
         schedule_to_close_timeout=_seconds_to_timedelta(meta.get("schedule_to_close")),
         scheduled_time=now,
         start_to_close_timeout=_seconds_to_timedelta(meta.get("start_to_close")),

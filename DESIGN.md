@@ -44,8 +44,9 @@ guarantees (a workflow survives process crashes and resumes correctly).
   Temporal *server* replacement; it is a replacement for server + Python SDK together.
 - Temporal Web UI, `temporal` CLI, tctl. Users get DBOS's workflow-management APIs and
   Conductor instead.
-- Nexus, multi-namespace isolation, advanced visibility (full query language, custom
-  indexed search attributes) — partial support only, see §8.
+- Nexus and advanced visibility (full query language, custom indexed search attributes)
+  — partial support only, see §8. Namespaces are supported as per-namespace DBOS system
+  schemas, but one namespace per process (the runtime is process-global) — DEVIATIONS D1.
 
 **Why this is feasible.** Both systems use deterministic re-execution with checkpointed
 effects. Temporal replays workflow code against an event history held by the server; DBOS

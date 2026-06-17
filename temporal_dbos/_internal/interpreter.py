@@ -877,8 +877,12 @@ class Interpreter(_Runtime):
         # this workflow runs on, surfaced as info().task_queue and as a local
         # activity's task_queue. "default" under the in-process Phase-0 harness.
         from . import registry
+        from .namespaces import DEFAULT_NAMESPACE
 
         self._task_queue_name = registry.worker_task_queue or "default"
+        # The namespace this process serves (its DBOS schema), surfaced as
+        # info().namespace and on parent/child references.
+        self._namespace = registry.worker_namespace or DEFAULT_NAMESPACE
         self._replay_horizon = 0
         # workflow.patched()/deprecate_patch() state (DESIGN §6.8). Patch ids
         # whose marker exists in recorded history (rebuilt from the step list at
@@ -2250,7 +2254,7 @@ class Interpreter(_Runtime):
             return
         error = exceptions.ChildWorkflowError(
             "Child workflow execution failed",
-            namespace="default",
+            namespace=self._namespace,
             workflow_id=child.child_id,
             run_id=child.child_id,
             workflow_type=child.type_name,
@@ -2843,7 +2847,7 @@ class Interpreter(_Runtime):
         base_id = ids.parse_run(self._workflow_id)[0]
         parent = (
             ParentInfo(
-                namespace="default",
+                namespace=self._namespace,
                 run_id=self._parent_run_id,
                 workflow_id=ids.parse_run(self._parent_run_id)[0],
             )
@@ -2859,7 +2863,7 @@ class Interpreter(_Runtime):
             # the run-chain base — the first execution of this chain.
             first_execution_run_id=base_id,
             headers=self._headers,
-            namespace="default",
+            namespace=self._namespace,
             parent=parent,
             retry_policy=(
                 deserialize_retry_policy(self._meta.retry_policy)

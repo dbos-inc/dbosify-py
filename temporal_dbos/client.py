@@ -37,6 +37,7 @@ from dbos._error import DBOSAwaitedWorkflowCancelledError
 from . import _schedule, exceptions
 from ._internal import attributes as _attributes
 from ._internal import conversion, ids, inbox
+from ._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
 from ._internal import registry as _registry
 from ._internal import replay as _replay
 from ._internal import schedules as _schedules
@@ -870,7 +871,9 @@ def _to_datetime(epoch_ms: Optional[int]) -> Optional[datetime]:
 
 
 def _execution_from_status(
-    status: WorkflowStatus, cls: Type[WorkflowExecution] = WorkflowExecution
+    status: WorkflowStatus,
+    cls: Type[WorkflowExecution] = WorkflowExecution,
+    namespace: str = DEFAULT_NAMESPACE,
 ) -> WorkflowExecution:
     """Synthesize a :class:`WorkflowExecution` (or a subclass — ``describe()``
     passes :class:`WorkflowExecutionDescription`) from a DBOS ``WorkflowStatus``.
@@ -897,7 +900,7 @@ def _execution_from_status(
     created = _to_datetime(status.created_at)
     execution = cls(
         id=ids.parse_run(dbos_id)[0],
-        namespace="default",
+        namespace=namespace,
         run_id=dbos_id,
         workflow_type=workflow_type,
         task_queue=status.queue_name,
@@ -1006,7 +1009,10 @@ class WorkflowExecutionAsyncIterator:
             if (r.name or "").startswith("wf:")
             and (self._post_filter is None or self._post_filter(r))
         ]
-        self._current_page = [_execution_from_status(r) for r in survivors]
+        self._current_page = [
+            _execution_from_status(r, namespace=self._client._namespace)
+            for r in survivors
+        ]
         self._current_page_index = 0
         # A full raw page means there may be more rows; a short one is the end.
         # ``size > 0`` guards a 0-page-size caller against an infinite loop.
@@ -1050,11 +1056,26 @@ class Client:
         self,
         dbos_client: DBOSClient,
         *,
+        namespace: str = DEFAULT_NAMESPACE,
         data_converter: DataConverter = DataConverter.default,
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
         self._dbos_client = dbos_client
+        self._namespace = namespace
+        # The namespace owns the DBOS system schema (DEVIATIONS D1), and the
+        # DBOSClient carries the schema — so it must have been built for this
+        # namespace's schema. Otherwise its operations would target a different
+        # namespace, and (since SystemSchema is process-global) would clobber a
+        # Worker's schema in the same process.
+        expected_schema = namespace_schema(namespace)
+        actual_schema = dbos_client._sys_db.schema
+        if actual_schema != expected_schema:
+            raise ValueError(
+                f"DBOSClient system schema {actual_schema!r} does not match "
+                f"namespace {namespace!r}; build the DBOSClient with "
+                f"dbos_system_schema={expected_schema!r}"
+            )
         self._data_converter = data_converter
         self._default_query_reject_condition = default_workflow_query_reject_condition
         # Build the outbound interceptor chain: user interceptors fold (in
@@ -1076,18 +1097,26 @@ class Client:
         """Data converter used by this client."""
         return self._data_converter
 
+    @property
+    def namespace(self) -> str:
+        """Temporal namespace this client operates in (its DBOS schema)."""
+        return self._namespace
+
     @classmethod
     async def connect(
         cls,
         dbos_client: DBOSClient,
         *,
+        namespace: str = DEFAULT_NAMESPACE,
         data_converter: DataConverter = DataConverter.default,
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
-        """Create a client from a ``dbos.DBOSClient``."""
+        """Create a client from a ``dbos.DBOSClient``. ``namespace`` must match
+        the schema the ``DBOSClient`` was built with (DEVIATIONS D1)."""
         return cls(
             dbos_client,
+            namespace=namespace,
             data_converter=data_converter,
             interceptors=interceptors,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
@@ -2378,7 +2407,9 @@ class WorkflowHandle:
     ) -> WorkflowExecutionDescription:
         dbos_id = await self._target()
         status = await self._client._status_of(dbos_id)
-        description = _execution_from_status(status, WorkflowExecutionDescription)
+        description = _execution_from_status(
+            status, WorkflowExecutionDescription, namespace=self._client._namespace
+        )
         assert isinstance(description, WorkflowExecutionDescription)
         # describe() is bound to a specific Temporal workflow id; honor it over
         # the chain-base derived from the (possibly run-suffixed) DBOS id.

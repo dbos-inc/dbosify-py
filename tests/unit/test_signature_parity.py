@@ -62,6 +62,12 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
     "client.Client.__init__": "wraps a dbos.DBOSClient (DESIGN §5, revised)",
     "client.Client.connect": "takes dbos.DBOSClient instead of target_host",
     "worker.Worker.__init__": "takes dbos.DBOSConfig; one worker per process",
+    "worker.Worker.namespace": (
+        "DBOS extension: our Worker takes a namespace (mapped to its own DBOS "
+        "system schema, DEVIATIONS D1) rather than a namespaced client, so it "
+        "surfaces the namespace it serves; temporalio's Worker has no such "
+        "property"
+    ),
     "testing.WorkflowEnvironment.start_local": (
         "provisions a database on env-provided Postgres; temporalio's "
         "params are all dev-server flags, which don't apply"

@@ -22,8 +22,22 @@ the Temporal Web UI, `temporal` CLI, and tctl do not apply. This replaces
 *server + Python SDK together*, for Python-only applications. Operations
 happen through DBOS tooling (management APIs, Conductor). Security is
 Postgres security: there is no Temporal-style mTLS endpoint or
-namespace-level access control; namespaces map to Postgres schemas — cheap
-isolation, not an authorization boundary.
+namespace-level access control.
+
+**Namespaces map to DBOS system schemas.** Each Temporal namespace gets its
+own Postgres schema (`temporal_<namespace>`) holding the DBOS system tables, so
+workflows in different namespaces are isolated: the same workflow id can exist
+independently in two namespaces, and `list`/`describe` in one never sees the
+other. No namespace is privileged — `default` maps to `temporal_default`, not
+the bare `dbos` schema. A `Worker` derives its `dbos_system_schema` from its
+`namespace` (it owns the runtime); a `Client` is told its `namespace` and
+checks the `DBOSClient` was built with the matching schema. Because DBOS's
+launched runtime and its `SystemSchema` are process-global, **a process serves
+one namespace** — different namespaces mean different worker processes /
+`DBOSClient`\\ s, mirroring Temporal (a worker polls one namespace). This is
+cheap schema-level isolation, not an authorization boundary: Postgres security
+still applies to the database as a whole, and a client with the connection
+string can point at any namespace's schema.
 
 ### D2. Connection surface takes DBOS machinery directly
 

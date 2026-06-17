@@ -121,6 +121,7 @@ def register_worker(
     failure_exception_types: Sequence[Type[BaseException]] = (),
     interceptors: Sequence[Any] = (),
     task_queue: Optional[str] = None,
+    namespace: Optional[str] = None,
 ) -> None:
     """Register workflow classes and activity functions with this process.
 
@@ -132,6 +133,7 @@ def register_worker(
         registry.add_worker_failure_exception_types(failure_exception_types)
     registry.set_worker_interceptors(interceptors)
     registry.set_worker_task_queue(task_queue)
+    registry.set_worker_namespace(namespace)
     # The generic schedule-fire dispatcher is process-global (§6.7); register
     # it so this worker can run schedules whose action targets it.
     register_schedule_dispatcher()
