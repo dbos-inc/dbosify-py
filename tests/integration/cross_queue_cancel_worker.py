@@ -41,6 +41,10 @@ async def cancellable_activity() -> str:
     except asyncio.CancelledError:
         with open(path, "a") as f:
             f.write("cancelled\n")
+        # Announce the cross-process cleanup so a TRY_CANCEL test (whose workflow
+        # resolves without waiting for this worker) can synchronize on it before
+        # tearing the worker down.
+        print("ACTIVITY_CANCELLED", flush=True)
         raise
 
 
