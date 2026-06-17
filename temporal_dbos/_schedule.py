@@ -49,8 +49,8 @@ from ._internal.client_interceptor import (
     UnpauseScheduleInput,
     UpdateScheduleInput,
 )
-from ._internal.payloads import serialize_retry_policy
-from .common import RetryPolicy, SearchAttributes, TypedSearchAttributes
+from ._internal.payloads import deserialize_retry_policy, serialize_retry_policy
+from .common import Priority, RetryPolicy, SearchAttributes, TypedSearchAttributes
 
 if TYPE_CHECKING:
     from .client import Client
@@ -450,7 +450,7 @@ class ScheduleHandle:
         row = await self._client._dbos_client.get_schedule_async(self.id)
         if row is None:
             raise RuntimeError(f"Schedule {self.id!r} not found")
-        return _description_from_row(row)
+        return await _description_from_row(row)
 
     async def update(
         self,
@@ -481,7 +481,7 @@ class ScheduleHandle:
         row = await self._client._dbos_client.get_schedule_async(self.id)
         if row is None:
             raise RuntimeError(f"Schedule {self.id!r} not found")
-        desc = _description_from_row(row)
+        desc = await _description_from_row(row)
         outcome = input.updater(ScheduleUpdateInput(description=desc))
         if inspect.isawaitable(outcome):
             outcome = await outcome
@@ -731,6 +731,9 @@ def serialize_schedule_context(schedule: Schedule) -> Dict[str, Any]:
                 if action.retry_policy is not None
                 else None
             ),
+            "static_summary": action.static_summary,
+            "static_details": action.static_details,
+            "priority": _serialize_priority(action.priority),
         },
         "spec": _serialize_spec(schedule.spec),
         "policy": {
@@ -766,33 +769,63 @@ async def encode_action_attributes(
     return out or None
 
 
-def _action_from_context(ctx: Mapping[str, Any]) -> ScheduleActionStartWorkflow:
-    a = ctx["action"]
-    # Round-trip the schedule's typed search attributes for describe() (sync
-    # decode); memo round-trips only onto the started workflow, not the
-    # reconstructed action (its decode is async, like retry_policy it is lossy
-    # here).
-    stored_attrs = a.get("attributes") or {}
-    typed_sa = _attributes.decode_search_attributes(
-        stored_attrs.get(_attributes.SEARCH_ATTRIBUTES_KEY, {})
+def _serialize_priority(priority: Any) -> Optional[Dict[str, Any]]:
+    """Serialize a ``common.Priority`` to a plain dict (or None). Priority is
+    inert here, but round-tripped so describe()/update() preserve it."""
+    if not isinstance(priority, Priority):
+        return None
+    return {
+        "priority_key": priority.priority_key,
+        "fairness_key": priority.fairness_key,
+        "fairness_weight": priority.fairness_weight,
+    }
+
+
+def _deserialize_priority(raw: Optional[Mapping[str, Any]]) -> Optional[Priority]:
+    if raw is None:
+        return None
+    return Priority(
+        priority_key=raw.get("priority_key"),
+        fairness_key=raw.get("fairness_key"),
+        fairness_weight=raw.get("fairness_weight"),
     )
+
+
+async def _action_from_context(ctx: Mapping[str, Any]) -> ScheduleActionStartWorkflow:
+    a = ctx["action"]
+    # Fully round-trip the action: memo + search attributes are decoded back
+    # from the stored attributes (untyped attributes come back as typed, as in
+    # temporalio); the remaining fields are plain config. So describe()/update()
+    # reconstruct an action that re-encodes to the same stored form. ``attributes``
+    # is the one optional key — absent when the action has no memo/search attrs.
+    memo, typed_sa = await _attributes.decode_attributes(a.get("attributes"))
+    serialized_retry = a["retry_policy"]
     return ScheduleActionStartWorkflow(
         a["workflow"],
-        args=[conversion.decode_value_sync(p) for p in a.get("args", [])],
+        args=[conversion.decode_value_sync(p) for p in a["args"]],
         id=a["id"],
         task_queue=a["task_queue"],
-        execution_timeout=_td(a.get("execution_timeout")),
-        run_timeout=_td(a.get("run_timeout")),
-        task_timeout=_td(a.get("task_timeout")),
+        execution_timeout=_td(a["execution_timeout"]),
+        run_timeout=_td(a["run_timeout"]),
+        task_timeout=_td(a["task_timeout"]),
+        retry_policy=(
+            deserialize_retry_policy(serialized_retry)
+            if serialized_retry is not None
+            else None
+        ),
+        memo=memo or None,
         typed_search_attributes=typed_sa,
+        static_summary=a["static_summary"],
+        static_details=a["static_details"],
+        priority=_deserialize_priority(a["priority"]),
     )
 
 
-def _schedule_from_context(ctx: Mapping[str, Any]) -> Schedule:
+async def _schedule_from_context(ctx: Mapping[str, Any]) -> Schedule:
     policy = ctx.get("policy", {})
     state = ctx.get("state", {})
     return Schedule(
-        action=_action_from_context(ctx),
+        action=await _action_from_context(ctx),
         spec=_deserialize_spec(ctx.get("spec", {})),
         policy=SchedulePolicy(
             overlap=ScheduleOverlapPolicy(
@@ -872,9 +905,9 @@ def _next_action_times(ctx: Mapping[str, Any], count: int) -> List[datetime]:
     return [it.get_next(datetime) for _ in range(count)]
 
 
-def _description_from_row(row: Mapping[str, Any]) -> ScheduleDescription:
+async def _description_from_row(row: Mapping[str, Any]) -> ScheduleDescription:
     ctx = row["context"]
-    schedule = _schedule_from_context(ctx)
+    schedule = await _schedule_from_context(ctx)
     schedule.state.paused = row.get("status") != "ACTIVE"
     info = ScheduleInfo(
         num_actions=0,

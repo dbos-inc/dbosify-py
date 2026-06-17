@@ -19,9 +19,17 @@ from temporal_dbos._schedule import (
     ScheduleState,
     _schedule_from_context,
     compile_spec,
+    encode_action_attributes,
     require_overlap_override_supported,
     require_supported_overlap,
     serialize_schedule_context,
+)
+from temporal_dbos.common import (
+    Priority,
+    RetryPolicy,
+    SearchAttributeKey,
+    SearchAttributePair,
+    TypedSearchAttributes,
 )
 
 
@@ -109,15 +117,23 @@ def test_compile_spec_requires_a_spec() -> None:
         compile_spec(ScheduleSpec())
 
 
-def test_context_round_trip() -> None:
+async def test_context_round_trip() -> None:
+    kw = SearchAttributeKey.for_keyword("RoundTripKw")
+    start_action = ScheduleActionStartWorkflow(
+        "MyWorkflow",
+        "the-arg",
+        id="wf-id",
+        task_queue="tq",
+        run_timeout=timedelta(seconds=30),
+        retry_policy=RetryPolicy(maximum_attempts=5),
+        memo={"team": "sched"},
+        typed_search_attributes=TypedSearchAttributes([SearchAttributePair(kw, "v")]),
+        static_summary="a summary",
+        static_details="some details",
+        priority=Priority(priority_key=3),
+    )
     schedule = Schedule(
-        action=ScheduleActionStartWorkflow(
-            "MyWorkflow",
-            "the-arg",
-            id="wf-id",
-            task_queue="tq",
-            run_timeout=timedelta(seconds=30),
-        ),
+        action=start_action,
         spec=ScheduleSpec(
             intervals=[ScheduleIntervalSpec(every=timedelta(minutes=2))],
             calendars=[ScheduleCalendarSpec(minute=(ScheduleRange(0, 30, 15),))],
@@ -129,10 +145,15 @@ def test_context_round_trip() -> None:
         state=ScheduleState(note="hello", paused=True),
     )
     ctx = serialize_schedule_context(schedule)
+    # Memo + search attributes are encoded into the context as create_schedule
+    # does, so the round-trip exercises the full stored form.
+    encoded = await encode_action_attributes(start_action)
+    assert encoded is not None
+    ctx["action"]["attributes"] = encoded
     # The action args must be encoded payloads (JSON-safe for DBOS transport).
     assert isinstance(ctx["action"]["args"], list)
 
-    rebuilt = _schedule_from_context(ctx)
+    rebuilt = await _schedule_from_context(ctx)
     action = rebuilt.action
     assert isinstance(action, ScheduleActionStartWorkflow)
     assert action.workflow == "MyWorkflow"
@@ -140,6 +161,16 @@ def test_context_round_trip() -> None:
     assert action.id == "wf-id"
     assert action.task_queue == "tq"
     assert action.run_timeout == timedelta(seconds=30)
+    # Every action field round-trips losslessly.
+    assert action.retry_policy == RetryPolicy(maximum_attempts=5)
+    assert action.memo == {"team": "sched"}
+    assert action.typed_search_attributes.get(kw) == "v"
+    assert action.static_summary == "a summary"
+    assert action.static_details == "some details"
+    assert action.priority == Priority(priority_key=3)
+    # Re-encoding the rebuilt action reproduces the stored attributes byte-for-
+    # byte — proof the round-trip is stable (update() preserves everything).
+    assert await encode_action_attributes(action) == encoded
     assert rebuilt.spec.intervals[0].every == timedelta(minutes=2)
     assert rebuilt.spec.calendars[0].minute[0] == ScheduleRange(0, 30, 15)
     assert rebuilt.spec.start_at == datetime(2026, 1, 1, tzinfo=timezone.utc)
