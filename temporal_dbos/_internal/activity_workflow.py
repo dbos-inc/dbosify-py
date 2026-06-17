@@ -94,6 +94,11 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         else RetryPolicy()
     )
     meta = dict(payload["meta"])
+    # Surface the activity's timeouts/retry policy to activity.info() (the local
+    # path carries these in meta too); they live at payload level on this path.
+    meta["start_to_close"] = start_to_close
+    meta["schedule_to_close"] = schedule_to_close
+    meta["retry_policy"] = serialized_policy
     # ``attempt_step_for`` raises a clear KeyError if the activity type is not
     # registered with *this* worker — the correct failure for a task_queue
     # pointed at a worker that doesn't host the activity.

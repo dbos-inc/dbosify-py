@@ -81,6 +81,7 @@ from ..workflow import (
     HandlerUnfinishedPolicy,
     Info,
     NondeterminismError,
+    ParentInfo,
     UnfinishedSignalHandlersWarning,
     UnfinishedUpdateHandlersWarning,
     _Runtime,
@@ -829,6 +830,10 @@ class Interpreter(_Runtime):
         self._rehydrate_deadline: Optional[float] = None
         self._can_new_run_id: Optional[str] = None
         self._continued_from: Optional[str] = None
+        # The DBOS run id of a real (cross-chain) parent workflow, set at start
+        # when this run was launched as a child; None for top-level/continued
+        # runs. Surfaced as workflow.info().parent.
+        self._parent_run_id: Optional[str] = None
         # Decoded memo + search attributes for this run: materialized from the
         # run envelope at start, mutated in place by upsert_*, and the source
         # for in-workflow info()/memo() (the durable, queryable copy lives in
@@ -911,11 +916,13 @@ class Interpreter(_Runtime):
             None, DBOS.get_workflow_status, self._workflow_id
         )
         parent = status.parent_workflow_id if status else None
-        if (
-            parent is not None
-            and ids.parse_run(parent)[0] == ids.parse_run(self._workflow_id)[0]
-        ):
-            self._continued_from = parent
+        if parent is not None:
+            if ids.parse_run(parent)[0] == ids.parse_run(self._workflow_id)[0]:
+                self._continued_from = parent
+            else:
+                # A link to a different chain base is a real parent (a child
+                # start), not a continuation.
+                self._parent_run_id = parent
 
         init = await _workflow_init_step()
         self._start_time = float(init["start_time"])
@@ -1835,6 +1842,9 @@ class Interpreter(_Runtime):
             "activity_type": exec_state.activity_name,
             "attempt": exec_state.attempt,
             "heartbeat_timeout": exec_state.heartbeat_timeout,
+            "schedule_to_close": exec_state.schedule_to_close,
+            "start_to_close": exec_state.start_to_close,
+            "retry_policy": serialize_retry_policy(exec_state.retry_policy),
             "seq": exec_state.seq,
             "workflow_id": ids.parse_run(self._workflow_id)[0],
             "workflow_run_id": self._workflow_id,
@@ -2764,11 +2774,27 @@ class Interpreter(_Runtime):
         return self._outbound
 
     def runtime_info(self) -> Info:
+        base_id = ids.parse_run(self._workflow_id)[0]
+        parent = (
+            ParentInfo(
+                namespace="default",
+                run_id=self._parent_run_id,
+                workflow_id=ids.parse_run(self._parent_run_id)[0],
+            )
+            if self._parent_run_id is not None
+            else None
+        )
+        start_time = datetime.fromtimestamp(self._start_time)
         return Info(
             attempt=self._meta.attempt,
             continued_run_id=self._continued_from,
             cron_schedule=self._meta.cron,
+            # Run 0's DBOS id is the bare workflow id (ids.run_dbos_id), i.e.
+            # the run-chain base — the first execution of this chain.
+            first_execution_run_id=base_id,
+            headers=self._headers,
             namespace="default",
+            parent=parent,
             retry_policy=(
                 deserialize_retry_policy(self._meta.retry_policy)
                 if self._meta.retry_policy is not None
@@ -2781,10 +2807,11 @@ class Interpreter(_Runtime):
                 else None
             ),
             search_attributes=_attributes.typed_to_untyped(self._typed_sa),
-            start_time=datetime.fromtimestamp(self._start_time),
+            start_time=start_time,
             task_queue="default",
             typed_search_attributes=self._typed_sa,
             workflow_id=self._workflow_id,
+            workflow_start_time=start_time,
             workflow_type=self._defn.name,
         )
 

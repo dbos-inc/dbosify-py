@@ -19,7 +19,7 @@ import threading
 import time as time_mod
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import (
     Any,
     Callable,
@@ -36,7 +36,10 @@ from typing import (
 
 from . import exceptions
 from ._internal import registry as _registry
+from .common import Priority, RetryPolicy
 from .converter import PayloadConverter
+
+_EPOCH = datetime.fromtimestamp(0, timezone.utc)
 
 __all__ = [
     "Info",
@@ -154,13 +157,30 @@ class Info:
     activity_id: str = ""
     activity_type: str = ""
     attempt: int = 1
+    # In-process activities are dispatched synchronously, so an attempt's
+    # schedule/start times coincide (all stamped at attempt execution).
+    current_attempt_scheduled_time: datetime = _EPOCH
     heartbeat_details: Sequence[Any] = ()
+    heartbeat_timeout: Optional[timedelta] = None
     is_local: bool = False
+    namespace: str = "default"
+    schedule_to_close_timeout: Optional[timedelta] = None
+    scheduled_time: datetime = _EPOCH
+    start_to_close_timeout: Optional[timedelta] = None
+    started_time: datetime = _EPOCH
     task_queue: str = ""
     task_token: bytes = b""
     workflow_id: str = ""
+    # Single-namespace deployment; ``workflow_namespace`` is temporalio's
+    # deprecated alias for ``namespace``.
+    workflow_namespace: str = "default"
     workflow_run_id: str = ""
     workflow_type: str = ""
+    # Priority is accepted-and-inert (FIFO queues); always the default instance.
+    priority: Priority = Priority.default
+    retry_policy: Optional[RetryPolicy] = None
+    # Run ID of this activity; None for workflow-dispatched activities (all ours).
+    activity_run_id: Optional[str] = None
 
 
 @dataclass
@@ -334,14 +354,34 @@ def _make_info(meta: dict[str, Any]) -> Info:
         if queued_wf:
             token["qwf"] = str(queued_wf)
         task_token = json.dumps(token).encode()
+    now = datetime.now(timezone.utc)
     return Info(
         activity_id=str(meta.get("activity_id", "")),
         activity_type=str(meta.get("activity_type", "")),
         attempt=int(meta.get("attempt", 1)),
+        current_attempt_scheduled_time=now,
         heartbeat_details=heartbeat_details,
+        heartbeat_timeout=_seconds_to_timedelta(meta.get("heartbeat_timeout")),
+        schedule_to_close_timeout=_seconds_to_timedelta(meta.get("schedule_to_close")),
+        scheduled_time=now,
+        start_to_close_timeout=_seconds_to_timedelta(meta.get("start_to_close")),
+        started_time=now,
         task_queue=str(meta.get("task_queue", "")),
         task_token=task_token,
         workflow_id=str(meta.get("workflow_id", "")),
         workflow_run_id=run_id,
         workflow_type=str(meta.get("workflow_type", "")),
+        retry_policy=_deserialize_retry_policy(meta.get("retry_policy")),
     )
+
+
+def _seconds_to_timedelta(seconds: Optional[float]) -> Optional[timedelta]:
+    return timedelta(seconds=seconds) if seconds is not None else None
+
+
+def _deserialize_retry_policy(raw: Any) -> Optional[RetryPolicy]:
+    if not raw:
+        return None
+    from ._internal.payloads import deserialize_retry_policy
+
+    return deserialize_retry_policy(raw)

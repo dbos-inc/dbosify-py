@@ -6,7 +6,7 @@ test_interpreter_recovery.py.
 """
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -14,7 +14,7 @@ from dbos import DBOS
 
 from temporal_dbos import activity, workflow
 from temporal_dbos._internal import dispatcher
-from temporal_dbos.common import RetryPolicy
+from temporal_dbos.common import Priority, RetryPolicy
 from temporal_dbos.exceptions import ActivityError, ApplicationError, RetryState
 
 # Per-test mutable state activities reach into (reset by fixtures/tests).
@@ -50,6 +50,74 @@ class GreetingWorkflow:
             compose, args=[name, 2], start_to_close_timeout=timedelta(seconds=5)
         )
         return f"{first}|{second}"
+
+
+@activity.defn
+async def report_activity_info() -> Dict[str, Any]:
+    info = activity.info()
+    return {
+        "namespace": info.namespace,
+        "workflow_namespace": info.workflow_namespace,
+        "start_to_close": (
+            info.start_to_close_timeout.total_seconds()
+            if info.start_to_close_timeout
+            else None
+        ),
+        "schedule_to_close": (
+            info.schedule_to_close_timeout.total_seconds()
+            if info.schedule_to_close_timeout
+            else None
+        ),
+        "max_attempts": (
+            info.retry_policy.maximum_attempts if info.retry_policy else None
+        ),
+        "priority_is_default": info.priority == Priority.default,
+        "activity_run_id": info.activity_run_id,
+        "started_le_now": info.started_time <= datetime.now(timezone.utc),
+    }
+
+
+@workflow.defn
+class InfoWorkflow:
+    @workflow.run
+    async def run(self) -> Dict[str, Any]:
+        info = workflow.info()
+        act = await workflow.execute_activity(
+            report_activity_info,
+            start_to_close_timeout=timedelta(seconds=5),
+            schedule_to_close_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+        return {
+            "first_execution_run_id": info.first_execution_run_id,
+            "run_id": info.run_id,
+            "workflow_id": info.workflow_id,
+            "start_time_eq": info.workflow_start_time == info.start_time,
+            "has_parent": info.parent is not None,
+            "activity": act,
+        }
+
+
+@workflow.defn
+class ChildReportsParent:
+    @workflow.run
+    async def run(self) -> Dict[str, Optional[str]]:
+        p = workflow.info().parent
+        return {
+            "parent_workflow_id": p.workflow_id if p else None,
+            "parent_run_id": p.run_id if p else None,
+            "parent_namespace": p.namespace if p else None,
+        }
+
+
+@workflow.defn
+class ParentStartsChild:
+    @workflow.run
+    async def run(self) -> Dict[str, Optional[str]]:
+        result: Dict[str, Optional[str]] = await workflow.execute_child_workflow(
+            ChildReportsParent.run, id="info-parent--child"
+        )
+        return result
 
 
 @workflow.defn
@@ -176,6 +244,45 @@ def test_activities_and_sleep() -> None:
     dispatcher.register_worker(workflows=[GreetingWorkflow], activities=[compose])
     handle = dispatcher.start_workflow(GreetingWorkflow, ["world"], workflow_id="greet")
     assert dispatcher.workflow_result(handle) == "hello-world-1|hello-world-2"
+
+
+@pytest.mark.usefixtures("tdb")
+def test_workflow_and_activity_info_parity_fields() -> None:
+    """The Phase-4 parity-cleanup fields carry real run data: the run-chain
+    base id, init time, no-parent, and the activity's scheduled timeouts/retry
+    policy/namespace surfaced through activity.info()."""
+    dispatcher.register_worker(
+        workflows=[InfoWorkflow], activities=[report_activity_info]
+    )
+    handle = dispatcher.start_workflow(InfoWorkflow, [], workflow_id="infowf")
+    res = dispatcher.workflow_result(handle)
+    # Run 0 of the chain: the first-execution run id is the base workflow id.
+    assert res["first_execution_run_id"] == "infowf"
+    assert res["run_id"] == "infowf"
+    assert res["workflow_id"] == "infowf"
+    assert res["start_time_eq"] is True
+    assert res["has_parent"] is False
+
+    act = res["activity"]
+    assert act["namespace"] == "default"
+    assert act["workflow_namespace"] == "default"
+    assert act["start_to_close"] == 5.0
+    assert act["schedule_to_close"] == 30.0
+    assert act["max_attempts"] == 3
+    assert act["priority_is_default"] is True
+    assert act["activity_run_id"] is None
+    assert act["started_le_now"] is True
+
+
+@pytest.mark.usefixtures("tdb")
+def test_child_workflow_info_parent() -> None:
+    """A child run's info().parent carries the cross-chain parent's ids."""
+    dispatcher.register_worker(workflows=[ParentStartsChild, ChildReportsParent])
+    handle = dispatcher.start_workflow(ParentStartsChild, [], workflow_id="info-parent")
+    res = dispatcher.workflow_result(handle)
+    assert res["parent_workflow_id"] == "info-parent"
+    assert res["parent_run_id"] == "info-parent"
+    assert res["parent_namespace"] == "default"
 
 
 @pytest.mark.usefixtures("tdb")

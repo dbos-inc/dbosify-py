@@ -122,45 +122,33 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     # accepted-and-inert: worker deployment versioning has no DBOS analog
     # (DEVIATIONS D28) — patched()/deprecate_patch() cover in-code branching.
     "workflow.defn": {"versioning_behavior"},
-    # Info/describe field coverage grows with features (DESIGN §6.8).
+    # Residual deviations only (the rest are now populated from real run data):
+    #  - execution_timeout / task_timeout: accepted at start but not honored
+    #    (only run_timeout is), and no DBOS analog — surfacing them would imply
+    #    enforcement we don't provide.
+    #  - raw_memo: temporalio's is the raw protobuf payload map; we have no
+    #    protobuf (corollary of D1). Decoded memo is available via memo().
+    #  - root: the transitive root of the parent tree; we hold only the
+    #    immediate parent link, not a walked/propagated root.
     "workflow.Info.__init__": {
         "execution_timeout",
-        "first_execution_run_id",
-        "headers",
-        "parent",
-        "priority",
         "raw_memo",
         "root",
         "task_timeout",
-        "workflow_start_time",
     },
-    "activity.Info.__init__": {
-        "activity_run_id",
-        "current_attempt_scheduled_time",
-        "heartbeat_timeout",
-        "namespace",
-        "priority",
-        "retry_policy",
-        "schedule_to_close_timeout",
-        "scheduled_time",
-        "start_to_close_timeout",
-        "started_time",
-        "workflow_namespace",
-    },
+    # activity.Info is now fully populated (timeouts/retry/priority/namespace/
+    # timestamps all carried through), so it has no missing parameters.
     "client.WorkflowExecution.__init__": {
-        "execution_time",
+        # history_length: no Temporal-style event log (DBOS step checkpoints
+        # are a different model). raw_info: protobuf, absent (corollary of D1).
+        # root_id/root_run_id: transitive root not held (only the parent link).
         "history_length",
-        "namespace",
-        "parent_run_id",
         "raw_info",
         "root_id",
         "root_run_id",
     },
     "client.WorkflowExecutionDescription.__init__": {
-        "execution_time",
         "history_length",
-        "namespace",
-        "parent_run_id",
         "raw_description",
         "raw_info",
         "root_id",
