@@ -197,3 +197,25 @@ def test_dynamic_handler_rejects_wrong_sequence_element() -> None:
         @activity.defn(dynamic=True)
         def _a(args: Sequence[int]) -> str:
             return "x"
+
+
+def test_no_thread_cancel_exception_default_and_true_ok() -> None:
+    # Our only mode is cooperative (== no_thread_cancel_exception=True), so the
+    # default and an explicit True both decorate cleanly.
+    @activity.defn
+    def a() -> None: ...
+
+    @activity.defn(no_thread_cancel_exception=True)
+    def b() -> None: ...
+
+    assert registry.activity_definition_of(a).name == "a"
+    assert registry.activity_definition_of(b).name == "b"
+
+
+def test_no_thread_cancel_exception_false_rejected() -> None:
+    # Asking for Temporal's raise-into-the-thread behavior fails loudly at
+    # decoration time rather than silently degrading (DEVIATIONS D26).
+    with pytest.raises(NotImplementedError, match="no_thread_cancel_exception"):
+
+        @activity.defn(no_thread_cancel_exception=False)
+        def _a() -> None: ...

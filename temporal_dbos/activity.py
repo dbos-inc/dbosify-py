@@ -79,21 +79,44 @@ def defn(fn: _F) -> _F: ...
 
 @overload
 def defn(
-    *, name: Optional[str] = None, dynamic: bool = False
+    *,
+    name: Optional[str] = None,
+    no_thread_cancel_exception: bool = True,
+    dynamic: bool = False,
 ) -> Callable[[_F], _F]: ...
 
 
 def defn(
-    fn: Optional[_F] = None, *, name: Optional[str] = None, dynamic: bool = False
+    fn: Optional[_F] = None,
+    *,
+    name: Optional[str] = None,
+    no_thread_cancel_exception: bool = True,
+    dynamic: bool = False,
 ) -> Union[_F, Callable[[_F], _F]]:
     """Decorator for activity functions (sync or async).
 
     ``dynamic=True`` makes this the catch-all activity, invoked for any
     activity type with no exact registration; it must accept a single
     ``Sequence[RawValue]`` and cannot also set ``name`` (§6.1.2).
+
+    ``no_thread_cancel_exception`` defaults to ``True`` (temporalio's default is
+    ``False``): temporal-dbos delivers cancellation to sync activities
+    *cooperatively* and never raises into their worker thread, so it always
+    behaves as ``True``. Setting it ``False`` — asking for Temporal's
+    raise-into-the-thread behavior — raises ``NotImplementedError`` rather than
+    silently doing something else (DEVIATIONS D26).
     """
     if name is not None and dynamic:
         raise RuntimeError("Cannot provide name and dynamic boolean")
+    if not no_thread_cancel_exception:
+        raise NotImplementedError(
+            "no_thread_cancel_exception=False (Temporal's default: raise the "
+            "cancellation into a sync activity's worker thread) is not "
+            "supported — temporal-dbos delivers activity cancellation "
+            "cooperatively. Leave it True (the default here) and observe "
+            "cancellation via activity.is_cancelled() / activity.heartbeat() / "
+            "activity.wait_for_cancelled_sync() (DEVIATIONS D26)."
+        )
 
     def decorator(fn: _F) -> _F:
         from ._internal.conversion import type_hints_from_func

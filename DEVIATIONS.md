@@ -222,6 +222,23 @@ exception is `asyncio.CancelledError` (catch via `is_cancelled_exception`
 for portability; `except temporalio.exceptions.CancelledError` clauses
 won't match).
 
+### D26. Sync-activity cancellation is cooperative-only
+
+Temporal's default for a synchronous (threaded) activity is to *raise* the
+cancellation into the worker thread (`no_thread_cancel_exception=False`, via an
+async thread exception). temporal-dbos never does this: a sync activity runs on
+`asyncio.to_thread` and observes cancellation cooperatively — at its next
+`activity.heartbeat()` (which raises `CancelledError`), or by polling
+`activity.is_cancelled()` / `activity.wait_for_cancelled_sync()`. It therefore
+always behaves as `no_thread_cancel_exception=True`. A sync activity that blocks
+without checking (e.g. a bare `time.sleep`) is not interrupted; it runs to its
+start-to-close timeout. `@activity.defn(no_thread_cancel_exception=False)` —
+explicitly asking for the raise-into-the-thread behavior — raises
+`NotImplementedError` at decoration time rather than silently degrading. (Even
+Temporal's version is best-effort: `PyThreadState_SetAsyncExc` only fires at
+Python bytecode boundaries and won't interrupt a blocking C call.) Async
+activities are a separate story — see D12.
+
 ### D17. Query handlers are synchronous-only
 
 `@workflow.query` rejects `async def` handlers at definition time, where

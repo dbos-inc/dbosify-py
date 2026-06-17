@@ -95,10 +95,9 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     # supported (so signal/query/update have no missing params). Dynamic
     # *workflows* are intentionally rejected, not absent: workflow.defn still
     # accepts ``dynamic`` (raising NotImplementedError, DEVIATIONS D25), so it
-    # is not listed here. versioning_behavior: Phase 4;
-    # no_thread_cancel_exception: Phase 3 (activity cancellation types).
+    # is not listed here. activity.defn now accepts ``no_thread_cancel_exception``
+    # too (rejected when False, DEVIATIONS D26). versioning_behavior: Phase 4.
     "workflow.defn": {"versioning_behavior"},
-    "activity.defn": {"no_thread_cancel_exception"},
     # Info/describe field coverage grows with features (DESIGN §6.8).
     "workflow.Info.__init__": {
         "execution_timeout",
