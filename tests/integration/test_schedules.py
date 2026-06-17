@@ -318,7 +318,17 @@ async def test_fires_on_schedule_with_right_inputs() -> None:
 
         async def four_completed() -> "list[str]":
             rows = await client._dbos_client.list_workflows_async(name=ACTION_WF_NAME)
-            done = [r.workflow_id for r in rows if r.status == "SUCCESS"]
+            # Scope to THIS schedule's action runs (id ``ontime-wf-<epoch>``).
+            # The name query is database-global and `ScheduledGreeter` is shared
+            # with other schedule tests (e.g. test_automatic_cron_fire's
+            # ``auto-wf-*`` runs), whose runs can bleed in when the process-global
+            # scheduler / DB-reset lifecycle overlaps across tests — otherwise a
+            # stray "Hello, Auto!" run fails the assertion below.
+            done = [
+                r.workflow_id
+                for r in rows
+                if r.status == "SUCCESS" and r.workflow_id.startswith("ontime-wf-")
+            ]
             if len(done) < 4:
                 raise AssertionError(f"only {len(done)} fired so far")
             return done

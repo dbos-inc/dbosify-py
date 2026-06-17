@@ -347,11 +347,20 @@ class AsyncActivityHandle:
     checkpointed inbox envelopes to the activity's run.
     """
 
-    def __init__(self, client: "Client", id_or_token: Any) -> None:
+    def __init__(
+        self,
+        client: "Client",
+        id_or_token: Any,
+        data_converter_override: Optional[DataConverter] = None,
+    ) -> None:
         self._client = client
         # The original addressing argument, re-used to rebuild this handle at
         # the root of the outbound chain (DESIGN §6.8).
         self._id_or_token = id_or_token
+        # Per-handle converter override for complete/fail/heartbeat encoding. It
+        # rides on each *Input so it survives the chain-root handle rebuild
+        # (which only carries id_or_token).
+        self._converter = data_converter_override
         self._workflow_id: Optional[str] = None
         self._run_id: Optional[str] = None
         # On the queued path (§6.1.2) the completion goes to the activity
@@ -420,13 +429,17 @@ class AsyncActivityHandle:
                 result=None if result is _arg_unset else result,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                data_converter_override=self._converter,
             )
         )
 
     async def _complete_impl(self, input: CompleteAsyncActivityInput) -> None:
         await self._send(
             inbox.activity_result_envelope(
-                self._activity_id, result=await conversion.encode_value(input.result)
+                self._activity_id,
+                result=await conversion.encode_value(
+                    input.result, input.data_converter_override
+                ),
             )
         )
 
@@ -449,13 +462,15 @@ class AsyncActivityHandle:
                 last_heartbeat_details=last_heartbeat_details,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                data_converter_override=self._converter,
             )
         )
 
     async def _fail_impl(self, input: FailAsyncActivityInput) -> None:
         await self._send(
             inbox.activity_result_envelope(
-                self._activity_id, failure=serialize_failure(input.error)
+                self._activity_id,
+                failure=serialize_failure(input.error, input.data_converter_override),
             )
         )
 
@@ -473,6 +488,7 @@ class AsyncActivityHandle:
                 details=details,
                 rpc_metadata=rpc_metadata,
                 rpc_timeout=rpc_timeout,
+                data_converter_override=self._converter,
             )
         )
 
@@ -480,7 +496,9 @@ class AsyncActivityHandle:
         await self._send(
             inbox.activity_heartbeat_envelope(
                 self._activity_id,
-                await conversion.encode_values(list(input.details)),
+                await conversion.encode_values(
+                    list(input.details), input.data_converter_override
+                ),
             )
         )
 
@@ -761,18 +779,30 @@ def _result_type_for(workflow: Any, result_type: Optional[type]) -> Optional[typ
 def _signal_name(signal: Any) -> str:
     if isinstance(signal, str):
         return signal
-    name = getattr(signal, _registry.SIGNAL_ATTR, None)
-    if name is None:
+    # A dynamic handler's marker value is None (vs absent for a non-handler):
+    # it has no name, so it can only be addressed by string.
+    if not hasattr(signal, _registry.SIGNAL_ATTR):
         raise TypeError(f"{signal!r} is not a @workflow.signal method or name")
+    name = getattr(signal, _registry.SIGNAL_ATTR)
+    if name is None:
+        raise TypeError(
+            "Cannot reference a dynamic signal handler by method; pass the "
+            "signal name as a string"
+        )
     return str(name)
 
 
 def _query_name(query: Any) -> str:
     if isinstance(query, str):
         return query
-    name = getattr(query, _registry.QUERY_ATTR, None)
-    if name is None:
+    if not hasattr(query, _registry.QUERY_ATTR):
         raise TypeError(f"{query!r} is not a @workflow.query method or name")
+    name = getattr(query, _registry.QUERY_ATTR)
+    if name is None:
+        raise TypeError(
+            "Cannot reference a dynamic query handler by method; pass the "
+            "query name as a string"
+        )
     return str(name)
 
 
@@ -780,6 +810,11 @@ def _update_name(update: Any) -> str:
     if isinstance(update, str):
         return update
     if isinstance(update, _UpdateMethod):
+        if update.name is None:
+            raise TypeError(
+                "Cannot reference a dynamic update handler by method; pass the "
+                "update name as a string"
+            )
         return update.name
     raise TypeError(f"{update!r} is not a @workflow.update method or name")
 
@@ -1987,11 +2022,11 @@ class WorkflowHandle:
             # TERMINATED (native kill, only partial checkpoints), TIMED_OUT, and
             # CONTINUED_AS_NEW cannot be faithfully replayed to reconstruct a
             # queryable final state — fail clearly rather than spin up a fork
-            # that diverges (DEVIATIONS D25).
+            # that diverges (DEVIATIONS D27).
             raise WorkflowQueryFailedError(
                 f"cannot query a workflow in state {status.name}: rehydrate-by-"
                 "replay supports COMPLETED/FAILED/CANCELED runs only "
-                "(see DEVIATIONS D25)"
+                "(see DEVIATIONS D27)"
             )
         if reply is None:
             raise WorkflowQueryFailedError(f"query did not complete within {timeout}s")
@@ -2024,11 +2059,11 @@ class WorkflowHandle:
                 # The fork reached a terminal state without serving the query:
                 # the reconstruction diverged (the workflow's code changed since
                 # it ran), or no worker for this type is running in *this*
-                # process to drive the rehydrate (DEVIATIONS D25).
+                # process to drive the rehydrate (DEVIATIONS D27).
                 raise WorkflowQueryFailedError(
                     "rehydrate-by-replay produced no query reply: the workflow's "
                     "code may have changed since it ran, or no worker for this "
-                    "type is running in the querying process (DEVIATIONS D25)"
+                    "type is running in the querying process (DEVIATIONS D27)"
                 )
             return reply
         finally:

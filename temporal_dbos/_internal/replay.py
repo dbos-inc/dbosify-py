@@ -27,7 +27,7 @@ the unique scratch id keeps the guard inert for every other (real) workflow that
 happens to run concurrently.
 
 The same fork-and-guard machinery (``start_replay_fork`` with ``mode``) backs
-**query-on-closed-workflow rehydrate** (DEVIATIONS D25): the client forks a
+**query-on-closed-workflow rehydrate** (DEVIATIONS D27): the client forks a
 closed run in ``mode="rehydrate"``, the forked run replays to its final state
 and then *keeps serving* one query against the reconstructed instance (it is not
 deleted-after-verify but stops on a client signal or the
@@ -181,7 +181,7 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     from .status import WorkflowExecutionStatus
 
     # States that cannot be faithfully reconstructed by replay (mirrors the
-    # query-on-closed gate; DEVIATIONS D25): TERMINATED (native kill) and
+    # query-on-closed gate; DEVIATIONS D27): TERMINATED (native kill) and
     # TIMED_OUT keep only a partial checkpoint history, so re-execution runs
     # past the partial horizon and would look nondeterministic; CONTINUED_AS_NEW
     # would re-enter the continue-as-new path on the throwaway fork. Refuse them
@@ -193,7 +193,7 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     ):
         return ValueError(
             f"cannot replay a {history.status.name} workflow: it cannot be "
-            "faithfully reconstructed from its checkpoints (DEVIATIONS D25)"
+            "faithfully reconstructed from its checkpoints (DEVIATIONS D27)"
         )
 
     handle = await start_replay_fork(
@@ -258,7 +258,7 @@ class Replayer:
     mutate it: ``data_converter``, ``interceptors``, and
     ``workflow_failure_exception_types`` are accepted for API parity but the
     running Worker's values are authoritative (overriding them here would
-    clobber the live Worker, since one Worker owns the process; DEVIATIONS D25).
+    clobber the live Worker, since one Worker owns the process; DEVIATIONS D27).
     Parameters with no temporal-dbos analog (``namespace``, ``build_id``,
     ``identity``, ``workflow_runner``/``unsandboxed_workflow_runner``,
     ``debug_mode``, ``runtime``, ``plugins``, ``workflow_task_executor``, ...)
@@ -290,7 +290,7 @@ class Replayer:
         # re-enters that Worker's ``wf:{type}`` dispatcher, so the types must
         # already be registered. We deliberately do NOT register/replace the
         # definition, nor reset interceptors / converter / failure types: those
-        # are process-global state the live Worker owns (DEVIATIONS D25).
+        # are process-global state the live Worker owns (DEVIATIONS D27).
         self._workflow_names: List[str] = []
         for cls in workflows:
             defn = registry.workflow_definition_of(cls)

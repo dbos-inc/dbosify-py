@@ -68,6 +68,7 @@ from dbos._error import DBOSUnexpectedStepError
 from .. import activity as activity_api
 from .. import exceptions
 from ..common import (
+    RawValue,
     RetryPolicy,
     SearchAttributes,
     SearchAttributeUpdate,
@@ -595,7 +596,11 @@ class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
         return await input.run_fn(self._interp._instance, *input.args)
 
     async def handle_signal(self, input: _wfi.HandleSignalInput) -> None:
-        defn = self._interp._defn.signals.get(input.signal)
+        # Exact match first, then the dynamic (catch-all) handler — a dynamic
+        # handler is keyed ``None`` and called as ``fn(self, name, args)`` (the
+        # args were shaped to ``[name, Sequence[RawValue]]`` in _decode).
+        signals = self._interp._defn.signals
+        defn = signals.get(input.signal) or signals.get(None)
         if defn is None:  # pragma: no cover — _apply_signal resolved it
             return
         result = defn.fn(self._interp._instance, *input.args)
@@ -603,11 +608,15 @@ class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
             await result
 
     async def handle_query(self, input: _wfi.HandleQueryInput) -> Any:
-        defn = self._interp._defn.queries[input.query]
+        queries = self._interp._defn.queries
+        defn = queries.get(input.query) or queries.get(None)
+        assert defn is not None  # _apply_query resolved it before routing
         return defn.fn(self._interp._instance, *input.args)
 
     def handle_update_validator(self, input: _wfi.HandleUpdateInput) -> None:
-        defn = self._interp._defn.updates[input.update]
+        updates = self._interp._defn.updates
+        defn = updates.get(input.update) or updates.get(None)
+        assert defn is not None  # _apply_update resolved it before routing
         if defn.validator is None:  # pragma: no cover — only routed when set
             return
         # Synchronous, read-only, against current state; a rejected update
@@ -619,7 +628,9 @@ class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
             self._interp._read_only = False
 
     async def handle_update_handler(self, input: _wfi.HandleUpdateInput) -> Any:
-        defn = self._interp._defn.updates[input.update]
+        updates = self._interp._defn.updates
+        defn = updates.get(input.update) or updates.get(None)
+        assert defn is not None  # _apply_update resolved it before routing
         result = defn.fn(self._interp._instance, *input.args)
         if asyncio.iscoroutine(result):
             result = await result
@@ -2237,13 +2248,21 @@ class Interpreter(_Runtime):
 
     async def _decode_message_args(self, envelope: inbox.Envelope) -> inbox.Envelope:
         kind = envelope["kind"]
+        name = envelope["name"]
         defn: Any = None
         if kind == "signal":
-            defn = self._defn.signals.get(envelope["name"])
+            defn = self._defn.signals.get(name) or self._defn.signals.get(None)
         elif kind == "update":
-            defn = self._defn.updates.get(envelope["name"])
+            defn = self._defn.updates.get(name) or self._defn.updates.get(None)
         elif kind == "query":
-            defn = self._defn.queries.get(envelope["name"])
+            defn = self._defn.queries.get(name) or self._defn.queries.get(None)
+        if defn is not None and defn.name is None:
+            # Dynamic (catch-all) handler: deliver (name, Sequence[RawValue]) —
+            # the raw payloads wrapped untouched so the handler converts them
+            # itself via workflow.payload_converter().
+            raw_args = envelope.get("args", [])
+            raw = await conversion.decode_values(raw_args, [RawValue] * len(raw_args))
+            return {**envelope, "args": [name, raw]}
         arg_types = defn.arg_types if defn is not None else None
         decoded = await conversion.decode_values(envelope.get("args", []), arg_types)
         return {**envelope, "args": decoded}
@@ -2392,7 +2411,9 @@ class Interpreter(_Runtime):
             self._vloop.call_soon(self._primary_task.cancel)
 
     async def _apply_signal(self, envelope: inbox.Envelope) -> None:
-        defn = self._defn.signals.get(envelope["name"])
+        # Exact match first, then the dynamic (catch-all) handler if one is
+        # registered (name key ``None``).
+        defn = self._defn.signals.get(envelope["name"]) or self._defn.signals.get(None)
         if defn is None:
             # Buffered with its *encoded* args for delivery if a handler is
             # registered later (dynamic registration arrives in Phase 2) or, more
@@ -2412,9 +2433,14 @@ class Interpreter(_Runtime):
         # the handler task gets ready Payloads.
         headers = await conversion.decode_headers(envelope.get("headers"))
         self._spawn_handler(
-            self._run_signal_handler(defn.name, decoded["args"], headers),
+            # Pass the incoming signal name (not defn.name, which is None for a
+            # dynamic handler): the inbound chain re-resolves it, and an
+            # interceptor sees the real name.
+            self._run_signal_handler(envelope["name"], decoded["args"], headers),
             kind="signal",
-            name=defn.name,
+            # A dynamic handler has no name of its own; label it by the
+            # incoming signal name (for unfinished-handler warnings).
+            name=defn.name or envelope["name"],
             policy=defn.unfinished_policy,
         )
 
@@ -2524,7 +2550,7 @@ class Interpreter(_Runtime):
         self._seen_update_ids.add(update_id)
         reply_key = inbox.update_result_key(update_id)
         acceptance_key = inbox.update_acceptance_key(update_id)
-        defn = self._defn.updates.get(envelope["name"])
+        defn = self._defn.updates.get(envelope["name"]) or self._defn.updates.get(None)
         if defn is None:
             failure = exceptions.ApplicationError(
                 f"update handler {envelope['name']!r} not found",
@@ -2571,10 +2597,17 @@ class Interpreter(_Runtime):
         self._reply(acceptance_key, status="accepted")
         self._spawn_handler(
             self._run_update_handler(
-                defn.name, envelope["args"], reply_key, update_headers
+                # Incoming update name (not defn.name, None for a dynamic
+                # handler): the inbound chain re-resolves it.
+                envelope["name"],
+                envelope["args"],
+                reply_key,
+                update_headers,
             ),
             kind="update",
-            name=defn.name,
+            # A dynamic handler has no name of its own; label it by the
+            # incoming update name.
+            name=defn.name or envelope["name"],
             policy=defn.unfinished_policy,
             handler_id=envelope["update_id"],
         )
@@ -2613,7 +2646,7 @@ class Interpreter(_Runtime):
 
     async def _apply_query(self, envelope: inbox.Envelope) -> None:
         reply_key = inbox.query_result_key(envelope["request_id"])
-        defn = self._defn.queries.get(envelope["name"])
+        defn = self._defn.queries.get(envelope["name"]) or self._defn.queries.get(None)
         if defn is None:
             failure = exceptions.ApplicationError(
                 f"query handler {envelope['name']!r} not found",

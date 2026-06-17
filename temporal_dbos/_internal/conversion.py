@@ -86,11 +86,16 @@ def reset_converter() -> None:
     set_converter(None)
 
 
-async def encode_values(values: Sequence[Any]) -> List[Dict[str, Any]]:
+async def encode_values(
+    values: Sequence[Any], converter: Optional[DataConverter] = None
+) -> List[Dict[str, Any]]:
     """Convert user values to embeddable payload dicts (codec-encoding the
-    bytes when a codec is configured)."""
-    inline = _active_converter.payload_codec is None
-    payloads = await _active_converter.encode(list(values))
+    bytes when a codec is configured). ``converter`` overrides the process
+    converter for this call (e.g. an ``AsyncActivityHandle`` per-handle
+    data converter)."""
+    conv = converter if converter is not None else _active_converter
+    inline = conv.payload_codec is None
+    payloads = await conv.encode(list(values))
     return [_payload_to_dict(p, inline_json=inline) for p in payloads]
 
 
@@ -111,9 +116,12 @@ async def decode_values(
     return await _active_converter.decode(payloads, hints)
 
 
-async def encode_value(value: Any) -> Dict[str, Any]:
-    """Encode a single user value to an embeddable payload dict."""
-    return (await encode_values([value]))[0]
+async def encode_value(
+    value: Any, converter: Optional[DataConverter] = None
+) -> Dict[str, Any]:
+    """Encode a single user value to an embeddable payload dict. ``converter``
+    overrides the process converter for this call."""
+    return (await encode_values([value], converter))[0]
 
 
 async def decode_value(value: Any, type_hint: Optional[type] = None) -> Any:
@@ -122,11 +130,15 @@ async def decode_value(value: Any, type_hint: Optional[type] = None) -> Any:
     return (await decode_values([value], hints))[0]
 
 
-def encode_values_sync(values: Sequence[Any]) -> List[Dict[str, Any]]:
+def encode_values_sync(
+    values: Sequence[Any], converter: Optional[DataConverter] = None
+) -> List[Dict[str, Any]]:
     """Payload-only (no codec) encode for the rare sync caller — the Phase-0
-    dispatcher helpers. Codecs are async, so they do not apply here; these
-    helpers are internal/test-only (superseded by the ``Client`` facade)."""
-    payloads = _active_converter.payload_converter.to_payloads(list(values))
+    dispatcher helpers and failure-detail encoding. Codecs are async, so they
+    do not apply here. ``converter`` overrides the process converter (e.g. a
+    per-handle async-activity converter encoding failure details)."""
+    conv = converter if converter is not None else _active_converter
+    payloads = conv.payload_converter.to_payloads(list(values))
     return [_payload_to_dict(p, inline_json=True) for p in payloads]
 
 

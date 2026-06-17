@@ -593,7 +593,9 @@ def value_to_type(
                     ) from err
         return hint(**field_values)
 
-    # Pydantic v1 model (deprecated; v2 users use contrib.pydantic).
+    # Pydantic v1 model (``parse_obj``). Pydantic v2 models are not specially
+    # supported by the default converter (no ``contrib.pydantic`` — configure a
+    # custom ``DataConverter`` for them; DESIGN §6.9).
     parse_obj_attr = inspect.getattr_static(hint, "parse_obj", None)
     if isinstance(parse_obj_attr, (classmethod, staticmethod)):
         if not isinstance(value, dict):

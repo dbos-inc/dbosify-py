@@ -224,10 +224,14 @@ class SerializedContinueAsNew(Exception):
         self.envelope = envelope
 
 
-def serialize_failure(exc: BaseException) -> FailureEnvelope:
+def serialize_failure(
+    exc: BaseException, converter: Optional[Any] = None
+) -> FailureEnvelope:
     # Encode embedded user values (details, heartbeat details) through the
     # converter so failure envelopes are JSON-safe. Sync (no codec — like
     # query results); serialize_failure runs in deep sync call sites.
+    # ``converter`` overrides the process converter (an AsyncActivityHandle
+    # per-handle data converter when failing an activity).
     from . import conversion
 
     env: FailureEnvelope
@@ -236,7 +240,7 @@ def serialize_failure(exc: BaseException) -> FailureEnvelope:
             "cls": "ApplicationError",
             "message": exc.message,
             "type": exc.type,
-            "details": conversion.encode_values_sync(list(exc.details)),
+            "details": conversion.encode_values_sync(list(exc.details), converter),
             "non_retryable": exc.non_retryable,
             "category": int(exc.category),
             "next_retry_delay": (
@@ -249,13 +253,13 @@ def serialize_failure(exc: BaseException) -> FailureEnvelope:
         env = {
             "cls": "CancelledError",
             "message": exc.message,
-            "details": conversion.encode_values_sync(list(exc.details)),
+            "details": conversion.encode_values_sync(list(exc.details), converter),
         }
     elif isinstance(exc, exceptions.TerminatedError):
         env = {
             "cls": "TerminatedError",
             "message": exc.message,
-            "details": conversion.encode_values_sync(list(exc.details)),
+            "details": conversion.encode_values_sync(list(exc.details), converter),
         }
     elif isinstance(exc, exceptions.TimeoutError):
         env = {
@@ -263,7 +267,7 @@ def serialize_failure(exc: BaseException) -> FailureEnvelope:
             "message": exc.message,
             "timeout_type": int(exc.type) if exc.type is not None else None,
             "last_heartbeat_details": conversion.encode_values_sync(
-                list(exc.last_heartbeat_details)
+                list(exc.last_heartbeat_details), converter
             ),
         }
     elif isinstance(exc, exceptions.ActivityError):
@@ -303,7 +307,7 @@ def serialize_failure(exc: BaseException) -> FailureEnvelope:
     if exc.__traceback__ is not None:
         env["stack_trace"] = "".join(traceback.format_tb(exc.__traceback__))
     cause = exc.__cause__
-    env["cause"] = serialize_failure(cause) if cause is not None else None
+    env["cause"] = serialize_failure(cause, converter) if cause is not None else None
     return env
 
 

@@ -21,7 +21,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import (
-    TYPE_CHECKING,
     Any,
     Callable,
     Dict,
@@ -37,9 +36,7 @@ from typing import (
 
 from . import exceptions
 from ._internal import registry as _registry
-
-if TYPE_CHECKING:
-    from .converter import PayloadConverter
+from .converter import PayloadConverter
 
 __all__ = [
     "Info",
@@ -55,12 +52,14 @@ __all__ = [
 ]
 
 
-def payload_converter() -> "PayloadConverter":
-    """The active payload converter.
+def payload_converter() -> PayloadConverter:
+    """The payload converter for this activity (the process's active
+    ``DataConverter``'s payload converter), mirroring
+    ``temporalio.activity.payload_converter``.
 
-    Use it to encode/decode interceptor header values, mirroring temporalio:
-    ``payload_converter().to_payload(value)`` /
-    ``payload_converter().from_payload(header)``.
+    Use it to convert the ``RawValue`` arguments a dynamic activity receives
+    (``payload_converter().from_payload(args[0].payload, MyType)``) or to
+    encode/decode interceptor header values (``to_payload``/``from_payload``).
     """
     from ._internal import conversion
 
@@ -79,24 +78,61 @@ def defn(fn: _F) -> _F: ...
 
 
 @overload
-def defn(*, name: Optional[str] = None) -> Callable[[_F], _F]: ...
+def defn(
+    *,
+    name: Optional[str] = None,
+    no_thread_cancel_exception: bool = True,
+    dynamic: bool = False,
+) -> Callable[[_F], _F]: ...
 
 
 def defn(
-    fn: Optional[_F] = None, *, name: Optional[str] = None
+    fn: Optional[_F] = None,
+    *,
+    name: Optional[str] = None,
+    no_thread_cancel_exception: bool = True,
+    dynamic: bool = False,
 ) -> Union[_F, Callable[[_F], _F]]:
-    """Decorator for activity functions (sync or async)."""
+    """Decorator for activity functions (sync or async).
+
+    ``dynamic=True`` makes this the catch-all activity, invoked for any
+    activity type with no exact registration; it must accept a single
+    ``Sequence[RawValue]`` and cannot also set ``name`` (§6.1.2).
+
+    ``no_thread_cancel_exception`` defaults to ``True`` (temporalio's default is
+    ``False``): temporal-dbos delivers cancellation to sync activities
+    *cooperatively* and never raises into their worker thread, so it always
+    behaves as ``True``. Setting it ``False`` — asking for Temporal's
+    raise-into-the-thread behavior — raises ``NotImplementedError`` rather than
+    silently doing something else (DEVIATIONS D26).
+    """
+    if name is not None and dynamic:
+        raise RuntimeError("Cannot provide name and dynamic boolean")
+    if not no_thread_cancel_exception:
+        raise NotImplementedError(
+            "no_thread_cancel_exception=False (Temporal's default: raise the "
+            "cancellation into a sync activity's worker thread) is not "
+            "supported — temporal-dbos delivers activity cancellation "
+            "cooperatively. Leave it True (the default here) and observe "
+            "cancellation via activity.is_cancelled() / activity.heartbeat() / "
+            "activity.wait_for_cancelled_sync() (DEVIATIONS D26)."
+        )
 
     def decorator(fn: _F) -> _F:
         from ._internal.conversion import type_hints_from_func
 
         arg_types, ret_type = type_hints_from_func(fn)
+        if dynamic:
+            _registry.validate_dynamic_activity_sig(arg_types)
         defn = _registry.ActivityDefinition(
-            name=name if name is not None else fn.__name__,
+            name=(
+                fn.__name__ if dynamic else (name if name is not None else fn.__name__)
+            ),
             fn=fn,
             is_async=inspect.iscoroutinefunction(fn),
             arg_types=arg_types,
             ret_type=ret_type,
+            dynamic=dynamic,
         )
         setattr(fn, _registry.ACTIVITY_DEFN_ATTR, defn)
         return fn
