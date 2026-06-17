@@ -10,8 +10,9 @@ queued path, applied by whichever worker actually runs the activity.
   workflow <wf_id>         workflows-only Worker that starts the workflow and
                            prints ``RESULT <text>``.
 
-Cooperating workers share a DBOS application version (the test pins
-``DBOS__APPVERSION``); each role gets a distinct ``DBOS__VMID``.
+Cooperating workers share a DBOS application version (the Worker pins a stable
+default, so the two roles agree without env setup); each role gets a distinct
+``DBOS__VMID``.
 """
 
 import asyncio

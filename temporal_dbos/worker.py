@@ -84,8 +84,34 @@ __all__ = [
 
 logger = logging.getLogger("temporal_dbos.worker")
 
+# A stable default DBOS application version. DBOS scopes workflow recovery and
+# queue dequeuing by ``application_version`` and otherwise auto-computes it from
+# a hash of the registered code — so any code change would change the version
+# and strand every in-flight workflow under the old one (a new-code worker never
+# recovers or re-dequeues it), cooperating workers that register different
+# function sets (e.g. a workflow worker and an activity-only worker) would never
+# share a version, and ``workflow.patched()`` — whose whole purpose is to let
+# redeployed code keep serving pre-patch runs — would never reach those runs.
+# Pinning a constant makes all workers agree by default and deploys preserve
+# in-flight work; a genuinely incompatible change then surfaces as a replay
+# ``NondeterminismError`` (the same contract as Temporal, managed with
+# ``workflow.patched()``). See DESIGN §6.8 / DEVIATIONS D28. Distinct apps
+# sharing one database should set ``application_version`` explicitly to keep
+# their versions apart.
+DEFAULT_APP_VERSION = "0.1"
+
 # The one live Worker in this process (see module docstring).
 _live_worker: Optional["Worker"] = None
+
+
+def _with_default_app_version(config: DBOSConfig) -> DBOSConfig:
+    """Pin :data:`DEFAULT_APP_VERSION` unless the caller set
+    ``application_version`` in the ``DBOSConfig``. Pass it as ``None`` to opt
+    into DBOS's code-hash auto-versioning instead.
+    """
+    if "application_version" in config:
+        return config
+    return {**config, "application_version": DEFAULT_APP_VERSION}
 
 
 def _reset_for_tests() -> None:
@@ -151,6 +177,9 @@ class Worker:
         # JSON transport (replaces DBOS's default pickle). All processes on the
         # database must share this serializer's name (see serializer.py).
         config = {**config, "serializer": TEMPORAL_SERIALIZER}
+        # Pin a stable app version so redeploys don't strand in-flight workflows
+        # and workflow.patched() actually reaches pre-patch runs (DEFAULT_APP_VERSION).
+        config = _with_default_app_version(config)
         DBOS(config=config)
         _dispatcher.register_worker(
             workflows=workflows,

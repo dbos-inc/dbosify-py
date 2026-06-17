@@ -12,9 +12,9 @@ executes on a different worker than the workflow that calls it:
   workflow resume <wf_id>  same, but re-attaches to an existing run (recovery).
 
 Cooperating workers share a DBOS application version (DBOS scopes queue
-dequeuing by it) — the test sets ``DBOS__APPVERSION``. Each role gets a distinct
-``DBOS__VMID`` so recovery is queue-scoped (a restarted worker recovers only its
-own queue's workflows).
+dequeuing by it); the Worker pins a stable default, so the two roles agree
+without env setup. Each role gets a distinct ``DBOS__VMID`` so recovery is
+queue-scoped (a restarted worker recovers only its own queue's workflows).
 """
 
 import asyncio

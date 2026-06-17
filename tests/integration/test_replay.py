@@ -143,6 +143,16 @@ class FailWf:
         raise ApplicationError("intentional boom", type="Boom")
 
 
+@workflow.defn
+class PatchedReplayWf:
+    @workflow.run
+    async def run(self, x: str) -> str:
+        if workflow.patched("v2"):
+            r: str = await workflow.execute_activity(act_a, x, **_OPTS)  # type: ignore[arg-type]
+            return f"new:{r}"
+        return "old"
+
+
 def _worker(*workflows: type) -> Worker:
     return Worker(
         default_config(),
@@ -171,6 +181,29 @@ async def test_replay_clean_no_failure() -> None:
             assert history.step_count > 0
 
             result = await Replayer(workflows=[ReplayWf]).replay_workflow(history)
+            assert result.replay_failure is None
+        finally:
+            dbos_client.destroy()
+
+
+async def test_replay_patched_workflow_clean() -> None:
+    # A workflow that took the patched (newer) path recorded a patch marker.
+    # Replaying it must read that marker back so patched() still returns True and
+    # the patched activity lines up at its recorded checkpoint — a clean verify,
+    # not a false divergence (exercises the patch branch's replay-horizon guard).
+    async with _worker(PatchedReplayWf):
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = await Client.connect(dbos_client)
+            handle = await client.start_workflow(
+                PatchedReplayWf.run, "hi", id="rp-patched", task_queue=TASK_QUEUE
+            )
+            assert await handle.result() == "new:a:hi"
+            history = await handle.fetch_history()
+
+            result = await Replayer(workflows=[PatchedReplayWf]).replay_workflow(
+                history
+            )
             assert result.replay_failure is None
         finally:
             dbos_client.destroy()
