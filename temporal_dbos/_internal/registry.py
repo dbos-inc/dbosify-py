@@ -186,6 +186,18 @@ def set_worker_interceptors(interceptors: Sequence[Any]) -> None:
     worker_interceptors = tuple(interceptors)
 
 
+# The task queue this process's Worker dequeues from (one Worker per process).
+# A workflow always runs on the worker that dequeued it, so this is its task
+# queue — surfaced as workflow.info()/activity.info().task_queue. None when no
+# Worker registered a queue (the in-process Phase-0 dispatcher harness).
+worker_task_queue: Optional[str] = None
+
+
+def set_worker_task_queue(task_queue: Optional[str]) -> None:
+    global worker_task_queue
+    worker_task_queue = task_queue
+
+
 def workflow_definition_of(cls: Type[Any]) -> WorkflowDefinition:
     defn = cls.__dict__.get(WORKFLOW_DEFN_ATTR)
     if defn is None:

@@ -4,6 +4,7 @@ import asyncio
 from typing import Any, List
 
 from temporal_dbos import activity
+from temporal_dbos.common import Priority
 from temporal_dbos.testing import ActivityEnvironment
 
 
@@ -45,3 +46,17 @@ def test_cancellation() -> None:
     env = ActivityEnvironment()
     env.cancel()
     assert env.run(cancellable_activity) == "cancelled"
+
+
+def test_default_info_parity_fields() -> None:
+    """The fields cleaned out of the parity ledger carry their honest defaults
+    on a default-constructed Info (single-namespace, FIFO/no-priority)."""
+    info = ActivityEnvironment().info
+    assert info.namespace == "default"
+    assert info.workflow_namespace == "default"
+    assert info.priority is Priority.default
+    assert info.activity_run_id is None
+    # Timeouts/retry are unset until carried in from a real schedule.
+    assert info.start_to_close_timeout is None
+    assert info.schedule_to_close_timeout is None
+    assert info.retry_policy is None

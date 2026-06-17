@@ -47,7 +47,9 @@ from ._internal import registry as _registry
 
 if TYPE_CHECKING:
     from ._internal.workflow_interceptor import WorkflowOutboundInterceptor
+    from .converter import Payload
 from .common import (
+    Priority,
     RetryPolicy,
     SearchAttributes,
     SearchAttributeUpdate,
@@ -86,6 +88,7 @@ __all__ = [
     "in_workflow",
     "info",
     "init",
+    "ParentInfo",
     "logger",
     "LoggerAdapter",
     "memo",
@@ -538,6 +541,18 @@ class ChildWorkflowCancellationType(IntEnum):
 
 
 @dataclass(frozen=True)
+class ParentInfo:
+    """Information about the parent workflow, mirroring
+    ``temporalio.workflow.ParentInfo``. Present on :py:attr:`Info.parent`
+    only when this run was started as a child of a workflow on a *different*
+    run chain (a same-chain link is a continuation, not a parent)."""
+
+    namespace: str
+    run_id: str
+    workflow_id: str
+
+
+@dataclass(frozen=True)
 class Info:
     """Information about the running workflow (Phase 0 subset of
     temporalio's ``workflow.Info``).
@@ -549,7 +564,18 @@ class Info:
     # continuation), else None.
     continued_run_id: Optional[str] = None
     cron_schedule: Optional[str] = None
+    # The run id of the first execution in this run chain (run 0's DBOS id =
+    # the Temporal workflow id). Derived from our run-chain id scheme (§6.4).
+    first_execution_run_id: str = ""
+    # The run's interceptor headers, decoded to Payloads (the same mapping
+    # surfaced to workflow interceptors as ExecuteWorkflowInput.headers).
+    headers: Mapping[str, "Payload"] = field(default_factory=dict)
     namespace: str = "default"
+    # The parent workflow, when started cross-chain as a child; None otherwise.
+    parent: Optional[ParentInfo] = None
+    # Priority is accepted-and-inert (DBOS queues are FIFO); always the default
+    # instance, which is what temporalio returns for an unset priority.
+    priority: Priority = Priority.default
     retry_policy: Optional[RetryPolicy] = None
     run_id: str = ""
     run_timeout: Optional[timedelta] = None
@@ -563,6 +589,10 @@ class Info:
     task_queue: str = ""
     typed_search_attributes: TypedSearchAttributes = TypedSearchAttributes.empty
     workflow_id: str = ""
+    # The run's initialization time. We have a single start timestamp per run
+    # (no separate "first task" vs "initialization" distinction), so this
+    # equals :py:attr:`start_time`.
+    workflow_start_time: datetime = datetime.fromtimestamp(0)
     workflow_type: str = ""
 
     def get_current_history_length(self) -> int:

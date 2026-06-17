@@ -653,7 +653,10 @@ async def test_children_of_continued_runs() -> None:
         assert links == [None, child_id]
         child_run0 = client.get_workflow_handle(child_id, run_id=child_id)
         description = await child_run0.describe()
-        assert description.parent_id == "can-host--r1"
+        # The parent's *workflow id* is the chain base "can-host"; the specific
+        # run that started the child (run 1, created by CAN) is its parent_run_id.
+        assert description.parent_id == "can-host"
+        assert description.parent_run_id == "can-host--r1"
         # The child's chain extended under its own id.
         hopped = client.get_workflow_handle(child_id)
         assert (await hopped.describe()).run_id == f"{child_id}--r1"

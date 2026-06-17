@@ -27,6 +27,11 @@ from temporal_dbos.client import (
     ScheduleUpdateInput,
     WorkflowExecutionStatus,
 )
+from temporal_dbos.common import (
+    SearchAttributeKey,
+    SearchAttributePair,
+    TypedSearchAttributes,
+)
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 from tests.harness import retry_until_success_async
@@ -222,6 +227,50 @@ async def test_trigger_runs_action() -> None:
         handle = await client.create_schedule("sched-trigger", _interval_schedule())
         await handle.trigger()
         assert await _wait_for_action(client) == "Hello, World!"
+        await handle.delete()
+
+
+async def test_action_memo_and_search_attributes_propagate() -> None:
+    """A scheduled start applies the action's memo + typed search attributes to
+    the workflow it launches (the memo silent-drop fix + SA propagation), and
+    describe() round-trips the action's typed search attributes."""
+    kw = SearchAttributeKey.for_keyword("SchedKeyword")
+    schedule = Schedule(
+        action=ScheduleActionStartWorkflow(
+            ScheduledGreeter.run,
+            "World",
+            id="greeter-meta",
+            task_queue=TASK_QUEUE,
+            memo={"team": "sched"},
+            typed_search_attributes=TypedSearchAttributes(
+                [SearchAttributePair(kw, "scheduled")]
+            ),
+        ),
+        spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(minutes=2))]),
+    )
+    async with _env() as client:
+        handle = await client.create_schedule("sched-meta", schedule)
+        # describe() round-trips the action's typed search attributes.
+        desc = await handle.describe()
+        action = desc.schedule.action
+        assert isinstance(action, ScheduleActionStartWorkflow)
+        assert action.typed_search_attributes.get(kw) == "scheduled"
+
+        await handle.trigger()
+
+        async def _started() -> None:
+            rows = await client._dbos_client.list_workflows_async(name=ACTION_WF_NAME)
+            for row in rows:
+                if row.status == "SUCCESS":
+                    started = await client.get_workflow_handle(
+                        row.workflow_id
+                    ).describe()
+                    assert await started.memo() == {"team": "sched"}
+                    assert started.typed_search_attributes.get(kw) == "scheduled"
+                    return
+            raise AssertionError("scheduled action has not completed yet")
+
+        await retry_until_success_async(_started)
         await handle.delete()
 
 
