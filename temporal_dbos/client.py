@@ -66,6 +66,11 @@ from ._internal.client_interceptor import (
     UnpauseScheduleInput,
     UpdateScheduleInput,
 )
+from ._internal.namespaces import (
+    DEFAULT_NAMESPACE,
+    namespace_from_schema,
+    namespace_schema,
+)
 from ._internal.payloads import (
     RunMeta,
     SerializedContinueAsNew,
@@ -610,6 +615,13 @@ class WithStartWorkflowOperation:
         """The handle for the started (or attached-to) workflow. Available
         once the operation has been used, even if the update failed."""
         if self._handle is None:
+            if self._used:
+                # Used, but the workflow start itself raised (e.g. a FAIL /
+                # REJECT_DUPLICATE conflict), so no run was started/attached.
+                raise RuntimeError(
+                    "WithStartWorkflowOperation was used but the workflow "
+                    "start did not complete; no handle is available"
+                )
             raise RuntimeError(
                 "WithStartWorkflowOperation has not been used in an "
                 "update-with-start call yet"
@@ -866,7 +878,9 @@ def _to_datetime(epoch_ms: Optional[int]) -> Optional[datetime]:
 
 
 def _execution_from_status(
-    status: WorkflowStatus, cls: Type[WorkflowExecution] = WorkflowExecution
+    status: WorkflowStatus,
+    cls: Type[WorkflowExecution] = WorkflowExecution,
+    namespace: str = DEFAULT_NAMESPACE,
 ) -> WorkflowExecution:
     """Synthesize a :class:`WorkflowExecution` (or a subclass — ``describe()``
     passes :class:`WorkflowExecutionDescription`) from a DBOS ``WorkflowStatus``.
@@ -893,7 +907,7 @@ def _execution_from_status(
     created = _to_datetime(status.created_at)
     execution = cls(
         id=ids.parse_run(dbos_id)[0],
-        namespace="default",
+        namespace=namespace,
         run_id=dbos_id,
         workflow_type=workflow_type,
         task_queue=status.queue_name,
@@ -1002,7 +1016,10 @@ class WorkflowExecutionAsyncIterator:
             if (r.name or "").startswith("wf:")
             and (self._post_filter is None or self._post_filter(r))
         ]
-        self._current_page = [_execution_from_status(r) for r in survivors]
+        self._current_page = [
+            _execution_from_status(r, namespace=self._client._namespace)
+            for r in survivors
+        ]
         self._current_page_index = 0
         # A full raw page means there may be more rows; a short one is the end.
         # ``size > 0`` guards a 0-page-size caller against an infinite loop.
@@ -1035,11 +1052,14 @@ class WorkflowExecutionAsyncIterator:
 
 
 class Client:
-    """Client for accessing temporal-dbos, wrapping a ``dbos.DBOSClient``.
+    """Client for accessing temporal-dbos.
 
-    The DBOSClient carries the connection (database URL, system schema), so
-    namespacing rides on its ``dbos_system_schema``. Construct directly or
-    via the async :py:meth:`connect` (kept for temporalio shape).
+    Use :py:meth:`connect` — ``Client.connect(system_database_url,
+    namespace=...)`` builds the underlying ``dbos.DBOSClient`` pointed at the
+    namespace's schema (DEVIATIONS D1), so you state the namespace once and
+    never touch ``dbos_system_schema``. For full control of the DBOSClient
+    (custom engine/pool), build it yourself and use the constructor, where the
+    DBOSClient's schema *is* the namespace.
     """
 
     def __init__(
@@ -1050,7 +1070,21 @@ class Client:
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
+        """Low-level constructor over a caller-built ``dbos.DBOSClient``. The
+        client's **namespace is its DBOSClient's schema** (DEVIATIONS D1) — the
+        single source of truth — so build the DBOSClient with
+        ``dbos_system_schema=namespace_schema(<namespace>)``, or just use
+        :py:meth:`connect`, which takes a namespace and builds the DBOSClient
+        for you. The caller owns this DBOSClient's lifecycle.
+        """
         self._dbos_client = dbos_client
+        # The DBOSClient's schema *is* the namespace (no separate, redundant
+        # namespace argument to keep in sync). Raises if it isn't a temporal
+        # namespace schema.
+        self._namespace = namespace_from_schema(dbos_client._sys_db.schema)
+        # connect() flips this for the DBOSClient it builds, so close() disposes
+        # it; a caller-supplied DBOSClient (this path) is the caller's to close.
+        self._owns_dbos_client = False
         self._data_converter = data_converter
         self._default_query_reject_condition = default_workflow_query_reject_condition
         # Build the outbound interceptor chain: user interceptors fold (in
@@ -1072,22 +1106,57 @@ class Client:
         """Data converter used by this client."""
         return self._data_converter
 
+    @property
+    def namespace(self) -> str:
+        """Temporal namespace this client operates in (its DBOS schema)."""
+        return self._namespace
+
     @classmethod
     async def connect(
         cls,
-        dbos_client: DBOSClient,
+        system_database_url: str,
         *,
+        namespace: str = DEFAULT_NAMESPACE,
         data_converter: DataConverter = DataConverter.default,
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
-        """Create a client from a ``dbos.DBOSClient``."""
-        return cls(
+        """Connect to ``system_database_url`` in ``namespace`` (DEVIATIONS D1).
+
+        Builds the underlying ``dbos.DBOSClient`` for you — pointed at the
+        namespace's schema, with the JSON serializer — so the namespace is
+        stated exactly once and you never touch ``dbos_system_schema``. The
+        returned client owns that DBOSClient; :py:meth:`close` (or
+        ``async with``) disposes it. For full control over the DBOSClient
+        (custom engine/pool), build it yourself and use the constructor.
+        """
+        dbos_client = await asyncio.to_thread(
+            DBOSClient,
+            system_database_url=system_database_url,
+            dbos_system_schema=namespace_schema(namespace),
+            serializer=TEMPORAL_SERIALIZER,
+        )
+        client = cls(
             dbos_client,
             data_converter=data_converter,
             interceptors=interceptors,
             default_workflow_query_reject_condition=default_workflow_query_reject_condition,
         )
+        client._owns_dbos_client = True
+        return client
+
+    async def close(self) -> None:
+        """Dispose the underlying DBOSClient if this client built it (via
+        :py:meth:`connect`). A no-op for a caller-supplied DBOSClient — that one
+        is the caller's to close."""
+        if self._owns_dbos_client:
+            await asyncio.to_thread(self._dbos_client.destroy)
+
+    async def __aenter__(self) -> "Client":
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> None:
+        await self.close()
 
     # ------------------------------------------------------------------
     # Workflow start
@@ -1122,6 +1191,7 @@ class Client:
         priority: Optional[Any] = None,
         versioning_override: Optional[VersioningOverride] = None,
         request_id: Optional[str] = None,
+        _with_start_update: Optional[Tuple[Any, str, str]] = None,
         **unsupported: Any,
     ) -> "WorkflowHandle":
         """Start a workflow and return its handle.
@@ -1179,6 +1249,7 @@ class Client:
             links=[],
             request_id=request_id,
             versioning_override=versioning_override,
+            with_start_update=_with_start_update,
         )
         return await self._impl.start_workflow(input)
 
@@ -1253,6 +1324,28 @@ class Client:
         # into the run as ExecuteWorkflowInput.headers (DEVIATIONS D24).
         meta.headers = (await conversion.encode_headers(input.headers)) or None
 
+        # Messages to deliver with the start — Temporal's atomic
+        # signal-/update-with-start (DEVIATIONS D7): the start signal and/or an
+        # update request, each ``(envelope, topic, idempotency_key)``. Built
+        # before conflict resolution so they ride whichever path the start
+        # takes: bundled into the enqueue transaction on a fresh start, or sent
+        # to the run we attach to under USE_EXISTING.
+        with_start_msgs: List[Tuple[Any, str, Optional[str]]] = []
+        if start_signal is not None:
+            with_start_msgs.append(
+                (
+                    inbox.signal_envelope(
+                        start_signal,
+                        await conversion.encode_values(start_signal_args),
+                        headers=await conversion.encode_headers(input.headers),
+                    ),
+                    inbox.INBOX_TOPIC,
+                    None,
+                )
+            )
+        if input.with_start_update is not None:
+            with_start_msgs.append(input.with_start_update)
+
         current = await self._current_run(id)
         run_index = 0
         if current is not None:
@@ -1261,6 +1354,12 @@ class Client:
                 # Conflict policies (vs a RUNNING run). There is an inherent
                 # TOCTOU window here, accepted for v1 (DESIGN §6.4).
                 if id_conflict_policy == WorkflowIDConflictPolicy.USE_EXISTING:
+                    # Attaching to the running run: deliver the with-start
+                    # messages to it (there is no enqueue to bundle with).
+                    for env, topic, idem in with_start_msgs:
+                        await self._dbos_client.send_async(
+                            current_status.workflow_id, env, topic, idempotency_key=idem
+                        )
                     return WorkflowHandle(
                         self,
                         id,
@@ -1305,20 +1404,23 @@ class Client:
             options["delay_seconds"] = start_delay.total_seconds()
         if meta.attributes is not None:
             options["attributes"] = meta.attributes
-        await self._dbos_client.enqueue_async(
-            options, wrap_input(await conversion.encode_values(workflow_args), meta)
-        )
+        payload = wrap_input(await conversion.encode_values(workflow_args), meta)
+        # Fresh start: bundle the enqueue and any with-start messages into one
+        # system-database transaction so a crash can't leave the run started
+        # without them. The commit runs in a thread, mirroring how
+        # enqueue_async/send_async bridge to the sync DBOS client.
+        if not with_start_msgs:
+            await self._dbos_client.enqueue_async(options, payload)
+        else:
+            dbos_client = self._dbos_client
 
-        if start_signal is not None:
-            await self._dbos_client.send_async(
-                dbos_id,
-                inbox.signal_envelope(
-                    start_signal,
-                    await conversion.encode_values(start_signal_args),
-                    headers=await conversion.encode_headers(input.headers),
-                ),
-                inbox.INBOX_TOPIC,
-            )
+            def _enqueue_with_messages() -> None:
+                with dbos_client._sys_db.engine.begin() as conn:
+                    dbos_client.enqueue_in_transaction(conn, options, payload)
+                    for env, topic, idem in with_start_msgs:
+                        dbos_client.send_in_transaction(conn, dbos_id, env, topic, idem)
+
+            await asyncio.to_thread(_enqueue_with_messages)
         # Like temporalio, the returned handle is NOT run-bound: signals,
         # queries, and updates resolve the chain's *current* run at call
         # time, so they keep routing correctly across continue-as-new (a
@@ -1557,28 +1659,37 @@ class Client:
     ) -> WorkflowUpdateHandle:
         """Start a workflow (per the operation's id_conflict_policy,
         typically USE_EXISTING) and send it an update, waiting for
-        ``wait_for_stage``. Not atomic: the start commits before the update
-        is sent (DEVIATIONS.md D7 family); the operation's workflow handle
-        is available even if the update fails.
+        ``wait_for_stage``. The update rides the start: on a *fresh* run the
+        start enqueue and the update request commit in one system-database
+        transaction (Temporal's atomic update-with-start, DEVIATIONS.md D7); on
+        a USE_EXISTING attach it is sent to the already-running run as part of
+        the start. The request is routed through the update outbound
+        interceptors first, so their modifications apply on both paths.
         """
         op = start_workflow_operation
         if op._used:
             raise RuntimeError("WithStartWorkflowOperation cannot be reused")
         op._used = True
-        start_args = op._start_kwargs["args"]
-        start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
-        op._handle = await self.start_workflow(
-            op._workflow, args=start_args, **start_kwargs
-        )
-        return await op._handle.start_update(
-            update,
-            arg,
-            wait_for_stage=wait_for_stage,
-            args=args,
-            id=id,
-            result_type=result_type,
-            rpc_metadata=rpc_metadata,
-            rpc_timeout=rpc_timeout,
+        # Route through the update interceptor chain; its terminal
+        # (_start_update_impl, with ``with_start_op`` set) builds the
+        # post-interceptor envelope and performs the start that delivers it,
+        # then awaits the reply. The start half still runs the start
+        # interceptors. op._handle is set by the terminal.
+        return await self._impl.start_workflow_update(
+            StartWorkflowUpdateInput(
+                id=op._start_kwargs["id"],
+                run_id=None,
+                first_execution_run_id=None,
+                update_id=id,
+                update=_update_name(update),
+                args=_resolve_args(arg, args),
+                wait_for_stage=wait_for_stage,
+                headers={},
+                ret_type=_ref_ret_type(update, result_type),
+                rpc_metadata=rpc_metadata,
+                rpc_timeout=rpc_timeout,
+                with_start_op=op,
+            )
         )
 
     async def execute_update_with_start_workflow(
@@ -2201,20 +2312,35 @@ class WorkflowHandle:
         ):
             raise ValueError("Admitted wait stage not supported")
         update_id = input.update_id or str(uuid_mod.uuid4())
-        client = self._client._dbos_client
-        target = await self._target()
         timeout = input.rpc_timeout.total_seconds() if input.rpc_timeout else 60.0
-        await client.send_async(
-            target,
-            inbox.update_envelope(
-                input.update,
-                await conversion.encode_values(input.args),
-                update_id,
-                headers=await conversion.encode_headers(input.headers),
-            ),
-            inbox.INBOX_TOPIC,
-            idempotency_key=update_id,
+        # Built from the (post-interceptor) input, so interceptor modifications
+        # ride along whether the update is delivered atomically with a fresh
+        # start or sent to an already-running run.
+        envelope = inbox.update_envelope(
+            input.update,
+            await conversion.encode_values(input.args),
+            update_id,
+            headers=await conversion.encode_headers(input.headers),
         )
+        op = input.with_start_op
+        if op is not None:
+            # update-with-start: the start delivers the update — atomically in
+            # the enqueue transaction on a fresh run, or to the attached run
+            # under USE_EXISTING (see Client._start_workflow_impl).
+            start_args = op._start_kwargs["args"]
+            start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
+            op._handle = await self._client.start_workflow(
+                op._workflow,
+                args=start_args,
+                **start_kwargs,
+                _with_start_update=(envelope, inbox.INBOX_TOPIC, update_id),
+            )
+            target = await op._handle._target()
+        else:
+            target = await self._target()
+            await self._client._dbos_client.send_async(
+                target, envelope, inbox.INBOX_TOPIC, idempotency_key=update_id
+            )
         handle = WorkflowUpdateHandle(
             self._client,
             update_id,
@@ -2323,7 +2449,9 @@ class WorkflowHandle:
     ) -> WorkflowExecutionDescription:
         dbos_id = await self._target()
         status = await self._client._status_of(dbos_id)
-        description = _execution_from_status(status, WorkflowExecutionDescription)
+        description = _execution_from_status(
+            status, WorkflowExecutionDescription, namespace=self._client._namespace
+        )
         assert isinstance(description, WorkflowExecutionDescription)
         # describe() is bound to a specific Temporal workflow id; honor it over
         # the chain-base derived from the (possibly run-suffixed) DBOS id.

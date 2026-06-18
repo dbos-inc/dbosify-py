@@ -3,8 +3,8 @@
 :py:class:`ActivityEnvironment` runs activity code in memory, no database.
 :py:class:`WorkflowEnvironment.start_local` provisions an isolated,
 throwaway database on an externally provided Postgres server (there is no
-dev server to download — Postgres *is* the server). Time-skipping is Phase 4
-(see DESIGN §6.10).
+dev server to download — Postgres *is* the server). Time-skipping is out of
+scope (see DESIGN §6.10).
 """
 
 import asyncio
@@ -18,6 +18,7 @@ import sqlalchemy
 from dbos import DBOSClient, DBOSConfig
 
 from .. import activity as _activity
+from .._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
 from ..client import Client
 
 __all__ = ["ActivityEnvironment", "WorkflowEnvironment"]
@@ -171,7 +172,14 @@ class WorkflowEnvironment:
                 engine.dispose()
 
         await asyncio.to_thread(_create)
-        dbos_client = DBOSClient(system_database_url=env_url)
+        # The env runs in the default namespace; build the DBOSClient for that
+        # namespace's schema so the low-level Client() accepts it (it derives the
+        # namespace from the schema). Without this, a real start_local() outside
+        # the test harness hits the bare "dbos" schema and raises.
+        dbos_client = DBOSClient(
+            system_database_url=env_url,
+            dbos_system_schema=namespace_schema(DEFAULT_NAMESPACE),
+        )
         env = cls(Client(dbos_client))
         env._dbos_client = dbos_client
         env._maintenance_url = maintenance_url
@@ -188,7 +196,8 @@ class WorkflowEnvironment:
     @classmethod
     async def start_time_skipping(cls) -> "WorkflowEnvironment":
         raise NotImplementedError(
-            "time-skipping test environments are not supported yet (Phase 4)"
+            "time-skipping test environments are out of scope; use start_local "
+            "(real-time) instead"
         )
 
     @property

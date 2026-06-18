@@ -27,19 +27,21 @@ NAME = "client.Client.connect"
 
 # We accept it as a named parameter and act on it.
 HONORED: Set[str] = {
+    "namespace",
     "data_converter",
     "interceptors",
     "default_workflow_query_reject_condition",
 }
 
-# The connection itself — replaced by the ``dbos_client`` we take (D2).
+# The connection itself — ``target_host`` is replaced by ``connect``'s
+# ``system_database_url``, ``service_client`` by the ``dbos_client`` the
+# constructor takes (D2).
 DEVIATION: Set[str] = {"target_host", "service_client"}
 
 # Carried by the DBOSClient you pass, or with no analog (no Temporal server /
 # gRPC). Not accepted by our Client → passing one raises TypeError (never
 # silently ignored). Each with a defensible reason.
 SUBSUMED: Dict[str, str] = {
-    "namespace": "namespacing rides on the DBOSClient's dbos_system_schema (D2)",
     "api_key": "no Temporal-server auth (D1)",
     "plugins": "Client plugins not supported; use interceptors= (D24)",
     "tls": "connection security is the DBOSClient's Postgres connection (D2)",
@@ -71,8 +73,11 @@ def _temporalio_client_params() -> Set[str]:
 
 
 def _our_client_params() -> Set[str]:
+    # Drop our own connection machinery (the constructor's ``dbos_client`` and
+    # connect's ``system_database_url``) — neither is a temporalio param.
     return (named_params(Client.connect) | named_params(Client.__init__)) - {
-        "dbos_client"
+        "dbos_client",
+        "system_database_url",
     }
 
 
@@ -106,4 +111,4 @@ def test_unsupported_params_are_not_silently_accepted() -> None:
 def test_passing_an_unsupported_option_raises_typeerror() -> None:
     # Bad kwargs raise at call time (before the coroutine is created/awaited).
     with pytest.raises(TypeError):
-        Client.connect(None, namespace="prod")  # type: ignore[call-arg,arg-type,unused-coroutine]
+        Client.connect(None, api_key="k")  # type: ignore[call-arg,arg-type,unused-coroutine]

@@ -95,7 +95,7 @@ async def _env(
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            yield await Client.connect(dbos_client)
+            yield Client(dbos_client)
         finally:
             dbos_client.destroy()
 
@@ -194,7 +194,7 @@ async def test_auto_versioning_reports_computed_version_not_empty() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             result = await client.execute_workflow(
                 DeploymentInfoWorkflow.run, id="dv-autover", task_queue=TASK_QUEUE
             )

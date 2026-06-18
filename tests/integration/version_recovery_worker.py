@@ -54,9 +54,7 @@ async def main() -> None:
         workflows=[VersionPinnedWorkflow],
         build_id=BUILD_ID,
     ):
-        client = await Client.connect(
-            DBOSClient(system_database_url=system_database_url())
-        )
+        client = Client(DBOSClient(system_database_url=system_database_url()))
         if action == "start":
             handle = await client.start_workflow(
                 VersionPinnedWorkflow.run, id=workflow_id, task_queue=TASK_QUEUE

@@ -60,8 +60,18 @@ MODULE_PAIRS = {
 # ``test_supported_params_explicitly_accepted`` (EXPLICITLY_ACCEPTED_PARAMS).
 DELIBERATE_DEVIATIONS: Dict[str, str] = {
     "client.Client.__init__": "wraps a dbos.DBOSClient (DESIGN §5, revised)",
-    "client.Client.connect": "takes dbos.DBOSClient instead of target_host",
+    "client.Client.connect": "takes system_database_url + namespace and builds the DBOSClient",
+    "client.Client.close": (
+        "DBOS extension: connect() builds a DBOSClient (a DB connection pool) "
+        "that close()/async-with disposes; temporalio's gRPC Client has no close"
+    ),
     "worker.Worker.__init__": "takes dbos.DBOSConfig; one worker per process",
+    "worker.Worker.namespace": (
+        "DBOS extension: our Worker takes a namespace (mapped to its own DBOS "
+        "system schema, DEVIATIONS D1) rather than a namespaced client, so it "
+        "surfaces the namespace it serves; temporalio's Worker has no such "
+        "property"
+    ),
     "testing.WorkflowEnvironment.start_local": (
         "provisions a database on env-provided Postgres; temporalio's "
         "params are all dev-server flags, which don't apply"
@@ -107,6 +117,19 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
     "client.WorkflowHandle.fetch_history_events": (
         "no Temporal event history; raises NotImplementedError pointing at "
         "fetch_history (DEVIATIONS D27)"
+    ),
+    "client.Client.start_workflow._with_start_update": (
+        "internal: carries a pre-built update request delivered atomically with "
+        "the start for update-with-start (DEVIATIONS D7); not a temporalio param"
+    ),
+    "client.StartWorkflowInput.__init__.with_start_update": (
+        "internal field threading the atomic update-with-start request to "
+        "_start_workflow_impl (DEVIATIONS D7); not part of temporalio's input"
+    ),
+    "client.StartWorkflowUpdateInput.__init__.with_start_op": (
+        "internal field: the WithStartWorkflowOperation for update-with-start, "
+        "so the terminal performs the start that delivers the update atomically "
+        "(DEVIATIONS D7); not part of temporalio's input"
     ),
 }
 
@@ -276,6 +299,8 @@ def _compare_callable(
             continue  # our accept-and-ignore catch-alls
         tp = theirs_by_name.get(p.name)
         if tp is None:
+            if f"{qualname}.{p.name}" in DELIBERATE_DEVIATIONS:
+                continue  # internal extra parameter, recorded with a reason
             problems.append(
                 f"{qualname}: parameter {p.name!r} does not exist in temporalio"
             )

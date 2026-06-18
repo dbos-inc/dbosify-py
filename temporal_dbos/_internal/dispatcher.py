@@ -56,6 +56,8 @@ from .interpreter import (
     WorkflowContinuedAsNew,
     WorkflowTaskFailure,
     _safe_status,
+    _safe_status_list,
+    _schedule_occurrences,
 )
 from .payloads import (
     FailureEnvelope,
@@ -95,6 +97,8 @@ def _reset_for_tests() -> None:
     registry._dynamic_activity = None
     registry.worker_failure_exception_types = ()
     registry.worker_interceptors = ()
+    registry.set_worker_task_queue(None)
+    registry.set_worker_namespace(None)
     activities_mod._attempt_steps.clear()
     activities_mod._dynamic_attempt_step = None
     interpreter._init_step = None
@@ -104,6 +108,7 @@ def _reset_for_tests() -> None:
     interpreter._update_validate_step = None
     interpreter._safe_status_step = None
     interpreter._safe_status_list_step = None
+    interpreter._schedule_occurrences_step = None
     interpreter._patch_step = None
 
 
@@ -114,6 +119,7 @@ def register_worker(
     failure_exception_types: Sequence[Type[BaseException]] = (),
     interceptors: Sequence[Any] = (),
     task_queue: Optional[str] = None,
+    namespace: Optional[str] = None,
 ) -> None:
     """Register workflow classes and activity functions with this process.
 
@@ -125,6 +131,7 @@ def register_worker(
         registry.add_worker_failure_exception_types(failure_exception_types)
     registry.set_worker_interceptors(interceptors)
     registry.set_worker_task_queue(task_queue)
+    registry.set_worker_namespace(namespace)
     # The generic schedule-fire dispatcher is process-global (§6.7); register
     # it so this worker can run schedules whose action targets it.
     register_schedule_dispatcher()
@@ -421,12 +428,13 @@ async def _enqueue_next_run(
 # same nominal time is an idempotent no-op while distinct occurrences each run).
 #
 # Overlap (DEVIATIONS D22): for any policy other than ALLOW_ALL the dispatcher
-# walks prior occurrences backward on the cron grid — exact-id status reads
-# only, never a prefix scan (§6.4) — to find the most recently *started* action
-# (skipped occurrences leave no row) and whether it is still open. SKIP drops
-# this fire; CANCEL_OTHER cooperatively cancels it; TERMINATE_OTHER natively
-# cancels it; then (except SKIP) the new action starts. The walk is bounded by
-# the schedule's created_at and a hard cap.
+# finds the most recently *started* action of this schedule and checks whether
+# it is still open. Every fire is a dispatcher firing that DBOS tags with the
+# schedule name, so an indexed schedule lookup (not a prefix scan, §6.4) yields
+# the prior fire times; their per-occurrence action ids are probed in one batch
+# (skipped fires leave no row). SKIP drops this fire; CANCEL_OTHER cooperatively
+# cancels the prior; TERMINATE_OTHER natively cancels it; then (except SKIP) the
+# new action starts. Bounded to the most recent _OVERLAP_LOOKBACK_LIMIT fires.
 # ---------------------------------------------------------------------------
 
 SCHEDULE_FIRE_NAME = "__temporal_schedule_fire"
@@ -437,8 +445,9 @@ _OVERLAP_SKIP = 1
 _OVERLAP_CANCEL_OTHER = 4
 _OVERLAP_TERMINATE_OTHER = 5
 _OVERLAP_ALLOW_ALL = 6
-# Backstop on the backward occurrence walk when created_at doesn't bound it
-# (e.g. an action overrunning many periods): detection degrades past this.
+# Cap on how many recent fires the overlap lookup considers. Generous for
+# CANCEL/TERMINATE_OTHER (one action per fire → the prior is the latest fire);
+# for SKIP it bounds detection across a long run of skipped fires.
 _OVERLAP_LOOKBACK_LIMIT = 60
 
 
@@ -501,7 +510,7 @@ async def _apply_overlap_policy(
     cron = context.get("cron")
     if overlap == _OVERLAP_ALLOW_ALL or not cron:
         return True
-    prior = await _running_prior_occurrence(action, context, cron, fired_at)
+    prior = await _running_prior_occurrence(action, context, fired_at)
     if prior is None:
         return True
     if overlap == _OVERLAP_SKIP:
@@ -519,27 +528,37 @@ async def _apply_overlap_policy(
 
 
 async def _running_prior_occurrence(
-    action: Dict[str, Any], context: Dict[str, Any], cron: str, fired_at: datetime
+    action: Dict[str, Any], context: Dict[str, Any], fired_at: datetime
 ) -> Optional[str]:
     """The id of the most recently started action of this schedule if it is
-    still open, else None. Walks the cron grid backward from ``fired_at`` using
-    exact-id status reads (each a checkpointed step → replay-stable), stopping
-    at the first occurrence that left a row (skipped ones did not), at
-    ``created_at``, or at the lookback cap."""
+    still open, else None.
+
+    Every fire — regular, ``trigger``, or ``backfill`` — is a dispatcher firing
+    that DBOS tags with the schedule's name, so one indexed lookup yields the
+    prior fire times (checkpointed → replay-stable). We map each to its
+    per-occurrence action id and probe those statuses in a single batch; the
+    most recent occurrence that actually left an action row (skipped fires leave
+    none) is the candidate, and it counts as a running prior iff still open.
+    Bounded to the most recent ``_OVERLAP_LOOKBACK_LIMIT`` fires (DEVIATIONS
+    D22). Unlike the old cron-grid walk this also matches off-grid trigger/
+    backfill fires, which that walk could not reproduce."""
     base = action["id"]
-    tz_name = context.get("timezone")
-    created_at = context.get("created_at")
-    floor = _to_aware_utc(datetime.fromisoformat(created_at)) if created_at else None
-    when = fired_at
-    for _ in range(_OVERLAP_LOOKBACK_LIMIT):
-        when = _to_aware_utc(schedules.prev_fire_time(cron, when, tz_name))
-        if floor is not None and when < floor:
-            return None
-        occurrence_id = f"{base}-{int(when.timestamp())}"
-        fields = await _safe_status(occurrence_id)
-        if fields is not None:
-            return occurrence_id if _status.is_open(fields["status"]) else None
-    return None
+    schedule_name = context["schedule_id"]
+    before_epoch = int(fired_at.timestamp())
+    occurrences = await _schedule_occurrences(
+        schedule_name, before_epoch, _OVERLAP_LOOKBACK_LIMIT
+    )
+    if not occurrences:
+        return None
+    # Map prior fire times to per-occurrence action ids; the batched probe
+    # returns only the ones that exist (i.e. fires that actually started an
+    # action — skipped fires left no row).
+    by_id = {f"{base}-{ts}": ts for ts in occurrences}
+    statuses = await _safe_status_list(list(by_id))
+    if not statuses:
+        return None
+    most_recent_id = max(statuses, key=lambda wid: by_id[wid])
+    return most_recent_id if _status.is_open(statuses[most_recent_id]) else None
 
 
 async def _start_scheduled_action(action: Dict[str, Any], fired_at: datetime) -> None:

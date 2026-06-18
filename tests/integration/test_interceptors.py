@@ -208,7 +208,7 @@ async def test_activity_interceptor_wraps_and_routes() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 InterceptedWorkflow.run, "hi", id="ic-act", task_queue=TASK_QUEUE
             )
@@ -238,7 +238,7 @@ async def test_client_interceptor_records_verbs() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
+            client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
             )
             handle = await client.start_workflow(
@@ -301,7 +301,7 @@ async def test_client_interceptor_records_schedule_verbs() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
+            client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
             )
             handle = await client.create_schedule(
@@ -336,7 +336,7 @@ async def test_client_interceptor_records_async_activity_verbs() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
+            client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
             )
             handle = await client.start_workflow(
@@ -435,7 +435,7 @@ async def test_interceptor_chain_ordering() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
+            client = Client(
                 dbos_client,
                 interceptors=[
                     _OrderClientInterceptor("A", client_order),
@@ -519,7 +519,7 @@ async def test_activity_interceptor_fires_per_attempt_not_on_replay() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             handle = await client.start_workflow(
                 RetryReplayWorkflow.run, id="ic-retry", task_queue=TASK_QUEUE
             )
@@ -552,7 +552,7 @@ async def test_activity_interceptor_fires_for_local_activity() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             result = await client.execute_workflow(
                 LocalActivityWorkflow.run, "loc", id="ic-local", task_queue=TASK_QUEUE
             )
@@ -597,9 +597,7 @@ async def test_client_interceptor_injects_search_attributes_and_memo() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
-                dbos_client, interceptors=[_InjectingClientInterceptor()]
-            )
+            client = Client(dbos_client, interceptors=[_InjectingClientInterceptor()])
             # Started with neither search_attributes nor memo — the interceptor
             # adds both.
             handle = await client.start_workflow(
@@ -632,7 +630,7 @@ async def test_query_reject_condition_does_not_invoke_describe_interceptor() -> 
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
+            client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
             )
             handle = await client.start_workflow(
@@ -668,7 +666,7 @@ async def test_schedule_update_does_not_invoke_describe_schedule_interceptor() -
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
+            client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
             )
             handle = await client.create_schedule(
@@ -858,9 +856,7 @@ async def test_header_propagates_to_workflow_activity_and_child() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
-                dbos_client, interceptors=[_TraceClientInterceptor()]
-            )
+            client = Client(dbos_client, interceptors=[_TraceClientInterceptor()])
             result = await client.execute_workflow(
                 TraceParentWorkflow.run, id="ic-trace-parent", task_queue=TASK_QUEUE
             )
@@ -885,7 +881,7 @@ async def test_header_channel_inert_without_client_injection() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)  # no client interceptor
+            client = Client(dbos_client)  # no client interceptor
             result = await client.execute_workflow(
                 TraceParentWorkflow.run, id="ic-trace-plain", task_queue=TASK_QUEUE
             )
@@ -910,7 +906,7 @@ async def test_signal_header_reaches_handler() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
+            client = Client(
                 dbos_client, interceptors=[_TraceClientInterceptor("from-signal")]
             )
             handle = await client.start_workflow(
@@ -935,9 +931,7 @@ async def test_header_survives_continue_as_new() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
-                dbos_client, interceptors=[_TraceClientInterceptor()]
-            )
+            client = Client(dbos_client, interceptors=[_TraceClientInterceptor()])
             result = await client.execute_workflow(
                 TraceContinueWorkflow.run,
                 args=[3],
@@ -988,7 +982,7 @@ async def test_header_survives_payload_codec() -> None:
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(
+            client = Client(
                 dbos_client,
                 interceptors=[_TraceClientInterceptor()],
                 data_converter=converter,

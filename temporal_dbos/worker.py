@@ -50,6 +50,7 @@ from ._internal.activity_interceptor import (
     ExecuteActivityInput,
     Interceptor,
 )
+from ._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
 from ._internal.replay import (
     Replayer,
     WorkflowReplayResult,
@@ -194,6 +195,7 @@ class Worker:
         config: DBOSConfig,
         *,
         task_queue: str,
+        namespace: str = DEFAULT_NAMESPACE,
         workflows: Sequence[Type[Any]] = [],
         activities: Sequence[Callable[..., Any]] = [],
         activity_executor: Optional[Any] = None,
@@ -272,6 +274,7 @@ class Worker:
 
         self._on_fatal_error = on_fatal_error
         self._task_queue = task_queue
+        self._namespace = namespace
         self._max_concurrent_workflow_tasks = max_concurrent_workflow_tasks
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
         # Activity concurrency cap: max_concurrent_activities, else (an
@@ -298,9 +301,26 @@ class Worker:
         # The interpreter (in this process) decodes run args / encodes results
         # with this converter; configure the Client the same.
         conversion.set_converter(data_converter)
+        # The namespace owns the DBOS system schema (DEVIATIONS D1): this
+        # process serves one namespace, and its workflows live in that schema —
+        # isolated from other namespaces. The Worker owns the runtime, so it
+        # sets the schema; a conflicting explicit dbos_system_schema is an error
+        # (configure the namespace, not the schema).
+        schema = namespace_schema(namespace)
+        configured_schema = config.get("dbos_system_schema")
+        if configured_schema is not None and configured_schema != schema:
+            raise ValueError(
+                f"DBOSConfig dbos_system_schema {configured_schema!r} conflicts "
+                f"with namespace {namespace!r} (schema {schema!r}); set the "
+                "namespace, not dbos_system_schema"
+            )
         # JSON transport (replaces DBOS's default pickle). All processes on the
         # database must share this serializer's name (see serializer.py).
-        config = {**config, "serializer": TEMPORAL_SERIALIZER}
+        config = {
+            **config,
+            "serializer": TEMPORAL_SERIALIZER,
+            "dbos_system_schema": schema,
+        }
         # Worker identity → DBOS executor_id (surfaced in DBOS views / list
         # filters). Note: executor_id also *scopes recovery* in DBOS (D6), so a
         # custom identity should be stable per fleet, not unique per process.
@@ -362,6 +382,7 @@ class Worker:
             failure_exception_types=workflow_failure_exception_types,
             interceptors=interceptors,
             task_queue=task_queue,
+            namespace=namespace,
         )
         # The task queue is a database-backed DBOS queue; this process
         # dequeues only from its declared listen set (plus DBOS's internal
@@ -377,6 +398,11 @@ class Worker:
     def task_queue(self) -> str:
         """Task queue this worker is on."""
         return self._task_queue
+
+    @property
+    def namespace(self) -> str:
+        """Temporal namespace this worker serves (its DBOS system schema)."""
+        return self._namespace
 
     def is_running(self) -> bool:
         """Whether the worker is running (between run() and shutdown())."""
