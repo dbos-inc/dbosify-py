@@ -30,6 +30,8 @@ from dbos import DBOSClient
 
 from temporal_dbos import activity, workflow
 from temporal_dbos.client import Client, WorkflowFailureError
+from temporal_dbos.common import RetryPolicy
+from temporal_dbos.exceptions import ApplicationError, ChildWorkflowError
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
@@ -71,6 +73,67 @@ class ChildParent:
             SlowChild.run, path, id="reattach-child"
         )
         return f"parent saw: {result}"
+
+
+@workflow.defn
+class RetryRecoveryChild:
+    """Fails on attempt 1, succeeds (and records, exactly once) on attempt 2.
+    The 3s sleep gives a deterministic SIGKILL window during attempt 1."""
+
+    @workflow.run
+    async def run(self, path: str) -> str:
+        attempt = workflow.info().attempt
+        print(f"CHILD_ATTEMPT {attempt}", flush=True)
+        await workflow.sleep(3.0)
+        if attempt < 2:
+            raise ApplicationError(f"child fail attempt {attempt}")
+        result: str = await workflow.execute_activity(
+            record_child_work, path, start_to_close_timeout=timedelta(seconds=10)
+        )
+        return result
+
+
+@workflow.defn
+class RetryChildParent:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        result: str = await workflow.execute_child_workflow(
+            RetryRecoveryChild.run,
+            path,
+            id="reattach-retry-child",
+            retry_policy=RetryPolicy(
+                initial_interval=timedelta(milliseconds=50), maximum_attempts=5
+            ),
+        )
+        return f"parent saw: {result}"
+
+
+@workflow.defn
+class TimeoutRecoveryChild:
+    """Sleeps far longer than its run_timeout. The deadline is durable, so a
+    SIGKILL + recovery must still terminate it at the original deadline rather
+    than letting the recovered run sleep out the full 120s."""
+
+    @workflow.run
+    async def run(self) -> str:
+        print("TIMEOUT_CHILD_STARTED", flush=True)
+        await workflow.sleep(120)
+        return "should-not-finish"
+
+
+@workflow.defn
+class TimeoutChildParent:
+    @workflow.run
+    async def run(self, path: str) -> str:
+        try:
+            await workflow.execute_child_workflow(
+                TimeoutRecoveryChild.run,
+                id="reattach-timeout-child",
+                run_timeout=timedelta(seconds=8),
+            )
+            return "no-timeout"
+        except ChildWorkflowError as err:
+            return f"child-terminated:{type(err.cause).__name__}"
 
 
 @activity.defn
@@ -185,6 +248,8 @@ async def main() -> None:
     run_refs = {
         "cancel": CleanupHoldWorkflow.run,
         "child": ChildParent.run,
+        "childretry": RetryChildParent.run,
+        "childtimeout": TimeoutChildParent.run,
         "replay": ReplayProbeWorkflow.run,
         "updates": UpdateChaosWorkflow.run,
     }
@@ -196,6 +261,10 @@ async def main() -> None:
             CleanupHoldWorkflow,
             ChildParent,
             SlowChild,
+            RetryChildParent,
+            RetryRecoveryChild,
+            TimeoutChildParent,
+            TimeoutRecoveryChild,
             ReplayProbeWorkflow,
             UpdateChaosWorkflow,
         ],

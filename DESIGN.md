@@ -641,6 +641,33 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   `attempt`, `task_queue` = DBOS queue name, `start_time` from status `created_at`,
   `parent`/`root` from DBOS parent links, `search_attributes`/`memo` from envelope,
   `get_current_history_length()` → interpreter seq count.
+- **Worker deployment versioning (done).** `common.VersioningBehavior`,
+  `WorkerDeploymentVersion`, `VersioningOverride`/`PinnedVersioningOverride`/
+  `AutoUpgradeVersioningOverride`, `worker.WorkerDeploymentConfig`,
+  `@workflow.defn(versioning_behavior=)`, `continue_as_new(initial_versioning_behavior=)`
+  (`ContinueAsNewVersioningBehavior`), and client `start_workflow(versioning_override=)` are
+  mirrored. A *build ID is the DBOS `application_version`*: `Worker(build_id=)` /
+  `Worker(deployment_config=)` set it, and it's surfaced via
+  `Info.get_current_deployment_version()` / `get_current_build_id()`. Because DBOS scopes
+  recovery and queue dequeue to `application_version`, **PINNED is enforced** — a workflow is
+  recovered/continued only on workers of its build ID and never auto-migrates. **AUTO_UPGRADE**
+  (move a running workflow to a newer version) and cluster ramping/routing have no DBOS
+  analog and degrade to pinned; `is_target_worker_deployment_version_changed()` is always
+  `False`. See DEVIATIONS D29.
+- **Current details (done).** `workflow.set_current_details()`/`get_current_details()` back
+  free-form UI/CLI metadata as in-memory workflow state, reconstructed on replay (no
+  checkpoint); settable on the deterministic loop (run/handlers), rejected in read-only
+  contexts, not surfaced to `describe()` in v1. See DEVIATIONS D30.
+- **Activity context helpers (done).** `activity.is_worker_shutdown()` /
+  `wait_for_worker_shutdown()` / `wait_for_worker_shutdown_sync()` read a *per-Worker* shutdown
+  event (fresh per Worker, latched once the Worker trips it on `shutdown()`, so a straggler
+  activity never observes a later Worker's flag); `ActivityEnvironment.worker_shutdown()` trips
+  the env's own event for tests. `activity.shield_thread_cancel_exception()` is a no-op
+  (cancellation is cooperative — DEVIATIONS D26); `activity.client()` returns a Temporal client
+  lazily built from the Worker's `DBOSConfig` (or one passed to `ActivityEnvironment(client=)`).
+  The per-Worker shutdown event + lazy client live on one `_ActivityWorkerState` object whose
+  lifecycle is bound to the Worker run (built at construction, disposed off-loop after the
+  graceful drain).
 - `workflow.patched(id)` / `deprecate_patch(id)`: **done.** Checkpoint-marker
   implementation. The decision (`not is_replaying() or id in recorded-markers`) is computed
   synchronously at the call site, memoized per id, and — crucially — claims **no**

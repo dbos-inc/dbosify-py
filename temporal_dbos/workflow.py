@@ -13,6 +13,7 @@ from the running loop and delegates.
 """
 
 import asyncio
+import contextvars
 import inspect
 import logging
 import uuid as uuid_mod
@@ -54,6 +55,8 @@ from .common import (
     SearchAttributes,
     SearchAttributeUpdate,
     TypedSearchAttributes,
+    VersioningBehavior,
+    WorkerDeploymentVersion,
     _warn_on_deprecated_search_attributes,
 )
 from .converter import PayloadConverter
@@ -63,6 +66,7 @@ __all__ = [
     "ActivityHandle",
     "ChildWorkflowCancellationType",
     "ChildWorkflowHandle",
+    "ContinueAsNewVersioningBehavior",
     "ExternalWorkflowHandle",
     "Info",
     "ParentClosePolicy",
@@ -71,8 +75,12 @@ __all__ = [
     "cancellation_reason",
     "continue_as_new",
     "ContinueAsNewError",
+    "current_update_info",
     "defn",
     "deprecate_patch",
+    "get_current_details",
+    "instance",
+    "new_random",
     "NondeterminismError",
     "execute_activity",
     "execute_activity_method",
@@ -98,7 +106,12 @@ __all__ = [
     "payload_converter",
     "query",
     "random",
+    "random_seed",
+    "ReadOnlyContextError",
+    "register_random_seed_callback",
+    "RootInfo",
     "run",
+    "set_current_details",
     "signal",
     "sleep",
     "start_activity",
@@ -114,6 +127,7 @@ __all__ = [
     "UnfinishedSignalHandlersWarning",
     "UnfinishedUpdateHandlersWarning",
     "update",
+    "UpdateInfo",
     "uuid4",
     "wait",
     "wait_condition",
@@ -187,6 +201,12 @@ _CT = TypeVar("_CT", bound=type)
 
 _arg_unset = object()
 
+# The update currently being handled, surfaced by current_update_info(). Set by
+# the interpreter around an update validator/handler (see _internal/interpreter.py).
+_current_update_info: "contextvars.ContextVar[UpdateInfo]" = contextvars.ContextVar(
+    "__temporal_dbos_current_update_info"
+)
+
 
 class HandlerUnfinishedPolicy(IntEnum):
     """What to do when a workflow finishes while a signal/update handler is
@@ -207,6 +227,20 @@ class UnfinishedSignalHandlersWarning(RuntimeWarning):
     """The workflow exited before all signal handlers completed."""
 
 
+class ContinueAsNewVersioningBehavior(IntEnum):
+    """Versioning behavior for the run created by :py:func:`continue_as_new`,
+    mirroring ``temporalio.workflow.ContinueAsNewVersioningBehavior``.
+
+    A continue-as-new run is a fresh DBOS workflow enqueued by the current
+    worker, so it takes that worker's build ID (pinned). ``AUTO_UPGRADE`` /
+    ``USE_RAMPING_VERSION`` have no DBOS analog (DEVIATIONS D29).
+    """
+
+    UNSPECIFIED = 0
+    AUTO_UPGRADE = 1
+    USE_RAMPING_VERSION = 2
+
+
 # ---------------------------------------------------------------------------
 # Definition decorators
 # ---------------------------------------------------------------------------
@@ -223,6 +257,7 @@ def defn(
     sandboxed: bool = True,
     dynamic: bool = False,
     failure_exception_types: Sequence[Type[BaseException]] = [],
+    versioning_behavior: VersioningBehavior = VersioningBehavior.UNSPECIFIED,
 ) -> Callable[[_CT], _CT]: ...
 
 
@@ -233,9 +268,15 @@ def defn(
     sandboxed: bool = True,
     dynamic: bool = False,
     failure_exception_types: Sequence[Type[BaseException]] = [],
+    versioning_behavior: VersioningBehavior = VersioningBehavior.UNSPECIFIED,
 ) -> Union[_CT, Callable[[_CT], _CT]]:
     """Decorator for workflow classes. ``sandboxed`` is accepted and ignored
     (temporal-dbos runs no sandbox — see the README deviations table).
+
+    ``versioning_behavior`` is accepted and stored. ``PINNED`` is what
+    temporal-dbos enforces anyway (DBOS pins recovery/dequeue to the build ID =
+    ``application_version``); ``AUTO_UPGRADE`` has no DBOS analog and degrades to
+    pinned (DEVIATIONS D29).
 
     ``dynamic`` is **not supported**: a catch-all workflow has no
     ``wf:{type}`` registration to dispatch to, which conflicts with the
@@ -254,7 +295,10 @@ def defn(
 
     def decorator(cls: _CT) -> _CT:
         defn = _registry.build_workflow_definition(
-            cls, name=name, failure_exception_types=failure_exception_types
+            cls,
+            name=name,
+            failure_exception_types=failure_exception_types,
+            versioning_behavior=int(versioning_behavior),
         )
         setattr(cls, _registry.WORKFLOW_DEFN_ATTR, defn)
         return cls
@@ -553,6 +597,27 @@ class ParentInfo:
 
 
 @dataclass(frozen=True)
+class RootInfo:
+    """Information about the root workflow of this run's tree, mirroring
+    ``temporalio.workflow.RootInfo``. Present on :py:attr:`Info.root` only for
+    descendants (a child/grandchild started cross-chain); ``None`` for a
+    top-level workflow, which is itself the root."""
+
+    run_id: str
+    workflow_id: str
+
+
+@dataclass(frozen=True)
+class UpdateInfo:
+    """Information about a workflow update in progress, mirroring
+    ``temporalio.workflow.UpdateInfo``. Retrieved via
+    :py:func:`current_update_info` inside an update handler/validator."""
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
 class Info:
     """Information about the running workflow (Phase 0 subset of
     temporalio's ``workflow.Info``).
@@ -573,6 +638,9 @@ class Info:
     namespace: str = "default"
     # The parent workflow, when started cross-chain as a child; None otherwise.
     parent: Optional[ParentInfo] = None
+    # The root workflow of this run's tree; None for a top-level workflow (which
+    # is itself the root). Threaded through child starts (§6.6).
+    root: Optional[RootInfo] = None
     # Priority is accepted-and-inert (DBOS queues are FIFO); always the default
     # instance, which is what temporalio returns for an unset priority.
     priority: Priority = Priority.default
@@ -612,6 +680,43 @@ class Info:
         (``TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD``, default 10000)."""
         return _runtime().runtime_can_suggested()
 
+    def get_current_build_id(self) -> str:
+        """The build id of the worker executing this run — the DBOS
+        ``application_version`` DBOS pins recovery/dequeue to (DEVIATIONS D29).
+        Empty string when no worker deployment version is set.
+
+        .. warning::
+            Read *live* from the executing worker, so it is **not replay-stable**
+            across a version change (a re-execution or :py:class:`Replayer` run on
+            a newer worker reports that worker's build id). Do not branch workflow
+            logic on it — use :py:func:`patched` for versioned code changes.
+
+        .. deprecated::
+            Use :py:meth:`get_current_deployment_version` instead.
+        """
+        version = _runtime().runtime_get_current_deployment_version()
+        return version.build_id if version is not None else ""
+
+    def get_current_deployment_version(self) -> Optional[WorkerDeploymentVersion]:
+        """The deployment version of the worker executing this run (deployment
+        name = DBOS application/deployment name, build id = the DBOS
+        ``application_version`` DBOS pins recovery/dequeue to). None when no
+        worker deployment version is set (e.g. the in-process dispatcher
+        harness). DEVIATIONS D29.
+
+        .. warning::
+            Read *live* from the executing worker, so it is **not replay-stable**
+            across a version change. Do not branch workflow logic on it — use
+            :py:func:`patched` for versioned code changes.
+        """
+        return _runtime().runtime_get_current_deployment_version()
+
+    def is_target_worker_deployment_version_changed(self) -> bool:
+        """Whether the target worker deployment version has changed
+        (upgrade-on-continue-as-new). Always False in temporal-dbos: workflows
+        are pinned to their build id and never auto-upgrade (DEVIATIONS D29)."""
+        return False
+
 
 class _Runtime:
     """Interface the interpreter implements to back this module's functions.
@@ -632,6 +737,17 @@ class _Runtime:
     def runtime_random(self) -> Random:
         raise NotImplementedError
 
+    def runtime_random_seed(self) -> int:
+        raise NotImplementedError
+
+    def runtime_register_random_seed_callback(
+        self, callback: Callable[[int], None]
+    ) -> None:
+        raise NotImplementedError
+
+    def runtime_instance(self) -> Any:
+        raise NotImplementedError
+
     def runtime_is_replaying(self) -> bool:
         raise NotImplementedError
 
@@ -645,6 +761,17 @@ class _Runtime:
         raise NotImplementedError
 
     def runtime_can_suggested(self) -> bool:
+        raise NotImplementedError
+
+    def runtime_get_current_deployment_version(
+        self,
+    ) -> Optional[WorkerDeploymentVersion]:
+        raise NotImplementedError
+
+    def runtime_get_current_details(self) -> str:
+        raise NotImplementedError
+
+    def runtime_set_current_details(self, details: str) -> None:
         raise NotImplementedError
 
     def runtime_cancellation_reason(self) -> Optional[str]:
@@ -866,6 +993,29 @@ def cancellation_reason() -> Optional[str]:
     return _runtime().runtime_cancellation_reason()
 
 
+def get_current_details() -> str:
+    """The current details of the workflow (free-form, Temporal-markdown,
+    multi-line) which may appear in the UI/CLI, mirroring
+    ``temporalio.workflow.get_current_details``.
+
+    Unlike static details set at start, this value can be updated throughout
+    the life of the workflow via :py:func:`set_current_details`. It is in-memory
+    workflow state — reconstructed deterministically on recovery by replaying
+    the same :py:func:`set_current_details` calls — and is not surfaced to
+    ``describe()``/``list_workflows`` in v1 (DEVIATIONS D30). Empty string if
+    never set.
+    """
+    return _runtime().runtime_get_current_details()
+
+
+def set_current_details(description: str) -> None:
+    """Set the current details of the workflow which may appear in the UI/CLI,
+    mirroring ``temporalio.workflow.set_current_details``. See
+    :py:func:`get_current_details`.
+    """
+    _runtime().runtime_set_current_details(description)
+
+
 def has_last_completion_result() -> bool:
     """Whether a previous run of this (cron) workflow chain completed
     successfully — distinguishes "no previous completion" from "the previous
@@ -950,6 +1100,43 @@ def time_ns() -> int:
 def random() -> Random:
     """Deterministically-seeded random instance for this workflow."""
     return _runtime().runtime_random()
+
+
+def random_seed() -> int:
+    """The seed of this workflow's deterministic random number generator
+    (checkpointed once per run), mirroring ``temporalio.workflow.random_seed``."""
+    return _runtime().runtime_random_seed()
+
+
+def register_random_seed_callback(callback: Callable[[int], None]) -> None:
+    """Register a callback invoked when the workflow's random seed changes,
+    mirroring ``temporalio.workflow.register_random_seed_callback``. In
+    temporal-dbos the seed is fixed for a run's lifetime (it never changes
+    mid-run), so the callback is stored but never invoked (DEVIATIONS D31)."""
+    _runtime().runtime_register_random_seed_callback(callback)
+
+
+def new_random() -> Random:
+    """A new ``Random`` seeded from the current workflow seed and registered to
+    reseed when the workflow seed changes, mirroring
+    ``temporalio.workflow.new_random``. (The reseed never fires here — see
+    :py:func:`register_random_seed_callback`.)"""
+    auto_random = Random(random_seed())
+    register_random_seed_callback(auto_random.seed)
+    return auto_random
+
+
+def instance() -> Any:
+    """The currently running workflow instance (``self``), mirroring
+    ``temporalio.workflow.instance``."""
+    return _runtime().runtime_instance()
+
+
+def current_update_info() -> Optional[UpdateInfo]:
+    """Info about the update currently being handled (id + name), or ``None``
+    when not inside an update handler/validator, mirroring
+    ``temporalio.workflow.current_update_info``."""
+    return _current_update_info.get(None)
 
 
 def uuid4() -> uuid_mod.UUID:
@@ -1292,6 +1479,16 @@ class NondeterminismError(exceptions.TemporalError):
         self.message = message
 
 
+class ReadOnlyContextError(exceptions.TemporalError):
+    """Raised when workflow code attempts a state-mutating operation from a
+    read-only context (a query handler or update validator), mirroring
+    ``temporalio.workflow.ReadOnlyContextError``."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 def continue_as_new(
     arg: Any = _arg_unset,
     *,
@@ -1304,11 +1501,15 @@ def continue_as_new(
     memo: Optional[Any] = None,
     search_attributes: Optional[Any] = None,
     versioning_intent: Optional[Any] = None,
-    initial_versioning_behavior: Optional[Any] = None,
+    initial_versioning_behavior: Optional[ContinueAsNewVersioningBehavior] = None,
 ) -> "NoReturn":
     """Stop the current run and continue the chain as a new run with the
     given arguments (same workflow type unless ``workflow`` is given). The
     raised :py:class:`ContinueAsNewError` must not be caught.
+
+    ``versioning_intent``/``initial_versioning_behavior`` are accepted for
+    parity; the new run is pinned to the enqueuing worker's build ID, and the
+    auto-upgrade/ramping variants have no DBOS analog (DEVIATIONS D29).
     """
     for key, value in {
         "task_timeout": task_timeout,
@@ -1382,17 +1583,18 @@ async def start_child_workflow(
     """Start a child workflow; returns its handle once the start is durable
     (Temporal semantics: resolves on start, not completion).
 
-    Phase 2 honors arg/args, id (default: ``{parent_id}_{seq}`` — README
-    deviation #5), task_queue, parent_close_policy, and cancellation_type;
-    the remaining parameters are accepted and ignored (debug-logged).
+    Honors arg/args, id (default: ``{parent_id}_{seq}`` — README deviation #5),
+    task_queue, parent_close_policy, cancellation_type, and (matching top-level
+    starts) ``run_timeout`` and ``retry_policy``. ``cron_schedule`` and
+    ``id_reuse_policy`` are accepted-but-pending for children (see the verb
+    audit / DEVIATIONS D35); the remaining parameters are accepted and ignored
+    (debug-logged).
     """
     for key, value in {
         "result_type": result_type,
         "execution_timeout": execution_timeout,
-        "run_timeout": run_timeout,
         "task_timeout": task_timeout,
         "id_reuse_policy": id_reuse_policy,
-        "retry_policy": retry_policy,
         "cron_schedule": cron_schedule or None,
         "versioning_intent": versioning_intent,
         "static_summary": static_summary,

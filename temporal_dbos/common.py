@@ -40,6 +40,8 @@ if TYPE_CHECKING:
     from .converter import Payload
 
 __all__ = [
+    "AutoUpgradeVersioningOverride",
+    "PinnedVersioningOverride",
     "Priority",
     "QueryRejectCondition",
     "RawValue",
@@ -52,6 +54,9 @@ __all__ = [
     "SearchAttributeValues",
     "SearchAttributes",
     "TypedSearchAttributes",
+    "VersioningBehavior",
+    "VersioningOverride",
+    "WorkerDeploymentVersion",
     "WorkflowIDReusePolicy",
     "WorkflowIDConflictPolicy",
 ]
@@ -548,3 +553,90 @@ def _warn_on_deprecated_search_attributes(
             DeprecationWarning,
             stacklevel=stack_level + 1,
         )
+
+
+# ---------------------------------------------------------------------------
+# Worker versioning / deployments
+# ---------------------------------------------------------------------------
+#
+# Temporal's Worker Deployment Versioning lets a workflow be pinned to (or
+# auto-upgraded across) worker build versions for safe rolling deploys. In
+# temporal-dbos a "deployment version" maps onto DBOS's own versioning:
+# ``deployment_name`` is the DBOS application name and ``build_id`` is the DBOS
+# ``application_version``. DBOS scopes both workflow recovery and queue dequeue
+# to ``application_version``, so a workflow is recovered/continued only on
+# workers of its build ID — which *is* Temporal's PINNED behavior, enforced.
+# What DBOS has no analog for is AUTO_UPGRADE (migrating a running workflow to a
+# newer version) and the cluster routing-fleet / ramping concepts. See
+# DEVIATIONS D29.
+
+
+class VersioningBehavior(IntEnum):
+    """Specifies when a workflow might move from a worker of one Build Id to
+    another, mirroring ``temporalio.common.VersioningBehavior``.
+
+    ``PINNED`` is temporal-dbos's enforced behavior (DBOS pins recovery/dequeue
+    to ``application_version`` = the build ID). ``AUTO_UPGRADE`` has no DBOS
+    analog and degrades to pinned. See DEVIATIONS D29.
+    """
+
+    UNSPECIFIED = 0
+    """An unspecified versioning behavior."""
+    PINNED = 1
+    """The workflow will be pinned to the current Build ID unless manually moved."""
+    AUTO_UPGRADE = 2
+    """The workflow will automatically move to the latest version (default Build
+    ID of the task queue) when the next task is dispatched."""
+
+
+@dataclass(frozen=True)
+class WorkerDeploymentVersion:
+    """Represents the version of a specific worker deployment, mirroring
+    ``temporalio.common.WorkerDeploymentVersion``.
+
+    In temporal-dbos ``deployment_name`` is the DBOS application name and
+    ``build_id`` is the DBOS ``application_version``.
+    """
+
+    deployment_name: str
+    build_id: str
+
+    def to_canonical_string(self) -> str:
+        """Returns the canonical string representation of the version."""
+        return f"{self.deployment_name}.{self.build_id}"
+
+    @staticmethod
+    def from_canonical_string(canonical: str) -> "WorkerDeploymentVersion":
+        """Parse a version from a canonical string, which must be in the format
+        ``<deployment_name>.<build_id>``. Deployment name must not have a ``.``
+        in it.
+        """
+        parts = canonical.split(".", maxsplit=1)
+        if len(parts) != 2:
+            raise ValueError(
+                f"Cannot parse version string: {canonical}, must be in format "
+                "<deployment_name>.<build_id>"
+            )
+        return WorkerDeploymentVersion(parts[0], parts[1])
+
+
+class VersioningOverride(ABC):
+    """Represents the override of a worker's versioning behavior for a workflow
+    execution, mirroring ``temporalio.common.VersioningOverride``.
+
+    ``PinnedVersioningOverride`` matches temporal-dbos's enforced default;
+    ``AutoUpgradeVersioningOverride`` has no DBOS analog (DEVIATIONS D29).
+    """
+
+
+@dataclass(frozen=True)
+class PinnedVersioningOverride(VersioningOverride):
+    """Workflow will be pinned to a specific deployment version."""
+
+    version: WorkerDeploymentVersion
+
+
+@dataclass(frozen=True)
+class AutoUpgradeVersioningOverride(VersioningOverride):
+    """The workflow will auto-upgrade to the current deployment version on the
+    next workflow task."""

@@ -62,6 +62,11 @@ class RunMeta:
     # across cron/retry hops (the same run re-running); continue-as-new sets its
     # own (an interceptor re-injects them).
     headers: Optional[Dict[str, Any]] = None
+    # The root workflow of this run's tree ({"workflow_id", "run_id"}), set when
+    # this run was started as a child of another workflow; None for a top-level
+    # workflow (surfaced as workflow.info().root, §6.6). Carries across chain hops
+    # (a child that continues-as-new keeps the same root).
+    root: Optional[Dict[str, str]] = None
 
     def is_empty(self) -> bool:
         return (
@@ -73,6 +78,7 @@ class RunMeta:
             and self.last_failure is None
             and self.attributes is None
             and not self.headers
+            and self.root is None
         )
 
     def carried_forward(self) -> "RunMeta":
@@ -87,6 +93,7 @@ class RunMeta:
             last_failure=self.last_failure,
             attributes=self.attributes,
             headers=self.headers,
+            root=self.root,
         )
 
 
@@ -107,6 +114,7 @@ def wrap_input(args: Sequence[Any], meta: Optional[RunMeta] = None) -> Any:
             "last_failure": meta.last_failure,
             "attributes": meta.attributes,
             "headers": meta.headers,
+            "root": meta.root,
         },
     }
 
@@ -123,6 +131,7 @@ def unwrap_input(payload: Any) -> Tuple[List[Any], RunMeta]:
             last_failure=raw.get("last_failure"),
             attributes=raw.get("attributes"),
             headers=raw.get("headers"),
+            root=raw.get("root"),
         )
     return list(payload), RunMeta()
 

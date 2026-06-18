@@ -64,6 +64,7 @@ from typing import (
 from dbos import DBOS
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
 from dbos._error import DBOSUnexpectedStepError
+from dbos._utils import GlobalParams  # the worker's live DBOS application_version
 
 from .. import activity as activity_api
 from .. import exceptions
@@ -73,6 +74,7 @@ from ..common import (
     SearchAttributes,
     SearchAttributeUpdate,
     TypedSearchAttributes,
+    WorkerDeploymentVersion,
 )
 from ..workflow import (
     ActivityHandle,
@@ -82,8 +84,12 @@ from ..workflow import (
     Info,
     NondeterminismError,
     ParentInfo,
+    ReadOnlyContextError,
+    RootInfo,
     UnfinishedSignalHandlersWarning,
     UnfinishedUpdateHandlersWarning,
+    UpdateInfo,
+    _current_update_info,
     _Runtime,
 )
 from . import activities as activities_mod
@@ -251,6 +257,16 @@ def _await_child_result(child_id: str) -> Any:
                         # final run's (Temporal semantics) — follow the
                         # chain. The step records only the final outcome.
                         child_id = marker.envelope["new_run_id"]
+                    except SerializedWorkflowFailure as failed:
+                        # A failed run with a successor (workflow retry from the
+                        # child's retry_policy) is followed to that successor,
+                        # exactly as the client's result(follow_runs=True) and
+                        # temporalio's new_execution_run_id do. A terminal
+                        # failure (no successor) propagates to the handler below.
+                        successor = failed.envelope.get("new_run_id")
+                        if successor is None:
+                            raise
+                        child_id = successor
             except SerializedWorkflowCancellation as cancelled:
                 return {
                     "ok": False,
@@ -596,6 +612,13 @@ class _ChildExec:
     # Interceptor headers in wire form (str -> payload dict), set by the
     # outbound chain; delivered to the child run as ExecuteWorkflowInput.headers.
     headers: Dict[str, Any] = field(default_factory=dict)
+    # Per-run timeout (seconds) and serialized RetryPolicy for the child,
+    # carried in its RunMeta exactly like a top-level start: run_timeout drives
+    # SetWorkflowTimeout on the enqueue and re-applies across the child's chain;
+    # retry_policy gates the child's own workflow retries (the child-result step
+    # follows the resulting chain, so the parent still sees the final outcome).
+    run_timeout: Optional[float] = None
+    retry_policy: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +784,8 @@ class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
             cancellation_type=int(input.cancellation_type),
             memo=input.memo,
             search_attributes=input.search_attributes,
+            run_timeout=input.run_timeout,
+            retry_policy=input.retry_policy,
             # Raw Payloads; codec-encoded on the real loop in _start_child.
             headers=input.headers,
         )
@@ -846,7 +871,15 @@ class Interpreter(_Runtime):
         # the DBOS attributes column).
         self._memo: Dict[str, Any] = {}
         self._typed_sa: TypedSearchAttributes = TypedSearchAttributes.empty
+        # Free-form UI/CLI details set via workflow.set_current_details(): pure
+        # in-memory state, reconstructed deterministically on recovery by
+        # replaying the same set_current_details calls (no checkpoint needed —
+        # not surfaced to describe()/list in v1, DEVIATIONS D30).
+        self._current_details: str = ""
         self._random = Random(0)
+        # The deterministic random seed (checkpointed once at run start), exposed
+        # via workflow.random_seed(); fixed for the run's lifetime.
+        self._seed: int = 0
         self._workflow_id = ""
         self._start_time = 0.0
         # ("ok", result) | ("failure", exc) | ("task_failure", exc)
@@ -933,7 +966,8 @@ class Interpreter(_Runtime):
         init = await _workflow_init_step()
         self._start_time = float(init["start_time"])
         self._vloop.time_seconds = self._start_time
-        self._random.seed(init["seed"])
+        self._seed = int(init["seed"])
+        self._random.seed(self._seed)
 
         # Rebuild the typed run arguments from their payloads (deterministic,
         # so re-decoding each run/replay is replay-safe).
@@ -1085,12 +1119,7 @@ class Interpreter(_Runtime):
         anywhere between here and this run's completion replays into an
         idempotent re-attach, never a twin run.
         """
-        from contextlib import nullcontext
-        from typing import ContextManager
-
-        from dbos import SetWorkflowAttributes, SetWorkflowID, SetWorkflowTimeout
-
-        from . import registry
+        from . import enqueue, registry
         from .payloads import serialize_retry_policy
 
         type_name = can._tdb_workflow or self._defn.name
@@ -1141,25 +1170,14 @@ class Interpreter(_Runtime):
         # The new run's args come from user code, so encode them (the next
         # run's interpreter decodes against its run signature).
         payload = wrap_input(await conversion.encode_values(can._tdb_args), carried)
-        # Explicit per-run timeout, else DBOS propagates THIS run's absolute
-        # deadline to the next run (see dispatcher._enqueue_next_run).
-        timeout_ctx: ContextManager[Any] = (
-            SetWorkflowTimeout(carried.run_timeout)
-            if carried.run_timeout is not None
-            else nullcontext()
+        await enqueue.enqueue_run(
+            dispatch_fn,
+            payload,
+            run_id=new_run_id,
+            queue=queue,
+            run_timeout=carried.run_timeout,
+            attributes=carried.attributes,
         )
-        attrs_ctx: ContextManager[Any] = (
-            SetWorkflowAttributes(carried.attributes)
-            if carried.attributes is not None
-            else nullcontext()
-        )
-        with SetWorkflowID(new_run_id), timeout_ctx, attrs_ctx:
-            if queue is not None:
-                await queue.enqueue_async(dispatch_fn, payload)
-            else:
-                # This run wasn't queue-dispatched (Phase 0 helpers): start
-                # the next run directly in-process.
-                await DBOS.start_workflow_async(dispatch_fn, payload)
         return new_run_id
 
     async def _forward_inbox_to(self, new_run_id: str) -> None:
@@ -1338,7 +1356,7 @@ class Interpreter(_Runtime):
 
     def _assert_not_read_only(self, what: str) -> None:
         if self._read_only:
-            raise RuntimeError(
+            raise ReadOnlyContextError(
                 f"Cannot {what} in a read-only context (query or update validator)"
             )
 
@@ -1640,11 +1658,7 @@ class Interpreter(_Runtime):
         (and SetWorkflowID re-attaches idempotently), so replay re-attaches
         to the same child instead of spawning a twin.
         """
-        from contextlib import nullcontext
-
-        from dbos import SetWorkflowAttributes, SetWorkflowID
-
-        from . import registry
+        from . import enqueue, registry
 
         try:
             dispatch_fn = registry.dbos_workflow_for(child.type_name)
@@ -1689,24 +1703,33 @@ class Interpreter(_Runtime):
             # Encode headers here (real loop) — child.headers held raw Payloads
             # from the sync outbound root, and a codec is async.
             child_headers = await conversion.encode_headers(child.headers)
-            child_meta = (
-                RunMeta(attributes=child_attrs, headers=child_headers or None)
-                if child_attrs is not None or child_headers
-                else None
+            # The child's root is our root if we have one, else us (we are the
+            # top of the child's tree) — surfaced as the child's info().root.
+            child_root = self._meta.root or {
+                "workflow_id": ids.parse_run(self._workflow_id)[0],
+                "run_id": self._workflow_id,
+            }
+            # run_timeout / retry_policy ride in the child's RunMeta exactly as a
+            # top-level start: the timeout re-applies across the child's own
+            # chain (cron/retry/CAN) and the retry policy gates its workflow
+            # retries. run_timeout also drives SetWorkflowTimeout on this initial
+            # enqueue (mirroring the continue-as-new path).
+            child_meta = RunMeta(
+                attributes=child_attrs,
+                headers=child_headers or None,
+                root=child_root,
+                run_timeout=child.run_timeout,
+                retry_policy=child.retry_policy,
             )
             child_payload = wrap_input(child_args, child_meta)
-            attrs_ctx = (
-                SetWorkflowAttributes(child_attrs)
-                if child_attrs is not None
-                else nullcontext()
+            await enqueue.enqueue_run(
+                dispatch_fn,
+                child_payload,
+                run_id=child.child_id,
+                queue=child_queue,
+                run_timeout=child.run_timeout,
+                attributes=child_attrs,
             )
-            with SetWorkflowID(child.child_id), attrs_ctx:
-                if child_queue is not None:
-                    await child_queue.enqueue_async(dispatch_fn, child_payload)
-                else:
-                    # Parent wasn't queue-dispatched (Phase 0 helpers):
-                    # start the child directly in-process.
-                    await DBOS.start_workflow_async(dispatch_fn, child_payload)
         except Exception as err:  # noqa: BLE001
             del self._pending_children[child.seq]
             if not child.start_future.cancelled():
@@ -2641,16 +2664,22 @@ class Interpreter(_Runtime):
             def run_validator() -> None:
                 # Routed through the inbound chain; the root sets the read-only,
                 # against-current-state context (a rejected update must leave no
-                # trace in workflow state).
+                # trace in workflow state). current_update_info() resolves here.
                 assert self._inbound is not None
-                self._inbound.handle_update_validator(
-                    _wfi.HandleUpdateInput(
-                        id=self._workflow_id,
-                        update=envelope["name"],
-                        args=envelope["args"],
-                        headers=update_headers,
-                    )
+                token = _current_update_info.set(
+                    UpdateInfo(id=envelope["update_id"], name=envelope["name"])
                 )
+                try:
+                    self._inbound.handle_update_validator(
+                        _wfi.HandleUpdateInput(
+                            id=self._workflow_id,
+                            update=envelope["name"],
+                            args=envelope["args"],
+                            headers=update_headers,
+                        )
+                    )
+                finally:
+                    _current_update_info.reset(token)
 
             # The verdict is a checkpoint: the validator runs exactly once,
             # at first delivery; replay reads the recorded verdict.
@@ -2676,6 +2705,7 @@ class Interpreter(_Runtime):
                 envelope["args"],
                 reply_key,
                 update_headers,
+                envelope["update_id"],
             ),
             kind="update",
             # A dynamic handler has no name of its own; label it by the
@@ -2691,7 +2721,10 @@ class Interpreter(_Runtime):
         args: Sequence[Any],
         reply_key: str,
         headers: Mapping[str, Any],
+        update_id: str,
     ) -> None:
+        # current_update_info() resolves to this update for the handler's life.
+        _current_update_info.set(UpdateInfo(id=update_id, name=name))
         try:
             assert self._inbound is not None
             result = await self._inbound.handle_update_handler(
@@ -2793,6 +2826,16 @@ class Interpreter(_Runtime):
             if self._parent_run_id is not None
             else None
         )
+        # Root of this run's tree, threaded in via the child-start meta-envelope
+        # (§6.6); None for a top-level workflow (itself the root).
+        root = (
+            RootInfo(
+                run_id=self._meta.root["run_id"],
+                workflow_id=self._meta.root["workflow_id"],
+            )
+            if self._meta.root is not None
+            else None
+        )
         start_time = datetime.fromtimestamp(self._start_time)
         return Info(
             attempt=self._meta.attempt,
@@ -2804,6 +2847,7 @@ class Interpreter(_Runtime):
             headers=self._headers,
             namespace="default",
             parent=parent,
+            root=root,
             retry_policy=(
                 deserialize_retry_policy(self._meta.retry_policy)
                 if self._meta.retry_policy is not None
@@ -2884,6 +2928,19 @@ class Interpreter(_Runtime):
     def runtime_random(self) -> Random:
         return self._random
 
+    def runtime_random_seed(self) -> int:
+        return self._seed
+
+    def runtime_register_random_seed_callback(
+        self, callback: Callable[[int], None]
+    ) -> None:
+        # Accepted for parity but intentionally a no-op: our seed is fixed per
+        # run, so the callback could never fire (DEVIATIONS D31).
+        return None
+
+    def runtime_instance(self) -> Any:
+        return self._instance
+
     async def runtime_start_child_workflow(
         self,
         type_name: str,
@@ -2897,8 +2954,12 @@ class Interpreter(_Runtime):
         search_attributes: Optional[
             Union[TypedSearchAttributes, SearchAttributes]
         ] = None,
+        run_timeout: Optional[timedelta] = None,
+        retry_policy: Optional[RetryPolicy] = None,
         headers: Optional[Mapping[str, Any]] = None,
     ) -> "ChildWorkflowHandle":
+        from .payloads import serialize_retry_policy
+
         self._assert_not_read_only("start a child workflow")
         seq = self._next_seq("child")
         if child_id is not None:
@@ -2919,6 +2980,14 @@ class Interpreter(_Runtime):
             result_future=self._vloop.create_future(),
             memo=memo,
             search_attributes=search_attributes,
+            run_timeout=(
+                run_timeout.total_seconds() if run_timeout is not None else None
+            ),
+            retry_policy=(
+                serialize_retry_policy(retry_policy)
+                if retry_policy is not None
+                else None
+            ),
             headers=dict(headers or {}),
         )
         self._pending_children[seq] = child
@@ -3018,6 +3087,31 @@ class Interpreter(_Runtime):
 
     def runtime_can_suggested(self) -> bool:
         return self.runtime_history_length() >= CAN_SUGGESTION_THRESHOLD
+
+    def runtime_get_current_deployment_version(
+        self,
+    ) -> Optional[WorkerDeploymentVersion]:
+        # Deployment name is a process-global set by the Worker; the build_id is
+        # read live from the worker's DBOS application_version (post-launch, so
+        # it reflects an explicit build_id, the pinned default, or a computed
+        # code-hash for auto-versioning) — the version DBOS actually pins
+        # recovery/dequeue to, so reported == enforced (DEVIATIONS D29). None
+        # when no Worker is active (the in-process dispatcher harness).
+        from . import registry
+
+        name = registry.worker_deployment_name
+        if name is None:
+            return None
+        return WorkerDeploymentVersion(name, GlobalParams.app_version)
+
+    def runtime_get_current_details(self) -> str:
+        return self._current_details
+
+    def runtime_set_current_details(self, details: str) -> None:
+        # A state mutation: disallowed from read-only contexts (queries /
+        # update validators), like upsert_memo.
+        self._assert_not_read_only("set current details")
+        self._current_details = details
 
     async def runtime_wait_condition(
         self, fn: Callable[[], bool], *, timeout: Optional[float]
