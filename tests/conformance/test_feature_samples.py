@@ -5,9 +5,10 @@ test_message_passing.py — but generalized to the corpus's structural variety
 starters that take a file argument, and starters that assert only by exiting 0).
 
 The suite mixes passing samples (a feature we support, proven end-to-end) with
-xfail/skip samples (a documented deviation), so the conformance matrix records
-*why* each unsupported sample can't run — the same "no silent gaps" philosophy
-as the parity ledgers.
+skipped samples, each carrying the documented reason it can't run here (a
+fundamental deviation the sample's own code depends on, or a harness limitation),
+so the conformance matrix records *why* each unsupported sample is excluded — the
+same "no silent gaps" philosophy as the parity ledgers.
 """
 
 import os
@@ -84,29 +85,6 @@ SAMPLES = {
         expect_output="Result:",
         starter_timeout=30,
     ),
-    # ---- xfail: a documented deviation --------------------------------------
-    "custom_converter": Sample(
-        package="custom_converter",
-        xfail="sample's PayloadConverter is built on protobuf "
-        "temporalio.api.common.v1.Payload; our Payload is a lightweight dict "
-        "(DEVIATIONS D1)",
-        ready_timeout=25,
-        starter_timeout=25,
-    ),
-    "encryption": Sample(
-        package="encryption",
-        xfail="EncryptionCodec serializes protobuf Payloads (.SerializeToString); "
-        "our PayloadCodec operates on a lightweight Payload (DEVIATIONS D1)",
-        ready_timeout=25,
-        starter_timeout=25,
-    ),
-    "worker_specific_task_queues": Sample(
-        package="worker_specific_task_queues",
-        xfail="runs two Workers in one process; temporal-dbos is one Worker per "
-        "process (DESIGN §5)",
-        ready_timeout=25,
-        starter_timeout=25,
-    ),
     "batch_sliding_window": Sample(
         package="batch_sliding_window",
         # Sliding-window batch: 90 records via ~18 continue-as-new hops + 90
@@ -123,6 +101,25 @@ SAMPLES = {
         # print — the starter completing (exit 0) after terminating the pool is
         # the proof.
         starter_timeout=60,
+    ),
+    # ---- skip: not runnable — a fundamental deviation the sample's own code
+    #      depends on (would never pass; like hello's mTLS / multiprocess skips)
+    "custom_converter": Sample(
+        package="custom_converter",
+        skip="sample's PayloadConverter is built on protobuf "
+        "temporalio.api.common.v1.Payload; our Payload is a lightweight dict and "
+        "protobuf payloads are a non-goal (DEVIATIONS D1)",
+    ),
+    "encryption": Sample(
+        package="encryption",
+        skip="EncryptionCodec serializes protobuf Payloads (.SerializeToString); "
+        "our PayloadCodec operates on a lightweight Payload, and protobuf payloads "
+        "are a non-goal (DEVIATIONS D1)",
+    ),
+    "worker_specific_task_queues": Sample(
+        package="worker_specific_task_queues",
+        skip="runs two Workers in one process; temporal-dbos is one Worker per "
+        "process (DESIGN §5)",
     ),
     # ---- skip: not runnable in this harness ---------------------------------
     "sleep_for_days": Sample(
