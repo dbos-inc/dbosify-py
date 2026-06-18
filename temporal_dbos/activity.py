@@ -13,7 +13,6 @@ external completion via ``client.get_async_activity_handle``.
 """
 
 import asyncio
-import contextvars
 import inspect
 import json
 import logging
