@@ -343,11 +343,11 @@ async def test_query_on_closed_workflow_rehydrates() -> None:
             handle = await client.start_workflow(
                 GreetingWf.run, "World", id="rp-query", task_queue=TASK_QUEUE
             )
-            # Query while RUNNING goes through the live path.
-            assert await handle.query(GreetingWf.greeting) in (
-                "Hello, World!",
-                "Goodbye, World!",
-            )
+            # This test exercises the CLOSED/rehydrate path. The live RUNNING
+            # query path is covered deterministically by
+            # test_client_worker.test_handle_signal_query_update (a workflow that
+            # blocks on wait_condition); a live query here would race GreetingWf's
+            # ~0.05s completion and time out under load.
             assert await handle.result() == "Goodbye, World!"
 
             # The workflow is now closed; the query rehydrates it by replay and
