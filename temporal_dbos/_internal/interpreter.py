@@ -2613,7 +2613,7 @@ class Interpreter(_Runtime):
         warnable = [
             record
             for record in self._inflight_handlers.values()
-            if record["policy"] == HandlerUnfinishedPolicy.WARN_AND_ABANDON
+            if record["policy"] == HandlerUnfinishedPolicy.WARN_AND_ABANDON.value
         ]
         updates = [r for r in warnable if r["kind"] == "update"]
         if updates:

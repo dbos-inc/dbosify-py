@@ -353,7 +353,7 @@ def build_workflow_definition(
                 name=member.name,
                 fn=member.fn,
                 validator=member.validator_fn,
-                unfinished_policy=int(member.unfinished_policy),
+                unfinished_policy=int(member.unfinished_policy.value),
                 arg_types=u_args,
                 ret_type=u_ret,
                 description=member.description,

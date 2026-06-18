@@ -318,6 +318,17 @@ def _compare_callable(
 def _compare_enum(
     qualname: str, ours: "type[enum.Enum]", theirs: type, problems: List[str]
 ) -> None:
+    # Int-ness is observable: an IntEnum member compares equal to its int value,
+    # a plain Enum member does not. temporalio mixes both (proto-backed enums are
+    # IntEnum; e.g. HandlerUnfinishedPolicy is a plain Enum), so a mismatch is a
+    # real behavioral deviation the member/value checks below would miss.
+    if issubclass(ours, int) != issubclass(theirs, int):
+        ours_kind = "IntEnum" if issubclass(ours, int) else "Enum"
+        theirs_kind = "IntEnum" if issubclass(theirs, int) else "Enum"
+        problems.append(
+            f"{qualname}: enum is {ours_kind} but temporalio's is {theirs_kind} "
+            f"(members compare to their int value differently)"
+        )
     for member in ours:
         their_member = getattr(theirs, member.name, None)
         if their_member is None:

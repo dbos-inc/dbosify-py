@@ -20,7 +20,7 @@ import uuid as uuid_mod
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from enum import IntEnum
+from enum import Enum, IntEnum
 from random import Random
 from typing import (
     TYPE_CHECKING,
@@ -208,11 +208,15 @@ _current_update_info: "contextvars.ContextVar[UpdateInfo]" = contextvars.Context
 )
 
 
-class HandlerUnfinishedPolicy(IntEnum):
+class HandlerUnfinishedPolicy(Enum):
     """What to do when a workflow finishes while a signal/update handler is
     still running, mirroring ``temporalio.workflow.HandlerUnfinishedPolicy``.
     Either way the handler is abandoned (cancelled with the execution); the
     policy controls whether that emits a warning.
+
+    Plain ``Enum`` (not ``IntEnum``) to match temporalio exactly: members do
+    not compare equal to their integer value. Internally we store the int
+    ``.value`` (see _internal/registry.py).
     """
 
     WARN_AND_ABANDON = 1
@@ -350,7 +354,7 @@ def signal(
     def decorator(fn: _F) -> _F:
         marker = None if dynamic else (name if name is not None else fn.__name__)
         setattr(fn, _registry.SIGNAL_ATTR, marker)
-        setattr(fn, _registry.SIGNAL_POLICY_ATTR, int(unfinished_policy))
+        setattr(fn, _registry.SIGNAL_POLICY_ATTR, int(unfinished_policy.value))
         setattr(fn, _registry.SIGNAL_DESC_ATTR, description)
         return fn
 
