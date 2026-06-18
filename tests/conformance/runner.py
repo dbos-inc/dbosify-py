@@ -77,16 +77,56 @@ def install_shim() -> None:
     async def patched_connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
         target = args[0] if args else kwargs.get("target_host")
         if isinstance(target, str) or target is None:
-            return cls(DBOSClient(system_database_url=url))
+            # Forward the connection options that are real migration surface
+            # (not gRPC plumbing): a custom DataConverter / PayloadCodec and
+            # interceptors. Our Client.__init__ accepts both.
+            forwarded = {
+                k: kwargs[k] for k in ("data_converter", "interceptors") if k in kwargs
+            }
+            client = cls(DBOSClient(system_database_url=url), **forwarded)
+            # Stash interceptors so the adapted ``Worker(client, ...)`` can
+            # harvest them: temporalio Workers inherit the client's
+            # interceptors, but ours take them via ``Worker(interceptors=)``
+            # (DEVIATIONS D24). Bridging it here lets the sample run unmodified.
+            client._conformance_interceptors = list(forwarded.get("interceptors", []))
+            return client
         return await original_connect(cls, *args, **kwargs)
 
     Client.connect = classmethod(patched_connect)  # type: ignore[assignment, method-assign]
+
+    # -- temporal_dbos.api.common.v1 stand-in --------------------------------
+    # Some samples import ``temporalio.api.common.v1.Payload`` purely for type
+    # annotations (e.g. context_propagation's interceptor, under
+    # ``from __future__ import annotations`` so it is never evaluated). The
+    # protobuf API is a non-goal (DEVIATIONS D1) and our Payload is a
+    # lightweight dict; register the module chain so annotation-only imports
+    # resolve. Samples that actually *construct* a protobuf Payload
+    # (custom_converter, encryption) still fail at runtime — correctly, since
+    # they depend on protobuf semantics we do not provide.
+    import temporal_dbos as _tdb_pkg
+    from temporal_dbos import converter as _tdb_converter
+
+    for modname in (
+        "temporal_dbos.api",
+        "temporal_dbos.api.common",
+        "temporal_dbos.api.common.v1",
+    ):
+        sys.modules.setdefault(modname, types.ModuleType(modname))
+    sys.modules["temporal_dbos.api.common.v1"].Payload = _tdb_converter.Payload  # type: ignore[attr-defined]
+    sys.modules["temporal_dbos.api.common"].v1 = sys.modules["temporal_dbos.api.common.v1"]  # type: ignore[attr-defined]
+    sys.modules["temporal_dbos.api"].common = sys.modules["temporal_dbos.api.common"]  # type: ignore[attr-defined]
+    _tdb_pkg.api = sys.modules["temporal_dbos.api"]  # type: ignore[attr-defined]
 
     # -- Worker(client, ...) --------------------------------------------------
     original_worker_init = Worker.__init__
 
     def patched_worker_init(self: Any, first: Any, *args: Any, **kwargs: Any) -> None:
         if isinstance(first, Client):
+            # Harvest the client's interceptors (temporalio Workers inherit
+            # them; ours take them explicitly — DEVIATIONS D24).
+            harvested = getattr(first, "_conformance_interceptors", None)
+            if harvested and "interceptors" not in kwargs:
+                kwargs["interceptors"] = harvested
             config: DBOSConfig = {
                 "name": "tdb_conformance",
                 "system_database_url": url,
