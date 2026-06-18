@@ -216,6 +216,33 @@ async def test_list_by_workflow_id_and_prefix() -> None:
         assert {r.id for r in prefixed} == {"order-1", "order-2"}
 
 
+async def test_list_by_workflow_id_returns_run_chain() -> None:
+    async with _env() as client:
+        # Reuse one workflow id three times: the runs become chain-1, chain-1--r1,
+        # chain-1--r2. WorkflowId = X must return the whole chain (as in Temporal,
+        # where a WorkflowId query returns every run of that id), not just run 0.
+        for v in ["a", "b", "c"]:
+            await client.execute_workflow(
+                Completer.run, v, id="chain-1", task_queue=TASK_QUEUE
+            )
+
+        rows = await _collect(client.list_workflows("WorkflowId = 'chain-1'"))
+        assert {r.id for r in rows} == {"chain-1"}  # all share the base workflow id
+        chain_runs = {"chain-1", "chain-1--r1", "chain-1--r2"}
+        assert {r.run_id for r in rows} == chain_runs  # three distinct runs
+
+        # map_histories() yields each run's WorkflowHistory (what feeds the
+        # Replayer): one per run, each snapshotting its own run.
+        histories = [
+            h
+            async for h in client.list_workflows(
+                "WorkflowId = 'chain-1'"
+            ).map_histories()
+        ]
+        assert {h.run_id for h in histories} == chain_runs
+        assert all(h.workflow_type == "Completer" for h in histories)
+
+
 async def test_list_by_search_attribute_containment() -> None:
     async with _env() as client:
         await client.execute_workflow(

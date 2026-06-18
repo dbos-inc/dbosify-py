@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from enum import IntEnum
 from typing import (
     Any,
+    AsyncIterator,
     Callable,
     Dict,
     List,
@@ -993,6 +994,34 @@ class WorkflowExecutionAsyncIterator:
     def next_page_token(self) -> Optional[bytes]:
         """Token for the next page request if any."""
         return self._next_page_token
+
+    def map_histories(
+        self,
+        *,
+        event_filter_type: Any = None,
+        rpc_metadata: Mapping[str, Any] = {},
+        rpc_timeout: Optional[timedelta] = None,
+    ) -> AsyncIterator["WorkflowHistory"]:
+        """Async-iterate the matched executions, yielding each run's
+        :class:`WorkflowHistory` (fetched via ``WorkflowHandle.fetch_history``),
+        mirroring temporalio. Convenience for feeding
+        :py:meth:`Replayer.replay_workflows`."""
+        return self._map_histories(
+            event_filter_type=event_filter_type,
+            rpc_metadata=rpc_metadata,
+            rpc_timeout=rpc_timeout,
+        )
+
+    async def _map_histories(
+        self, **fetch_kwargs: Any
+    ) -> AsyncIterator["WorkflowHistory"]:
+        async for execution in self:
+            # Pin a handle to this specific run (run_id is the DBOS id) so each
+            # history is the right run, not the chain's current one.
+            handle = self._client.get_workflow_handle(
+                execution.id, run_id=execution.run_id
+            )
+            yield await handle.fetch_history(**fetch_kwargs)
 
     async def fetch_next_page(self, *, page_size: Optional[int] = None) -> None:
         """Fetch the next page if any."""

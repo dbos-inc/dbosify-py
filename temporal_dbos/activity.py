@@ -123,7 +123,7 @@ def defn(
     *cooperatively* and never raises into their worker thread, so it always
     behaves as ``True``. Setting it ``False`` — asking for Temporal's
     raise-into-the-thread behavior — raises ``NotImplementedError`` rather than
-    silently doing something else (DEVIATIONS D26).
+    silently doing something else (DEVIATIONS D37).
     """
     if name is not None and dynamic:
         raise RuntimeError("Cannot provide name and dynamic boolean")
@@ -134,7 +134,7 @@ def defn(
             "supported — temporal-dbos delivers activity cancellation "
             "cooperatively. Leave it True (the default here) and observe "
             "cancellation via activity.is_cancelled() / activity.heartbeat() / "
-            "activity.wait_for_cancelled_sync() (DEVIATIONS D26)."
+            "activity.wait_for_cancelled_sync() (DEVIATIONS D37)."
         )
 
     def decorator(fn: _F) -> _F:

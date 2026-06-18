@@ -706,8 +706,7 @@ class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
         # Exact match first, then the dynamic (catch-all) handler — a dynamic
         # handler is keyed ``None`` and called as ``fn(self, name, args)`` (the
         # args were shaped to ``[name, Sequence[RawValue]]`` in _decode).
-        signals = self._interp._defn.signals
-        defn = signals.get(input.signal) or signals.get(None)
+        defn = self._interp._resolve_signal(input.signal)
         if defn is None:  # pragma: no cover — _apply_signal resolved it
             return
         result = defn.fn(self._interp._instance, *input.args)
@@ -715,14 +714,12 @@ class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
             await result
 
     async def handle_query(self, input: _wfi.HandleQueryInput) -> Any:
-        queries = self._interp._defn.queries
-        defn = queries.get(input.query) or queries.get(None)
+        defn = self._interp._resolve_query(input.query)
         assert defn is not None  # _apply_query resolved it before routing
         return defn.fn(self._interp._instance, *input.args)
 
     def handle_update_validator(self, input: _wfi.HandleUpdateInput) -> None:
-        updates = self._interp._defn.updates
-        defn = updates.get(input.update) or updates.get(None)
+        defn = self._interp._resolve_update(input.update)
         assert defn is not None  # _apply_update resolved it before routing
         if defn.validator is None:  # pragma: no cover — only routed when set
             return
@@ -735,8 +732,7 @@ class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
             self._interp._read_only = False
 
     async def handle_update_handler(self, input: _wfi.HandleUpdateInput) -> Any:
-        updates = self._interp._defn.updates
-        defn = updates.get(input.update) or updates.get(None)
+        defn = self._interp._resolve_update(input.update)
         assert defn is not None  # _apply_update resolved it before routing
         result = defn.fn(self._interp._instance, *input.args)
         if asyncio.iscoroutine(result):
@@ -877,6 +873,25 @@ class Interpreter(_Runtime):
         self._outbox: List[Tuple[str, Any]] = []
         self._waiters: List[_Waiter] = []
         self._buffered_signals: Dict[str, List[inbox.Envelope]] = {}
+        # Runtime handler overrides (workflow.set_signal/query/update_handler):
+        # name -> (wrapped definition, original callable), or None for an
+        # explicit unset that shadows the @defn handler. Absence falls through
+        # to the decorator handlers; key None is the dynamic (catch-all)
+        # override. In-memory + reconstructed on replay (run() re-registers),
+        # like current details (DEVIATIONS D30).
+        self._signal_overrides: Dict[
+            Optional[str], Optional[Tuple[Any, Callable[..., Any]]]
+        ] = {}
+        self._query_overrides: Dict[
+            Optional[str], Optional[Tuple[Any, Callable[..., Any]]]
+        ] = {}
+        self._update_overrides: Dict[
+            Optional[str], Optional[Tuple[Any, Callable[..., Any]]]
+        ] = {}
+        # Signals buffered with no handler, queued for (re)delivery once a
+        # matching handler is registered at runtime (set_signal_handler flush);
+        # drained from _buffered_signals, applied by the main loop.
+        self._pending_handler_flush: List[inbox.Envelope] = []
         self._seen_update_ids: Set[str] = set()
         # Live signal/update handler tasks -> {kind, name, id, policy};
         # backs all_handlers_finished() and the unfinished-handler warnings.
@@ -1047,9 +1062,10 @@ class Interpreter(_Runtime):
             while True:
                 await self._drain_outside_task()
                 await self._sweep_cancellations()
+                flushed = await self._flush_pending_handler_signals()
                 made_progress = await self._process_commands()
-                if made_progress:
-                    continue  # immediate timer fires need another drain
+                if made_progress or flushed:
+                    continue  # immediate timer fires / flushed signals re-drain
                 if self._outcome is not None and self._outcome[0] == "task_failure":
                     # Discard uncommitted replies; the retry will regenerate
                     # them identically.
@@ -2408,11 +2424,11 @@ class Interpreter(_Runtime):
         name = envelope["name"]
         defn: Any = None
         if kind == "signal":
-            defn = self._defn.signals.get(name) or self._defn.signals.get(None)
+            defn = self._resolve_signal(name)
         elif kind == "update":
-            defn = self._defn.updates.get(name) or self._defn.updates.get(None)
+            defn = self._resolve_update(name)
         elif kind == "query":
-            defn = self._defn.queries.get(name) or self._defn.queries.get(None)
+            defn = self._resolve_query(name)
         if defn is not None and defn.name is None:
             # Dynamic (catch-all) handler: deliver (name, Sequence[RawValue]) —
             # the raw payloads wrapped untouched so the handler converts them
@@ -2567,10 +2583,161 @@ class Interpreter(_Runtime):
         if self._primary_task is not None and not self._primary_task.done():
             self._vloop.call_soon(self._primary_task.cancel)
 
+    # -- runtime handler resolution + accessors -----------------------------
+    # Every signal/query/update dispatch resolves its handler through these so
+    # a runtime override (workflow.set_*_handler) takes precedence over the
+    # @defn handler. Resolution order mirrors temporalio: an exact handler
+    # (override beats decorator) else the dynamic handler (override beats
+    # decorator). An explicit unset (override value None) shadows the decorator
+    # handler and falls through to the dynamic one.
+
+    @staticmethod
+    def _resolve(
+        overrides: "Dict[Optional[str], Optional[Tuple[Any, Callable[..., Any]]]]",
+        defns: "Dict[Optional[str], Any]",
+        name: Optional[str],
+    ) -> Any:
+        if name in overrides:
+            entry = overrides[name]
+            if entry is not None:
+                return entry[0]
+        else:
+            exact = defns.get(name)
+            if exact is not None:
+                return exact
+        dynamic_override = overrides.get(None)
+        if dynamic_override is not None:
+            return dynamic_override[0]
+        return defns.get(None)
+
+    def _resolve_signal(self, name: Optional[str]) -> Any:
+        return self._resolve(self._signal_overrides, self._defn.signals, name)
+
+    def _resolve_query(self, name: Optional[str]) -> Any:
+        return self._resolve(self._query_overrides, self._defn.queries, name)
+
+    def _resolve_update(self, name: Optional[str]) -> Any:
+        return self._resolve(self._update_overrides, self._defn.updates, name)
+
+    def _overrides_for(
+        self, category: str
+    ) -> "Dict[Optional[str], Optional[Tuple[Any, Callable[..., Any]]]]":
+        return {
+            "signal": self._signal_overrides,
+            "query": self._query_overrides,
+            "update": self._update_overrides,
+        }[category]
+
+    def runtime_get_handler(
+        self, category: str, name: Optional[str]
+    ) -> Optional[Callable[..., Any]]:
+        overrides = self._overrides_for(category)
+        if name in overrides:
+            entry = overrides[name]
+            return entry[1] if entry is not None else None
+        if category == "signal":
+            defn: Any = self._defn.signals.get(name)
+        elif category == "query":
+            defn = self._defn.queries.get(name)
+        else:
+            defn = self._defn.updates.get(name)
+        if defn is None:
+            return None
+        # A decorator handler is an unbound function; return it bound to the
+        # instance, as temporalio's get_*_handler does.
+        bound: Callable[..., Any] = defn.fn.__get__(self._instance)
+        return bound
+
+    def runtime_set_handler(
+        self,
+        category: str,
+        name: Optional[str],
+        handler: Optional[Callable[..., Any]],
+        validator: Optional[Callable[..., Any]] = None,
+    ) -> None:
+        self._assert_not_read_only("set a handler")
+        overrides = self._overrides_for(category)
+        if handler is None:
+            overrides[name] = None
+        else:
+            overrides[name] = (
+                self._build_handler_defn(category, name, handler, validator),
+                handler,
+            )
+        if category != "signal":
+            return
+        # Deliver past signals buffered with no handler (temporalio: "all
+        # unhandled past signals are immediately sent to the handler"). A
+        # specific handler drains its name; the dynamic handler drains all.
+        if handler is None:
+            return
+        if name is None:
+            for buffered in self._buffered_signals.values():
+                self._pending_handler_flush.extend(buffered)
+            self._buffered_signals.clear()
+        elif name in self._buffered_signals:
+            self._pending_handler_flush.extend(self._buffered_signals.pop(name))
+
+    def _build_handler_defn(
+        self,
+        category: str,
+        name: Optional[str],
+        handler: Callable[..., Any],
+        validator: Optional[Callable[..., Any]],
+    ) -> Any:
+        """Wrap an imperatively-set (already-bound) callable as a registry
+        Definition whose ``fn`` matches the ``fn(instance, *args)`` calling
+        convention the dispatch uses for decorator handlers."""
+        from .conversion import type_hints_from_func
+        from .registry import QueryDefinition, SignalDefinition, UpdateDefinition
+
+        invoke: Callable[..., Any]
+        if name is None:
+            # Dynamic: invoked as handler(name, Sequence[RawValue]).
+            def _dynamic_invoke(_inst: Any, msg_name: Any, raw: Any) -> Any:
+                return handler(msg_name, raw)
+
+            invoke = _dynamic_invoke
+            arg_types: Optional[List[type]] = None
+            ret_type: Optional[type] = None
+        else:
+
+            def _exact_invoke(_inst: Any, *args: Any) -> Any:
+                return handler(*args)
+
+            invoke = _exact_invoke
+            arg_types, ret_type = type_hints_from_func(handler)
+        if category == "signal":
+            return SignalDefinition(name=name, fn=invoke, arg_types=arg_types)
+        if category == "query":
+            return QueryDefinition(
+                name=name, fn=invoke, arg_types=arg_types, ret_type=ret_type
+            )
+        vfn: Optional[Callable[..., Any]] = None
+        if validator is not None:
+
+            def vinvoke(_inst: Any, *args: Any) -> Any:
+                return validator(*args)
+
+            vfn = vinvoke
+        return UpdateDefinition(
+            name=name, fn=invoke, validator=vfn, arg_types=arg_types, ret_type=ret_type
+        )
+
+    async def _flush_pending_handler_signals(self) -> bool:
+        """Apply signals queued by set_signal_handler (buffered before a handler
+        existed). Returns whether any were delivered (so the loop re-drains)."""
+        if not self._pending_handler_flush:
+            return False
+        pending, self._pending_handler_flush = self._pending_handler_flush, []
+        for envelope in pending:
+            await self._apply_signal(envelope)
+        return True
+
     async def _apply_signal(self, envelope: inbox.Envelope) -> None:
         # Exact match first, then the dynamic (catch-all) handler if one is
         # registered (name key ``None``).
-        defn = self._defn.signals.get(envelope["name"]) or self._defn.signals.get(None)
+        defn = self._resolve_signal(envelope["name"])
         if defn is None:
             # Buffered with its *encoded* args for delivery if a handler is
             # registered later (dynamic registration arrives in Phase 2) or, more
@@ -2674,7 +2841,7 @@ class Interpreter(_Runtime):
         warnable = [
             record
             for record in self._inflight_handlers.values()
-            if record["policy"] == HandlerUnfinishedPolicy.WARN_AND_ABANDON
+            if record["policy"] == HandlerUnfinishedPolicy.WARN_AND_ABANDON.value
         ]
         updates = [r for r in warnable if r["kind"] == "update"]
         if updates:
@@ -2707,7 +2874,7 @@ class Interpreter(_Runtime):
         self._seen_update_ids.add(update_id)
         reply_key = inbox.update_result_key(update_id)
         acceptance_key = inbox.update_acceptance_key(update_id)
-        defn = self._defn.updates.get(envelope["name"]) or self._defn.updates.get(None)
+        defn = self._resolve_update(envelope["name"])
         if defn is None:
             failure = exceptions.ApplicationError(
                 f"update handler {envelope['name']!r} not found",
@@ -2813,7 +2980,7 @@ class Interpreter(_Runtime):
 
     async def _apply_query(self, envelope: inbox.Envelope) -> None:
         reply_key = inbox.query_result_key(envelope["request_id"])
-        defn = self._defn.queries.get(envelope["name"]) or self._defn.queries.get(None)
+        defn = self._resolve_query(envelope["name"])
         if defn is None:
             failure = exceptions.ApplicationError(
                 f"query handler {envelope['name']!r} not found",
@@ -2924,7 +3091,11 @@ class Interpreter(_Runtime):
             start_time=start_time,
             task_queue=self._task_queue_name,
             typed_search_attributes=self._typed_sa,
-            workflow_id=self._workflow_id,
+            # The Temporal workflow id is stable across the run chain (the base);
+            # run_id above carries the per-run DBOS id (W--r{n}). They coincide
+            # only for run 0, which is why this surfaced first after a
+            # continue-as-new built a child id from info().workflow_id.
+            workflow_id=base_id,
             workflow_start_time=start_time,
             workflow_type=self._defn.name,
         )
@@ -3107,6 +3278,9 @@ class Interpreter(_Runtime):
         if ctx is None:
             return False
         return ctx.function_id < self._replay_horizon
+
+    def runtime_is_read_only(self) -> bool:
+        return self._read_only
 
     def _patch(self, id: str) -> bool:
         """Shared patched()/deprecate_patch() logic (DESIGN §6.8).

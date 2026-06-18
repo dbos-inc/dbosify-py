@@ -989,3 +989,59 @@ and `retry_policy` (matching top-level starts — the child carries them in its
 `RunMeta`, `run_timeout` also drives `SetWorkflowTimeout` on the enqueue, and the
 child-result wait follows the resulting retry chain to the final run), alongside
 `id`, `task_queue`, `parent_close_policy`, and `cancellation_type`.
+
+### D36. Client-initiated (standalone) activities are not supported
+
+Temporal added the ability to start an **activity directly from a client**,
+independent of any workflow, plus a handle/describe/list surface for it. None of
+it is implemented here:
+
+- `Client.start_activity` / `execute_activity` / `get_activity_handle` /
+  `list_activities` / `count_activities` (and the `*_method` / `*_class`
+  variants) — absent; calling one raises `AttributeError`.
+- the supporting types: `client.ActivityExecution*` (description / async
+  iterator / count / status), `client.ActivityHandle`, `client.ActivityFailureError`,
+  `client.PendingActivityState`, `common.ActivityIDReusePolicy` /
+  `ActivityIDConflictPolicy`, and `activity.Info.in_workflow` (the flag that
+  distinguishes a standalone activity from one running inside a workflow).
+- the matching client-interceptor hooks: `start_activity` / `cancel_activity` /
+  `describe_activity` / `terminate_activity` / `list_activities` /
+  `count_activities` on `client.OutboundInterceptor`.
+
+Why: in this design an activity is always launched **by the interpreter** — it
+needs the workflow-side retry/timeout shim, attempt counting, heartbeat
+plumbing, and a parent execution to checkpoint its completion against
+([§6.1.2](DESIGN.md)). A client-initiated activity has no hosting workflow, so
+supporting it means giving the `__temporal_activity` dispatcher a standalone
+entry point with its own id-reuse/conflict handling and a client-side
+handle/describe/list surface. That is feasible on DBOS (a bare enqueued activity
+workflow, the cross-queue path without a parent) but is not yet built.
+
+Workaround: wrap the activity in a one-line workflow and start that, or invoke
+the activity function directly from client-side code when no durability is
+needed. The whole surface is recorded in the reverse-direction ledgers in
+`tests/unit/test_signature_parity.py` (`KNOWN_MISSING_NAMES` /
+`KNOWN_MISSING_METHODS`), so a future temporalio release that extends it fails
+the parity test until the addition is classified.
+
+### D37. `@activity.defn(no_thread_cancel_exception=)` defaults to `True`
+
+temporalio defaults `no_thread_cancel_exception=False`: a thread-pool (sync)
+activity gets a cancellation exception raised **into its worker thread** when the
+activity is cancelled. We default it to `True`, and reject an explicit
+`no_thread_cancel_exception=False` with a clear error rather than silently
+ignoring it.
+
+Why: cancellation here is **cooperative** (see D26, D32) — it reaches an activity
+only through heartbeat polling, never by injecting an exception into a running
+DBOS step thread (those threads aren't interruptible that way). Raising into the
+thread would be a no-op at best and a footgun at worst, so the safe behavior is
+the default and the unsafe option is refused, not quietly dropped.
+
+This is a default-*value* divergence, not a missing parameter, so the
+signature-parity test — which checks default *presence*, not value — would not
+flag it; it is recorded here so it sits on the formal ledger. Behaviorally, a
+sync activity still observes cancellation through `activity.is_cancelled()` /
+`wait_for_cancelled()` and the `CancelledError` delivered at its next
+`activity.heartbeat()` ([§6.1.2](DESIGN.md)) — identical to temporalio run with
+`no_thread_cancel_exception=True`.

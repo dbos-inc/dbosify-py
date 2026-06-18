@@ -136,11 +136,9 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
 # temporalio parameters not accepted, recorded exactly. qualname -> parameter
 # names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # no-analog timeouts (exec/task, unenforced); protobuf raw_memo
+    # protobuf raw_memo (execution_timeout/task_timeout now surfaced, inert)
     "workflow.Info.__init__": {
-        "execution_timeout",
         "raw_memo",
-        "task_timeout",
     },
     # no event-log history_length; protobuf raw_info; transitive root not held
     "client.WorkflowExecution.__init__": {
@@ -163,6 +161,8 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     },
     # no archival tier; fetch_history reads DBOS step checkpoints
     "client.WorkflowHandle.fetch_history": {"skip_archival"},
+    # as fetch_history (the per-execution history fetch it delegates to)
+    "client.WorkflowExecutionAsyncIterator.map_histories": {"skip_archival"},
     # gRPC-era callbacks/links/stack_level (versioning_override is accepted
     # and inert — DEVIATIONS D29)
     "client.Client.start_workflow": {
@@ -343,6 +343,17 @@ def _compare_callable(
 def _compare_enum(
     qualname: str, ours: "type[enum.Enum]", theirs: type, problems: List[str]
 ) -> None:
+    # Int-ness is observable: an IntEnum member compares equal to its int value,
+    # a plain Enum member does not. temporalio mixes both (proto-backed enums are
+    # IntEnum; e.g. HandlerUnfinishedPolicy is a plain Enum), so a mismatch is a
+    # real behavioral deviation the member/value checks below would miss.
+    if issubclass(ours, int) != issubclass(theirs, int):
+        ours_kind = "IntEnum" if issubclass(ours, int) else "Enum"
+        theirs_kind = "IntEnum" if issubclass(theirs, int) else "Enum"
+        problems.append(
+            f"{qualname}: enum is {ours_kind} but temporalio's is {theirs_kind} "
+            f"(members compare to their int value differently)"
+        )
     for member in ours:
         their_member = getattr(theirs, member.name, None)
         if their_member is None:
@@ -502,4 +513,444 @@ def test_supported_params_explicitly_accepted(qualname: str) -> None:
     assert not not_in_temporalio, (
         f"{qualname}: EXPLICITLY_ACCEPTED_PARAMS lists names absent from "
         f"temporalio (invented API): {not_in_temporalio}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reverse-direction parity — the blind spot of every check above.
+#
+# Everything above only walks names *we* expose, so a whole temporalio class,
+# function, or method we never implemented is invisible to it. That is exactly
+# how an entire feature can sit unrecorded (e.g. client-initiated activities had
+# no ledger entry). The two ledgers below close that gap: every public
+# class/function temporalio defines in a module (or a private submodule of it),
+# and every public method/property temporalio defines on a class we also expose,
+# must either exist on our side or be recorded here with a reason. Implementing
+# one requires deleting it from the ledger, so the ledger can't go stale (same
+# contract as KNOWN_MISSING_PARAMS). Grouped by the feature/deviation that
+# explains each omission.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# module key -> temporalio public top-level names we deliberately do not expose.
+KNOWN_MISSING_NAMES: Dict[str, Set[str]] = {
+    "workflow": {
+        # Nexus — non-goal (DESIGN §1, DEVIATIONS D1).
+        "NexusClient",
+        "NexusOperationCancellationType",
+        "NexusOperationHandle",
+        "create_nexus_client",
+        # Metrics — not implemented in v1 (DEVIATIONS D33).
+        "metric_meter",
+        # No workflow sandbox (README deviation #3): import-policy + extern-fn
+        # plumbing have no analog.
+        "SandboxImportNotificationPolicy",
+        "extern_functions",
+        # Per-call version intent has no DBOS analog; build-id is the app version
+        # (DEVIATIONS D29).
+        "VersioningIntent",
+        # Dynamic *workflows* are unsupported (DEVIATIONS D25 / one-wf-per-type).
+        "DynamicWorkflowConfig",
+        "dynamic_config",
+        # Typed config dicts + multi-param update typing helper: we take the
+        # start-verb kwargs directly (signatures pinned by test_signature_parity).
+        "ActivityConfig",
+        "ChildWorkflowConfig",
+        "LocalActivityConfig",
+        "UpdateMethodMultiParam",
+        # Class-based activity invocation variants — we dispatch by fn/string ref
+        # (the *_method signatures are already pinned above).
+        "execute_activity_class",
+        "execute_local_activity_class",
+        "start_activity_class",
+        "start_local_activity_class",
+        # Failure-exception predicate helper — not exposed (minor).
+        "is_failure_exception",
+    },
+    "activity": {
+        "LoggerAdapter",  # logging adapter class — not exposed (minor)
+        "metric_meter",  # metrics not implemented (DEVIATIONS D33)
+    },
+    "common": {
+        # Client-initiated (standalone) activities — unsupported (DEVIATIONS D36).
+        "ActivityIDConflictPolicy",
+        "ActivityIDReusePolicy",
+        # Codec-on-headers control; our codec runs at the async boundaries
+        # (README deviation #12).
+        "HeaderCodecBehavior",
+        # Metrics — not implemented in v1 (DEVIATIONS D33).
+        "MetricCommon",
+        "MetricCounter",
+        "MetricGauge",
+        "MetricGaugeFloat",
+        "MetricHistogram",
+        "MetricHistogramFloat",
+        "MetricHistogramTimedelta",
+        "MetricMeter",
+        # Nexus — non-goal (DESIGN §1, DEVIATIONS D1).
+        "NexusOperationCancellationState",
+        "NexusOperationExecutionStatus",
+        "NexusOperationIDConflictPolicy",
+        "NexusOperationIDReusePolicy",
+        "PendingNexusOperationExecutionState",
+    },
+    "client": {
+        # Client-initiated (standalone) activities — unsupported (DEVIATIONS D36).
+        "ActivityExecution",
+        "ActivityExecutionAsyncIterator",
+        "ActivityExecutionCount",
+        "ActivityExecutionCountAggregationGroup",
+        "ActivityExecutionDescription",
+        "ActivityExecutionStatus",
+        "ActivityFailureError",
+        "ActivityHandle",
+        "PendingActivityState",
+        "CancelActivityInput",
+        "CountActivitiesInput",
+        "DescribeActivityInput",
+        "ListActivitiesInput",
+        "StartActivityInput",
+        "TerminateActivityInput",
+        # Async activity completion by id-reference — we complete via task_token
+        # (DESIGN §6.1.2); the id-reference form isn't exposed.
+        "AsyncActivityIDReference",
+        # Nexus — non-goal (DESIGN §1, DEVIATIONS D1).
+        "CancelNexusOperationInput",
+        "CountNexusOperationsInput",
+        "DescribeNexusOperationInput",
+        "GetNexusOperationResultInput",
+        "ListNexusOperationsInput",
+        "NexusClient",
+        "NexusOperationExecution",
+        "NexusOperationExecutionAsyncIterator",
+        "NexusOperationExecutionCancellationInfo",
+        "NexusOperationExecutionCount",
+        "NexusOperationExecutionCountAggregationGroup",
+        "NexusOperationExecutionDescription",
+        "NexusOperationFailureError",
+        "NexusOperationHandle",
+        "StartNexusOperationInput",
+        "TerminateNexusOperationInput",
+        # Legacy worker build-id compatibility sets — superseded by deployment
+        # versioning (DEVIATIONS D29); no DBOS analog.
+        "BuildIdOp",
+        "BuildIdOpAddNewCompatible",
+        "BuildIdOpAddNewDefault",
+        "BuildIdOpMergeSets",
+        "BuildIdOpPromoteBuildIdWithinSet",
+        "BuildIdOpPromoteSetByBuildId",
+        "BuildIdReachability",
+        "BuildIdVersionSet",
+        "GetWorkerBuildIdCompatibilityInput",
+        "GetWorkerTaskReachabilityInput",
+        "TaskReachabilityType",
+        "UpdateWorkerBuildIdCompatibilityInput",
+        "WorkerBuildIdVersionSets",
+        "WorkerTaskReachability",
+        # gRPC connection / cloud / plugin surface — no Temporal server (D1).
+        "ClientConfig",
+        "ClientConnectConfig",
+        "CloudOperationsClient",
+        "Plugin",
+        "RPCTimeoutOrCancelledError",
+        "WorkflowUpdateRPCTimeoutOrCancelledError",
+        # Event-log history + visibility input objects — no event history
+        # (DEVIATIONS D27); list/count use DBOS filters, not these inputs.
+        "CountWorkflowsInput",
+        "ListWorkflowsInput",
+        "FetchWorkflowHistoryEventsInput",
+        "WorkflowHistoryEventAsyncIterator",
+        "WorkflowHistoryEventFilterType",
+        # Update-with-start interceptor input dataclasses — the verbs are
+        # supported; these internal input shapes aren't surfaced (D24).
+        "StartWorkflowUpdateWithStartInput",
+        "UpdateWithStartStartWorkflowInput",
+        "UpdateWithStartUpdateWorkflowInput",
+        # Schedule overlap error not raised in our model (DEVIATIONS D22).
+        "ScheduleAlreadyRunningError",
+    },
+    "worker": {
+        # Worker tuner / slot-supplier / poller surface — the tuning args are
+        # accepted-and-ignored (no DBOS slot model; concurrency rides queue
+        # worker_concurrency).
+        "ActivitySlotInfo",
+        "CustomSlotSupplier",
+        "FixedSizeSlotSupplier",
+        "LocalActivitySlotInfo",
+        "NexusSlotInfo",
+        "PollerBehaviorAutoscaling",
+        "PollerBehaviorSimpleMaximum",
+        "ResourceBasedSlotConfig",
+        "ResourceBasedSlotSupplier",
+        "ResourceBasedTunerConfig",
+        "SharedHeartbeatSender",
+        "SharedStateManager",
+        "SlotMarkUsedContext",
+        "SlotPermit",
+        "SlotReleaseContext",
+        "SlotReserveContext",
+        "WorkerTuner",
+        "WorkflowSlotInfo",
+        # Nexus — non-goal (DESIGN §1, DEVIATIONS D1).
+        "ExecuteNexusOperationCancelInput",
+        "ExecuteNexusOperationStartInput",
+        "NexusOperationInboundInterceptor",
+        "StartNexusOperationInput",
+        # Sandbox / pluggable workflow runners — we host one deterministic
+        # interpreter, no sandbox (README deviation #3).
+        "UnsandboxedWorkflowRunner",
+        "WorkflowRunner",
+        "WorkflowInstance",
+        "WorkflowInstanceDetails",
+        # Typed config dicts — Worker/Replayer take a DBOSConfig (DESIGN §5).
+        "WorkerConfig",
+        "ReplayerConfig",
+        # gRPC plugin surface — no Temporal server (D1).
+        "Plugin",
+    },
+    "converter": {
+        # Protobuf payload converters — no protobuf payloads (D1, no non-Python
+        # clients).
+        "BinaryProtoPayloadConverter",
+        "JSONProtoPayloadConverter",
+        # External payload storage + size limits — not implemented (DESIGN §6.9).
+        "ExternalStorage",
+        "PayloadLimitsConfig",
+        "PayloadSizeWarning",
+        "StorageDriver",
+        "StorageDriverActivityInfo",
+        "StorageDriverClaim",
+        "StorageDriverRetrieveContext",
+        "StorageDriverStoreContext",
+        "StorageDriverWorkflowInfo",
+        "StorageWarning",
+        # Proto search-attribute encode/decode helpers — SAs are stored untyped
+        # on DBOS attributes, no protobuf SA codec (README deviation #4).
+        "decode_search_attributes",
+        "decode_typed_search_attributes",
+        "encode_search_attribute_values",
+        "encode_search_attributes",
+        "encode_typed_search_attribute_value",
+    },
+    "exceptions": {
+        # Nexus — non-goal (DESIGN §1, DEVIATIONS D1).
+        "NexusOperationAlreadyStartedError",
+        "NexusOperationError",
+    },
+}
+
+# "module.Class" -> temporalio public methods/properties on a shared class that
+# we deliberately do not expose.
+KNOWN_MISSING_METHODS: Dict[str, Set[str]] = {
+    # No workflow sandbox (README deviation #3): is_replaying() covers the real
+    # replay flag; the sandbox/import-policy introspection is inert.
+    "workflow.LoggerAdapter": {"unsafe_disable_sandbox"},
+    "workflow.unsafe": {
+        "current_import_notification_policy_override",
+        "is_imports_passed_through",
+        "is_replaying_history_events",
+        "is_sandbox_unrestricted",
+        "sandbox_import_notification_policy",
+        "sandbox_unrestricted",
+    },
+    # Distinguishes local vs client-initiated (standalone) activities (D36).
+    "activity.Info": {"in_workflow"},
+    # Context-propagation variant of the async-activity handle — not exposed.
+    "client.AsyncActivityHandle": {"with_context"},
+    # Standalone activities (D36) + nexus (D1) + legacy build-id versioning (D29)
+    # + gRPC connection surface (D1). We wrap a dbos.DBOSClient (DESIGN §5).
+    "client.Client": {
+        "start_activity",
+        "execute_activity",
+        "get_activity_handle",
+        "list_activities",
+        "count_activities",
+        "execute_activity_class",
+        "execute_activity_method",
+        "start_activity_class",
+        "start_activity_method",
+        "create_nexus_client",
+        "get_nexus_operation_handle",
+        "list_nexus_operations",
+        "count_nexus_operations",
+        "get_worker_build_id_compatibility",
+        "update_worker_build_id_compatibility",
+        "get_worker_task_reachability",
+        "api_key",
+        "config",
+        "identity",
+        "rpc_metadata",
+        "service_client",
+        "workflow_service",
+        "operator_service",
+        "test_service",
+    },
+    # Intercept hooks for the unsupported operations above, plus list/count/
+    # update-with-start hooks we don't intercept (DEVIATIONS D24).
+    "client.OutboundInterceptor": {
+        "start_activity",
+        "cancel_activity",
+        "describe_activity",
+        "terminate_activity",
+        "list_activities",
+        "count_activities",
+        "start_nexus_operation",
+        "cancel_nexus_operation",
+        "describe_nexus_operation",
+        "terminate_nexus_operation",
+        "get_nexus_operation_result",
+        "list_nexus_operations",
+        "count_nexus_operations",
+        "get_worker_build_id_compatibility",
+        "update_worker_build_id_compatibility",
+        "get_worker_task_reachability",
+        "list_workflows",
+        "count_workflows",
+        "fetch_workflow_history_events",
+        "start_update_with_start_workflow",
+    },
+    # Schedule memo not tracked (DEVIATIONS D22).
+    "client.ScheduleDescription": {"memo", "memo_value"},
+    "client.ScheduleListDescription": {"memo", "memo_value"},
+    # The execution object doesn't carry a data-converter handle.
+    "client.WorkflowExecution": {"data_converter"},
+    # Static UI metadata not surfaced to describe() (start-verb inert params).
+    "client.WorkflowExecutionDescription": {"static_details", "static_summary"},
+    # DB-bound history; no offline JSON history (DEVIATIONS D27).
+    "client.WorkflowHistory": {"from_json", "to_json", "to_json_dict"},
+    # message property not exposed on the query-failed error.
+    "client.WorkflowQueryFailedError": {"message"},
+    # Nexus interception unsupported (DEVIATIONS D24).
+    "worker.Interceptor": {"intercept_nexus_operation"},
+    "worker.WorkflowOutboundInterceptor": {"start_nexus_operation"},
+    # Replayer config object not exposed (DB-bound replay, DEVIATIONS D27).
+    "worker.Replayer": {"config"},
+    # Worker wraps a DBOSConfig, not a temporalio client/config (DESIGN §5).
+    "worker.Worker": {"client", "config"},
+    # Protobuf round-trip; no protobuf (D1).
+    "common.RetryPolicy": {"apply_to_proto", "from_proto"},
+    # Context-aware conversion (temporalio 1.28) not implemented.
+    "converter.CompositePayloadConverter": {"get_converters_with_context"},
+    # Protobuf Payload(s) wrapper helpers + failure-codec hooks; no protobuf (D1;
+    # the codec-on-failure-details gap is README deviation #12).
+    "converter.DataConverter": {"decode_wrapper", "encode_wrapper"},
+    "converter.PayloadCodec": {
+        "decode_failure",
+        "decode_wrapper",
+        "encode_failure",
+        "encode_wrapper",
+    },
+    "converter.PayloadConverter": {"from_payloads_wrapper", "to_payloads_wrapper"},
+    # Default-info accessor not exposed.
+    "testing.ActivityEnvironment": {"default_info"},
+    # Time-skipping (Phase 4) + nexus endpoints (D1).
+    "testing.WorkflowEnvironment": {
+        "auto_time_skipping_disabled",
+        "create_nexus_endpoint",
+        "delete_nexus_endpoint",
+    },
+}
+
+
+def _belongs_to_module(obj: Any, mod_name: str) -> bool:
+    """Whether ``obj`` is defined in ``mod_name`` or a private submodule of it.
+    temporalio defines its public classes in private submodules (e.g.
+    ``temporalio.client._client``) and re-exports them; this keeps each class
+    attributed to its home module and excludes sibling re-exports."""
+    m = getattr(obj, "__module__", None)
+    return m is not None and (m == mod_name or m.startswith(mod_name + "."))
+
+
+def _their_public_api(module: Any) -> Dict[str, Any]:
+    """Public classes/functions temporalio owns in ``module``."""
+    return {
+        name: obj
+        for name, obj in vars(module).items()
+        if not name.startswith("_")
+        and (inspect.isclass(obj) or inspect.isfunction(obj))
+        and _belongs_to_module(obj, module.__name__)
+    }
+
+
+def _their_own_members(cls: type) -> Set[str]:
+    """Public methods/properties temporalio defines *directly* on ``cls`` (not
+    inherited — avoids the asyncio.Task protocol noise on handle classes)."""
+    return {
+        name
+        for name, value in vars(cls).items()
+        if not name.startswith("_")
+        and (
+            inspect.isfunction(value)
+            or isinstance(value, (property, staticmethod, classmethod))
+        )
+    }
+
+
+def _our_members(cls: type) -> Set[str]:
+    """Everything reachable on our class: inherited members plus dataclass
+    fields (fields without class-level defaults aren't in ``dir``)."""
+    return {n for n in dir(cls) if not n.startswith("_")} | set(
+        getattr(cls, "__dataclass_fields__", {})
+    )
+
+
+@pytest.mark.parametrize("module_key", sorted(MODULE_PAIRS))
+def test_no_unrecorded_missing_names(module_key: str) -> None:
+    """A temporalio public class/function we don't expose must be recorded in
+    KNOWN_MISSING_NAMES. Catches whole missing features the forward checks
+    can't see."""
+    ours_mod, theirs_mod = MODULE_PAIRS[module_key]
+    theirs = _their_public_api(theirs_mod)
+    missing = {n for n in theirs if not hasattr(ours_mod, n)}
+    recorded = KNOWN_MISSING_NAMES.get(module_key, set())
+
+    unrecorded = sorted(missing - recorded)
+    assert not unrecorded, (
+        f"{module_key}: temporalio public names not exposed and not recorded: "
+        f"{unrecorded} — implement them, or add each to KNOWN_MISSING_NAMES "
+        f"with a reason."
+    )
+    stale = sorted(n for n in recorded if n not in missing)
+    assert not stale, (
+        f"{module_key}: KNOWN_MISSING_NAMES is stale (now exposed, or gone from "
+        f"temporalio): {stale} — remove them."
+    )
+
+
+@pytest.mark.parametrize("module_key", sorted(MODULE_PAIRS))
+def test_no_unrecorded_missing_methods(module_key: str) -> None:
+    """A public method/property temporalio defines on a class we also expose
+    must exist on our class or be recorded in KNOWN_MISSING_METHODS."""
+    ours_mod, theirs_mod = MODULE_PAIRS[module_key]
+    problems: List[str] = []
+    visited: Set[str] = set()
+    for name, their_cls in _their_public_api(theirs_mod).items():
+        if not inspect.isclass(their_cls) or issubclass(their_cls, enum.Enum):
+            continue
+        our_cls = getattr(ours_mod, name, None)
+        if not inspect.isclass(our_cls):
+            continue
+        cls_qual = f"{module_key}.{name}"
+        visited.add(cls_qual)
+        missing = {
+            m
+            for m in _their_own_members(their_cls) - _our_members(our_cls)
+            if f"{cls_qual}.{m}" not in DELIBERATE_DEVIATIONS
+        }
+        recorded = KNOWN_MISSING_METHODS.get(cls_qual, set())
+        if missing != recorded:
+            problems.append(
+                f"{cls_qual}: missing {sorted(missing)}, recorded "
+                f"{sorted(recorded)}"
+            )
+    stale_keys = sorted(
+        k
+        for k in KNOWN_MISSING_METHODS
+        if k.split(".", 1)[0] == module_key and k not in visited
+    )
+    if stale_keys:
+        problems.append(f"stale KNOWN_MISSING_METHODS keys (class gone): {stale_keys}")
+    assert not problems, (
+        f"method parity drift vs temporalio in {module_key!r}:\n"
+        + _format(problems)
+        + "\nImplement the method, or update KNOWN_MISSING_METHODS with a reason."
     )
