@@ -319,6 +319,26 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
                         "failure": serialize_failure(cancelled),
                         "ended_at": time_mod.time(),
                     }
+                if not queued and defn.is_async and ctx.cancelled.is_set():
+                    # Local cancellation requested by the workflow (handle.cancel()
+                    # / scope cancel set ctx.cancelled via _request_cancel). A
+                    # *sync* activity observes that through activity.heartbeat();
+                    # an *async* one awaiting something other than a heartbeat
+                    # (asyncio.Future, sleep, a child) must be cancelled at the
+                    # task level, or it never unwinds and the heartbeat watchdog
+                    # below fires a spurious HEARTBEAT timeout. The user may catch
+                    # the CancelledError and return a value (preserved, as in
+                    # Temporal).
+                    task.cancel()
+                    try:
+                        return await task
+                    except asyncio.CancelledError:
+                        cancelled = exceptions.CancelledError("Activity cancelled")
+                        return {
+                            "ok": False,
+                            "failure": serialize_failure(cancelled),
+                            "ended_at": time_mod.time(),
+                        }
                 if heartbeat_timeout is not None:
                     stale = time_mod.monotonic() - ctx.last_heartbeat_at
                     if stale > float(heartbeat_timeout):

@@ -75,6 +75,15 @@ SAMPLES = {
         # start path (the timer-update demo is a separate manual process).
         expect_output="Workflow started: run_id=",
     ),
+    "custom_decorator": Sample(
+        package="custom_decorator",
+        # An auto-heartbeat activity decorator (a background task heartbeats)
+        # keeps a long async activity alive so a signal can cancel it cleanly
+        # rather than it dying of heartbeat timeout. Regression-guarded by
+        # tests/integration/test_heartbeat_background_task.py.
+        expect_output="Result:",
+        starter_timeout=30,
+    ),
     # ---- xfail: a documented deviation --------------------------------------
     "custom_converter": Sample(
         package="custom_converter",
@@ -101,15 +110,6 @@ SAMPLES = {
     # ---- xfail: a supported feature that does NOT pass yet — surfaced by this
     #      sample as a suspected bug/limitation, worth investigating separately
     #      (NOT an intentional deviation) -------------------------------------
-    "custom_decorator": Sample(
-        package="custom_decorator",
-        # The auto-heartbeater heartbeats every 1s under a 2s heartbeat timeout,
-        # yet the activity still dies of HEARTBEAT timeout — the watchdog isn't
-        # reset by heartbeats issued from the decorator's background task.
-        xfail="activity hits HEARTBEAT timeout despite the auto-heartbeater's 1s "
-        "heartbeats (2s timeout) — suspected heartbeat-watchdog bug",
-        starter_timeout=30,
-    ),
     "batch_sliding_window": Sample(
         package="batch_sliding_window",
         xfail="continue-as-new + child sliding-window batch does not complete "
