@@ -751,6 +751,9 @@ class _Runtime:
     def runtime_is_replaying(self) -> bool:
         raise NotImplementedError
 
+    def runtime_is_read_only(self) -> bool:
+        raise NotImplementedError
+
     def runtime_patched(self, id: str) -> bool:
         raise NotImplementedError
 
@@ -887,7 +890,8 @@ class ActivityHandle:
 
 class ChildWorkflowHandle:
     """Handle to a started child workflow: awaitable for its result, plus
-    ``signal`` (checkpointed send from the parent's perspective).
+    ``signal`` (checkpointed send from the parent's perspective), ``cancel``,
+    and a synchronous ``result`` mirroring temporalio's Task-based handle.
     """
 
     def __init__(
@@ -912,6 +916,20 @@ class ChildWorkflowHandle:
 
     def done(self) -> bool:
         return self._future.done()
+
+    def result(self) -> Any:
+        """The child's result if it has completed, else raise
+        ``InvalidStateError`` (Task semantics). Usually you ``await`` the
+        handle instead; this mirrors temporalio's synchronous accessor."""
+        return self._future.result()
+
+    def cancel(self, msg: Optional[Any] = None) -> bool:
+        """Request cancellation of the child workflow, honoring its
+        ``ChildWorkflowCancellationType``: the cooperative-cancel envelope is
+        delivered to the child's current run at the next event boundary (ABANDON
+        just retires the waiter). Returns ``False`` if the child is already
+        done. Equivalent to cancelling the awaited handle."""
+        return self._future.cancel(msg)
 
     async def signal(
         self, signal: Any, arg: Any = _arg_unset, *, args: Sequence[Any] = []
@@ -1944,6 +1962,12 @@ class unsafe:
         """No-op context manager: there is no sandbox to pass imports
         through (DEVIATIONS.md D13)."""
         return nullcontext()
+
+    @staticmethod
+    def is_read_only() -> bool:
+        """Whether the workflow is currently in read-only mode — true while a
+        query or update validator runs, where side effects are not allowed."""
+        return _runtime().runtime_is_read_only()
 
     @staticmethod
     def in_sandbox() -> bool:

@@ -3047,6 +3047,9 @@ class Interpreter(_Runtime):
             return False
         return ctx.function_id < self._replay_horizon
 
+    def runtime_is_read_only(self) -> bool:
+        return self._read_only
+
     def _patch(self, id: str) -> bool:
         """Shared patched()/deprecate_patch() logic (DESIGN §6.8).
 

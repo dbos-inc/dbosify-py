@@ -122,6 +122,31 @@ class SignalingParent:
 
 
 @workflow.defn
+class HandleCancelParent:
+    """Exercises the ChildWorkflowHandle Task-style API: cancel one child via
+    ``handle.cancel()`` and read a sibling's value via the synchronous
+    ``handle.result()`` accessor. The doomed child uses ABANDON parent-close so
+    it outlives the parent and finishes its own cooperative cancellation
+    (→ CANCELED), letting the test observe that cancel() actually reached it."""
+
+    @workflow.run
+    async def run(self) -> str:
+        doomed = await workflow.start_child_workflow(
+            WaitingChild.run,
+            id="handle-cancel-doomed",
+            parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+        )
+        winner = await workflow.start_child_workflow(
+            WaitingChild.run, id="handle-result-winner"
+        )
+        doomed.cancel()
+        await winner.signal(WaitingChild.release)
+        await winner
+        result: str = winner.result()
+        return result
+
+
+@workflow.defn
 class ClosingParent:
     """Starts a long-running child and returns immediately; the child's fate
     is decided by ParentClosePolicy."""
@@ -284,6 +309,7 @@ ALL_WORKFLOWS = [
     ParentWorkflow,
     CatchingParent,
     SignalingParent,
+    HandleCancelParent,
     ClosingParent,
     ParkingParent,
     DuplicateIdParent,
@@ -400,6 +426,20 @@ async def _wait_for_status(
             return status
         await asyncio.sleep(0.2)
     return status
+
+
+async def test_child_handle_cancel_and_result() -> None:
+    """ChildWorkflowHandle.cancel() drives a child to CANCELED; .result()
+    returns a completed sibling's value synchronously (Task-style handle)."""
+    async with _env() as client:
+        result = await client.execute_workflow(
+            HandleCancelParent.run, id="handle-api-parent", task_queue=TASK_QUEUE
+        )
+        assert result == "released"
+        status = await _wait_for_status(
+            client, "handle-cancel-doomed", WorkflowExecutionStatus.CANCELED
+        )
+        assert status == WorkflowExecutionStatus.CANCELED
 
 
 async def test_parent_close_terminate(tmp_path: Path) -> None:

@@ -378,9 +378,18 @@ class Worker:
         """Task queue this worker is on."""
         return self._task_queue
 
+    @property
     def is_running(self) -> bool:
         """Whether the worker is running (between run() and shutdown())."""
         return self._shutdown_event is not None
+
+    @property
+    def is_shutdown(self) -> bool:
+        """Whether the worker has run and shut down. Only ``True`` once the
+        worker was started and then fully shut down (mirroring temporalio's
+        ``_shutdown_complete_event``); not necessarily ``True`` the instant
+        :py:meth:`shutdown` is first called, since the drain takes a moment."""
+        return self._finished
 
     async def run(self) -> None:
         """Launch DBOS (recovering pending workflows for this executor) and
