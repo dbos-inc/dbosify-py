@@ -617,14 +617,6 @@ class ActivityTimeoutWorkflow:
         )
 
 
-@pytest.mark.skip(
-    reason="DEVIATIONS D26/D32 (cooperative timeout): a `start_to_close_timeout` "
-    "delivers a cooperative cancel to the activity; `wait_cancel` catches it and "
-    "returns a string, which our model records as a successful completion — so no "
-    "ActivityError(TimeoutError) is surfaced. Temporal enforces the deadline as a "
-    "hard, server-side failure that discards the activity's late return. Candidate "
-    "for a real fix (authoritative timeouts), tracked separately from this suite."
-)
 async def test_workflow_activity_timeout(client: Client) -> None:
     async with new_worker(
         client, ActivityTimeoutWorkflow, activities=[wait_cancel]
