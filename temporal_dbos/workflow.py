@@ -74,6 +74,18 @@ __all__ = [
     "as_completed",
     "cancellation_reason",
     "continue_as_new",
+    "get_signal_handler",
+    "set_signal_handler",
+    "get_dynamic_signal_handler",
+    "set_dynamic_signal_handler",
+    "get_query_handler",
+    "set_query_handler",
+    "get_dynamic_query_handler",
+    "set_dynamic_query_handler",
+    "get_update_handler",
+    "set_update_handler",
+    "get_dynamic_update_handler",
+    "set_dynamic_update_handler",
     "ContinueAsNewError",
     "current_update_info",
     "defn",
@@ -633,6 +645,10 @@ class Info:
     # continuation), else None.
     continued_run_id: Optional[str] = None
     cron_schedule: Optional[str] = None
+    # Whole-execution (run-chain) timeout: accepted but not enforced (pending,
+    # DEVIATIONS D35). Surfaced for parity / so user code can read it; always
+    # None today (not threaded into the run meta).
+    execution_timeout: Optional[timedelta] = None
     # The run id of the first execution in this run chain (run 0's DBOS id =
     # the Temporal workflow id). Derived from our run-chain id scheme (§6.4).
     first_execution_run_id: str = ""
@@ -659,6 +675,9 @@ class Info:
     """
     start_time: datetime = datetime.fromtimestamp(0)
     task_queue: str = ""
+    # Workflow-task timeout: no workflow-task concept here (inert). Surfaced for
+    # parity; always None.
+    task_timeout: Optional[timedelta] = None
     typed_search_attributes: TypedSearchAttributes = TypedSearchAttributes.empty
     workflow_id: str = ""
     # The run's initialization time. We have a single start timestamp per run
@@ -756,6 +775,20 @@ class _Runtime:
         raise NotImplementedError
 
     def runtime_is_read_only(self) -> bool:
+        raise NotImplementedError
+
+    def runtime_get_handler(
+        self, category: str, name: Optional[str]
+    ) -> Optional[Callable[..., Any]]:
+        raise NotImplementedError
+
+    def runtime_set_handler(
+        self,
+        category: str,
+        name: Optional[str],
+        handler: Optional[Callable[..., Any]],
+        validator: Optional[Callable[..., Any]] = None,
+    ) -> None:
         raise NotImplementedError
 
     def runtime_patched(self, id: str) -> bool:
@@ -1008,6 +1041,89 @@ def all_handlers_finished() -> bool:
     wait_condition predicates to avoid returning while handlers still run.
     """
     return _runtime().runtime_all_handlers_finished()
+
+
+# --- runtime handler accessors -----------------------------------------------
+# Register/inspect handlers imperatively at runtime, an alternative to the
+# @signal/@query/@update decorators. A set overrides any decorator handler of
+# the same name (or the dynamic catch-all). Setting None unsets. For signals,
+# setting a handler immediately delivers any past signals that were buffered
+# with no handler, as in temporalio.
+
+
+def get_signal_handler(name: str) -> Optional[Callable[..., Any]]:
+    """Get the signal handler for ``name`` if any."""
+    return _runtime().runtime_get_handler("signal", name)
+
+
+def set_signal_handler(name: str, handler: Optional[Callable[..., Any]]) -> None:
+    """Set or unset the signal handler for ``name``. Overrides any handler
+    (including a ``@workflow.signal`` one); when set, all unhandled past signals
+    for ``name`` are immediately delivered to it."""
+    _runtime().runtime_set_handler("signal", name, handler)
+
+
+def get_dynamic_signal_handler() -> Optional[Callable[..., Any]]:
+    """Get the dynamic (catch-all) signal handler if any."""
+    return _runtime().runtime_get_handler("signal", None)
+
+
+def set_dynamic_signal_handler(handler: Optional[Callable[..., Any]]) -> None:
+    """Set or unset the dynamic (catch-all) signal handler. When set, all
+    unhandled past signals are immediately delivered to it."""
+    _runtime().runtime_set_handler("signal", None, handler)
+
+
+def get_query_handler(name: str) -> Optional[Callable[..., Any]]:
+    """Get the query handler for ``name`` if any."""
+    return _runtime().runtime_get_handler("query", name)
+
+
+def set_query_handler(name: str, handler: Optional[Callable[..., Any]]) -> None:
+    """Set or unset the query handler for ``name`` (overrides any handler,
+    including a ``@workflow.query`` one)."""
+    _runtime().runtime_set_handler("query", name, handler)
+
+
+def get_dynamic_query_handler() -> Optional[Callable[..., Any]]:
+    """Get the dynamic (catch-all) query handler if any."""
+    return _runtime().runtime_get_handler("query", None)
+
+
+def set_dynamic_query_handler(handler: Optional[Callable[..., Any]]) -> None:
+    """Set or unset the dynamic (catch-all) query handler."""
+    _runtime().runtime_set_handler("query", None, handler)
+
+
+def get_update_handler(name: str) -> Optional[Callable[..., Any]]:
+    """Get the update handler for ``name`` if any."""
+    return _runtime().runtime_get_handler("update", name)
+
+
+def set_update_handler(
+    name: str,
+    handler: Optional[Callable[..., Any]],
+    *,
+    validator: Optional[Callable[..., Any]] = None,
+) -> None:
+    """Set or unset the update handler for ``name`` (overrides any handler,
+    including a ``@workflow.update`` one), optionally with a ``validator``."""
+    _runtime().runtime_set_handler("update", name, handler, validator=validator)
+
+
+def get_dynamic_update_handler() -> Optional[Callable[..., Any]]:
+    """Get the dynamic (catch-all) update handler if any."""
+    return _runtime().runtime_get_handler("update", None)
+
+
+def set_dynamic_update_handler(
+    handler: Optional[Callable[..., Any]],
+    *,
+    validator: Optional[Callable[..., Any]] = None,
+) -> None:
+    """Set or unset the dynamic (catch-all) update handler, optionally with a
+    ``validator``."""
+    _runtime().runtime_set_handler("update", None, handler, validator=validator)
 
 
 def cancellation_reason() -> Optional[str]:

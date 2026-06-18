@@ -107,22 +107,22 @@ SAMPLES = {
         ready_timeout=25,
         starter_timeout=25,
     ),
-    # ---- xfail: a supported feature that does NOT pass yet — surfaced by this
-    #      sample as a suspected bug/limitation, worth investigating separately
-    #      (NOT an intentional deviation) -------------------------------------
     "batch_sliding_window": Sample(
         package="batch_sliding_window",
-        xfail="continue-as-new + child sliding-window batch does not complete "
-        "within the test budget (CAN-chain perf or hang — needs investigation)",
-        ready_timeout=25,
-        starter_timeout=30,
+        # Sliding-window batch: 90 records via ~18 continue-as-new hops + 90
+        # child workflows, driven by runtime set_signal_handler /
+        # set_query_handler. Runs long at our per-write latency (deviation #7):
+        # ~68s locally, so a generous budget for slower CI.
+        expect_output="Workflow completed successfully!",
+        starter_timeout=180,
     ),
     "resource_pool": Sample(
         package="resource_pool",
-        xfail="resource acquisition via cross-workflow signals does not complete "
-        "within the test budget (deadlock/perf — needs investigation)",
-        ready_timeout=25,
-        starter_timeout=30,
+        # A long-lived pool lends resources to user workflows via cross-workflow
+        # signals, registered with runtime get/set_signal_handler. No success
+        # print — the starter completing (exit 0) after terminating the pool is
+        # the proof.
+        starter_timeout=60,
     ),
     # ---- skip: not runnable in this harness ---------------------------------
     "sleep_for_days": Sample(

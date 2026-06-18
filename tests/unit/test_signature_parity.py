@@ -113,11 +113,9 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
 # temporalio parameters not accepted, recorded exactly. qualname -> parameter
 # names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # no-analog timeouts (exec/task, unenforced); protobuf raw_memo
+    # protobuf raw_memo (execution_timeout/task_timeout now surfaced, inert)
     "workflow.Info.__init__": {
-        "execution_timeout",
         "raw_memo",
-        "task_timeout",
     },
     # no event-log history_length; protobuf raw_info; transitive root not held
     "client.WorkflowExecution.__init__": {
@@ -538,25 +536,6 @@ KNOWN_MISSING_NAMES: Dict[str, Set[str]] = {
         "execute_local_activity_class",
         "start_activity_class",
         "start_local_activity_class",
-        # Imperative runtime get/set handler accessors — an alternate API for
-        # registering handlers (including the catch-all already supported via
-        # @signal/@query/@update dynamic=True, DESIGN §6.1.1). Deliberately not
-        # provided: no conformance dependency, the dynamic=True decorators cover
-        # the common need, and set_signal_handler's buffered-signal flush is
-        # determinism-sensitive for little payoff. Independent of dynamic
-        # *workflows* (D25). Not planned.
-        "get_signal_handler",
-        "set_signal_handler",
-        "get_query_handler",
-        "set_query_handler",
-        "get_update_handler",
-        "set_update_handler",
-        "get_dynamic_signal_handler",
-        "set_dynamic_signal_handler",
-        "get_dynamic_query_handler",
-        "set_dynamic_query_handler",
-        "get_dynamic_update_handler",
-        "set_dynamic_update_handler",
         # Failure-exception predicate helper — not exposed (minor).
         "is_failure_exception",
     },
