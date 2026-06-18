@@ -136,13 +136,10 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
 # temporalio parameters not accepted, recorded exactly. qualname -> parameter
 # names. Implementing a parameter requires deleting it here.
 KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
-    # worker-deployment versioning has no DBOS analog (D28); patched() branches
-    "workflow.defn": {"versioning_behavior"},
-    # no-analog timeouts (exec/task, unenforced); protobuf raw_memo; root not held
+    # no-analog timeouts (exec/task, unenforced); protobuf raw_memo
     "workflow.Info.__init__": {
         "execution_timeout",
         "raw_memo",
-        "root",
         "task_timeout",
     },
     # no event-log history_length; protobuf raw_info; transitive root not held
@@ -166,19 +163,17 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     },
     # no archival tier; fetch_history reads DBOS step checkpoints
     "client.WorkflowHandle.fetch_history": {"skip_archival"},
-    # gRPC-era callbacks/links/stack_level; versioning_override: no DBOS analog (D27/D28)
+    # gRPC-era callbacks/links/stack_level (versioning_override is accepted
+    # and inert — DEVIATIONS D29)
     "client.Client.start_workflow": {
         "callbacks",
         "links",
         "stack_level",
-        "versioning_override",
     },
-    # versioning_override: no DBOS worker-versioning analog (D27/D28)
-    "client.Client.execute_workflow": {"versioning_override"},
-    # gRPC-era stack_level; versioning_override: no DBOS analog (D27/D28)
+    # gRPC-era stack_level (versioning_override is accepted and inert, like
+    # start_workflow — DEVIATIONS D29)
     "client.WithStartWorkflowOperation.__init__": {
         "stack_level",
-        "versioning_override",
     },
     # ActivityCancellationDetails (the cancel reason) not implemented
     "testing.ActivityEnvironment.cancel": {"cancellation_details"},
@@ -229,6 +224,17 @@ EXPLICITLY_ACCEPTED_PARAMS: Dict[str, Set[str]] = {
         "activities",
         "workflow_failure_exception_types",
         "interceptors",
+        "build_id",
+        "use_worker_versioning",
+        "deployment_config",
+        "max_concurrent_workflow_tasks",
+        "max_concurrent_activities",
+        "max_concurrent_local_activities",
+        "max_activities_per_second",
+        "max_task_queue_activities_per_second",
+        "activity_executor",
+        "identity",
+        "on_fatal_error",
     },
     "client.Client.__init__": {"data_converter", "interceptors"},
     "client.Client.connect": {"data_converter", "interceptors"},

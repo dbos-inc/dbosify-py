@@ -699,7 +699,7 @@ that model. Register each workflow type explicitly. (The `dynamic` parameter is
 still accepted on `@workflow.defn` for signature parity — it is rejected, not
 absent.)
 
-### D28. Patching is supported; worker-deployment versioning is not
+### D28. Patching is supported; worker-deployment versioning maps to DBOS versioning (D29)
 
 `workflow.patched(id)` and `workflow.deprecate_patch(id)` work and match
 temporalio's semantics: `patched()` returns `True` on a first (non-replaying)
@@ -747,12 +747,245 @@ Edges and gaps:
   (its whole purpose), and removing a patch branch while pre-patch runs are still
   open will diverge from their recorded history — the standard non-determinism
   hazard, surfaced at replay (D13), not at development time.
-- **No worker deployment versioning.** Temporal's Build IDs / Worker Deployment
-  Versions / `WorkerDeploymentConfig` and the `versioning_behavior` /
-  `versioning_override` / `versioning_intent` knobs are a Temporal-cluster
-  concept (the server routes tasks to compatible worker fleets). DBOS has a
-  single `app_version` per deployment and no task-routing fleet model, so these
-  are **not** implemented: `versioning_behavior` on `@workflow.defn` and the
-  `versioning_*` fields on the client/outbound `*Input`s are accepted-and-inert
-  (signature parity; carried, not acted on). Use `patched()` for in-code
-  branching across deploys.
+- **Worker deployment versioning maps to DBOS versioning (D29).** A build ID is
+  the DBOS `application_version`, and DBOS scopes recovery and queue dequeue to
+  it — so PINNED (a workflow stays on its build ID for life) is the *enforced*
+  default, not a no-op. What's unsupported is AUTO_UPGRADE (migrating a running
+  workflow to a newer version) and the cluster ramping/routing concepts; see D29.
+  `patched()` is the tool for in-place branching when you *don't* want pinning.
+
+
+### D29. Worker deployment versioning = DBOS versioning: PINNED is enforced, AUTO_UPGRADE is not
+
+Temporal's worker-versioning API is mirrored and backed by DBOS's own versioning.
+A **deployment version** is `WorkerDeploymentVersion(deployment_name, build_id)`
+where `build_id` is the DBOS `application_version` and `deployment_name` is the
+*configured* deployment name — `deployment_config.version.deployment_name` if
+given, else the DBOS application name. Only `build_id` is load-bearing: DBOS
+scopes recovery/dequeue purely on `application_version` and never on the
+deployment name, so a `deployment_config` whose `deployment_name` differs from
+the DBOS app name is reported back verbatim but is cosmetic (it does not
+partition fleets). `Worker(build_id=...)` or
+`Worker(deployment_config=WorkerDeploymentConfig(...))` set that build ID *as the
+DBOS `application_version`* (the two are mutually exclusive; a non-empty build id
+that conflicts with an `application_version` already in the `DBOSConfig` is
+rejected, as is `use_worker_versioning=True` with no build id); absent both, it is
+derived from the configured `application_version` (default `DEFAULT_APP_VERSION`,
+D28). The version is readable in-workflow via
+`workflow.info().get_current_deployment_version()` / `get_current_build_id()`,
+whose `build_id` is read live from the worker's `application_version` at access
+time — so it always equals the version DBOS actually enforces, including a
+computed code-hash when the config opts into DBOS auto-versioning
+(`application_version=None`).
+
+**PINNED is real and enforced, not inert.** DBOS scopes both workflow recovery
+(`get_pending_workflows` filters `application_version == <worker version>`) and
+queue dequeue (`start_queued_workflows` filters
+`application_version == <worker version> OR IS NULL`) by `application_version`.
+So once a workflow is stamped with a version, it is recovered and continued
+**only** on workers of that build ID, and never migrates to a newer one — which
+is exactly Temporal's PINNED behavior. A freshly-enqueued, not-yet-stamped
+workflow (version `NULL`) is claimed by any worker and stamped with that worker's
+version, mirroring Temporal assigning the task queue's current build ID at start.
+Two workers on the same database with different `build_id`s therefore form two
+pinned fleets that don't recover or dequeue each other's workflows.
+
+**What has no DBOS analog (the genuinely unsupported part):** `AUTO_UPGRADE` —
+migrating a *running* workflow to a newer worker version on its next task. DBOS
+has no mechanism to move a pending workflow across versions (a newer-version
+worker won't even recover/dequeue it), so a requested `AUTO_UPGRADE`
+(`VersioningBehavior.AUTO_UPGRADE` on `@workflow.defn`,
+`AutoUpgradeVersioningOverride`, `ContinueAsNewVersioningBehavior.AUTO_UPGRADE` /
+`USE_RAMPING_VERSION`) degrades to pinned. The cluster routing-fleet, gradual
+**ramping** (percentage rollout), and "default/target version of a task queue"
+concepts likewise have no analog, so `is_target_worker_deployment_version_changed()`
+is always `False`. `versioning_intent` (compatible vs. latest for child
+workflows/activities) is accepted but not acted on. Use `patched()` (D28) for
+*in-place* branching across deploys when you need a single running workflow to
+adopt new code rather than staying pinned.
+
+**The build id is read live, not stamped per run — so it is not replay-stable
+across versions.** `get_current_deployment_version()`/`get_current_build_id()`
+return the *executing* worker's `application_version`, not a value checkpointed
+into the run's history. On the normal path this is exactly right (PINNED means
+only a same-version worker ever recovers/continues the run, so live == original).
+But two paths replay a run on a worker whose version may differ from the one that
+first executed it, and there the reported build id reflects the *replaying*
+worker, not the original run: query-on-closed **rehydrate-by-replay** (D27, which
+forks the scratch run version-free so the querying process runs it) and the
+**`Replayer`** (run against today's code). Consequently, workflow code that
+*branches* on `get_current_build_id()` is **not** replay-stable across a version
+change in v1 — unlike Temporal, which records the build id per workflow task in
+history. Treat the in-workflow build id as informational (logging, metrics), not
+as a deterministic branch key; use `patched()` (D28) for code-path branching that
+must survive replay. (Stamping the build id per run — it is `NULL` at client
+enqueue and only fixed at dequeue, so it cannot ride the client-set run
+meta-envelope — is deferred.)
+
+
+### D30. Current details are in-memory, reconstructed on replay, not in describe()
+
+`workflow.set_current_details()` / `get_current_details()` are supported as
+free-form (Temporal-markdown) UI/CLI metadata. The value is ordinary in-memory
+workflow state: settable from the run method and signal/update handlers
+(everything on the deterministic loop), reconstructed deterministically on
+recovery by replaying the same `set_current_details()` calls — no checkpoint is
+written for it. Two consequences:
+
+- Like every other workflow runtime accessor (`info()`, `now()`, …), it is only
+  available on the deterministic loop, **not** inside a query handler (queries
+  run synchronously off that loop — D17). `set_current_details()` from a
+  read-only context (a query/validator) is additionally rejected, like
+  `upsert_memo`.
+- The current details are **not** surfaced to `describe()` / `list_workflows`
+  in v1 (there is no live channel from a running interpreter's in-memory state to
+  a status read, and no UI consuming it). `static_summary` / `static_details`
+  passed at start are likewise accepted but not surfaced (consistent with
+  memo/search-attribute exposure limits, D15).
+
+
+### D31. Random seed is fixed per run; reseed callbacks never fire
+
+`workflow.random()` / `uuid4()` derive from a per-execution seed checkpointed
+once at run start (DESIGN §4.2). `workflow.random_seed()` returns that seed and
+`workflow.new_random()` returns a `Random` seeded from it. Temporal can update a
+workflow's seed mid-run (a `RandomSeedUpdated` history event), which is what
+`register_random_seed_callback` exists to react to; temporal-dbos never changes
+the seed within a run, so the seed is stable for the run's lifetime and any
+callback registered via `register_random_seed_callback` (including the one
+`new_random` installs) is stored but **never invoked**. Code that relies only on
+the returned `Random` staying valid works unchanged; code that depends on the
+callback firing does not apply here.
+
+
+### D32. Activity cancellation details are not tracked
+
+`activity.cancellation_details()` always returns `None` and
+`activity.ActivityCancellationDetails` is accepted only for parity. temporal-dbos
+delivers activity cancellation cooperatively (D26) — observed via
+`activity.is_cancelled()` / `wait_for_cancelled()` / `heartbeat()` — and does not
+record *why* an activity was cancelled (not-found / paused / reset / timed-out /
+worker-shutdown), so the structured reason temporalio surfaces is unavailable.
+
+
+### D33. Metrics and the telemetry `runtime` module are not provided in v1
+
+Temporal's metrics surface is **not implemented** in this first version:
+`workflow.metric_meter()` / `activity.metric_meter()`, the
+`common.MetricMeter` / `MetricCounter` / `MetricHistogram[Float|Timedelta]` /
+`MetricGauge[Float]` recording tree, and the **entire `temporalio.runtime`
+module** (`Runtime`, `TelemetryConfig`, `PrometheusConfig`,
+`OpenTelemetryConfig`, `LoggingConfig`, `MetricBuffer`, …) have no
+`temporal_dbos` equivalent. Code that calls `metric_meter()` raises
+`AttributeError`, and `import temporal_dbos.runtime` fails — the one place this
+package does **not** mirror `temporalio`'s module layout (DESIGN §2).
+
+Why it's deferred rather than stubbed: in Temporal the metric *recording* API
+(`MetricMeter`) and the *export* configuration (the `runtime` module) are two
+halves of one feature, and the export half exists to configure Temporal's Rust
+`sdk-core` telemetry pipeline (Prometheus endpoint, OTLP push, Core log
+forwarding) — there is no Core here, so half the module has no analog at all.
+A faithful version is real work: our own meter wired to a real exporter
+(`prometheus_client` / `opentelemetry-sdk`), not a Rust passthrough. Rather than
+ship an inert no-op meter that silently drops business metrics (a worse failure
+mode than a clear `AttributeError`), v1 omits the surface entirely. Mitigation:
+instrument with `prometheus_client` / OpenTelemetry directly from workflow and
+activity code for now; a `temporal_dbos.runtime` + non-`noop` meter is a
+candidate for a later version.
+
+
+### D34. Worker tuning options map onto DBOS queues, with model differences
+
+Temporal's worker tuning knobs are honored by mapping onto DBOS primitives
+rather than ignored, but our queue model differs from Temporal's separate slot
+pools, so a few have caveats:
+
+- **`max_concurrent_activities` / `max_concurrent_local_activities`** cap concurrent
+  activity execution via a single per-process semaphore around the activity step.
+  Temporal keeps *separate* slot pools for regular vs. local activities; here both
+  run as DBOS steps and share one cap (we use `max_concurrent_activities`, falling
+  back to the local cap if only that is set). An activities-only worker also gets
+  the cap as its task queue's `worker_concurrency` (its queue items *are*
+  activities).
+- **`max_task_queue_activities_per_second` / `max_activities_per_second`** become the
+  activity queue's rate `limiter`. DBOS's limiter is **queue-wide** (across all
+  workers), so the task-queue-wide knob maps exactly; the per-worker knob, when it
+  is the only one set, is applied as a queue-wide approximation. Fractional rates
+  ≥1 round to an integer per-second limit; sub-1 rates map to one start per
+  `1/rate` seconds (exact).
+- **`identity`** sets the DBOS `executor_id` (so it shows in DBOS views / list
+  filters). Unlike Temporal — where identity is purely informational and any
+  poller can pick up a task — `executor_id` also *scopes recovery* (D6): a custom
+  identity should be **stable per fleet**, not unique per process, or a crashed
+  worker's workflows won't be recovered until a worker with the same identity
+  returns.
+- **`activity_executor`** is honored: sync activities run on the provided executor
+  (with the activity context copied in), instead of the event loop's default pool.
+
+`on_fatal_error` is honored: an unrecoverable error from the run loop is passed
+to the callback before it propagates.
+
+Every other Worker option is **classified and machine-checked**
+(`tests/unit/test_worker_param_audit.py` fails if a new temporalio Worker
+parameter is left unclassified), in two groups:
+
+- **Inert** (no DBOS analog; accepted-and-ignored with a debug log): all
+  poller-behavior / poll-count knobs, sticky-cache options (`max_cached_workflows`,
+  eviction, sticky timeouts), the sandbox runners, `workflow_task_executor`,
+  `shared_state_manager` (multiprocess activities, D9), the heartbeat-throttle
+  intervals (in-memory heartbeat model, D6), Nexus executors/poll knobs, and
+  server-side optimization flags (`disable_eager_activity_execution`,
+  `debug_mode`, payload-limit / external-storage knobs).
+- **Rejected** (behavior-changing AND unfulfilable → `Worker(...)` raises
+  `NotImplementedError` instead of silently no-op'ing): `tuner` (resource-based
+  slot tuning has no DBOS analog — use `max_concurrent_*`), `plugins` (use
+  `interceptors=`), and `nexus_service_handlers` (Nexus, DESIGN §1).
+
+`Client.connect`'s gRPC connection/auth/runtime options are likewise N/A — the
+`Client` wraps an already-built `DBOSClient` (D2). Every `Client` parameter is
+classified the same way (`tests/unit/test_client_param_audit.py`): `Client`
+honors `data_converter` / `interceptors` /
+`default_workflow_query_reject_condition`, replaces `target_host` / `service_client`
+with the `dbos_client`, and *subsumes* the connection / transport / auth /
+runtime options into the DBOSClient. Because `Client` has **no `**kwargs`
+catch-all** (unlike `Worker`), passing one of those subsumed options raises a
+loud `TypeError` instead of being silently ignored — so the Client surface needs
+no explicit-reject list.
+
+### D35. Start-verb options: most honored; a few accepted-but-pending
+
+The start verbs (`Client.start_workflow` / `execute_workflow`,
+`workflow.start_child_workflow` / `execute_child_workflow`,
+`workflow.start_activity`, `workflow.continue_as_new`) accept every temporalio
+parameter as a named argument. Each is classified and machine-checked
+(`tests/unit/test_start_verb_param_audit.py` fails if a new temporalio parameter
+on any of these verbs is left unclassified), in three groups: **honored**,
+**inert** (no behavioral analog in our model — e.g. `task_timeout`, which has no
+workflow-task concept; `versioning_intent`; `static_summary`/`static_details`;
+`priority`; the gRPC `rpc_*` / `request_*` options), and **pending** (a
+behavior-changing option we do not yet enforce — accepted and debug-logged, not
+silently dropped without record). The pending set is small and deliberate:
+
+- **`start_child_workflow.cron_schedule`** — a cron child would spawn a detached
+  run chain that the parent-close sweep (D5/§6.5) would need to follow across
+  `--r{n}` successors, and the parent's child-result wait resolves on the first
+  run. The plumbing (`RunMeta.cron`) exists but the lifecycle interactions are
+  not yet worked out, so cron is honored for **top-level** starts only.
+- **`start_child_workflow.id_reuse_policy`** — children already enforce
+  reject-on-duplicate (an in-use child id raises `WorkflowAlreadyStartedError`,
+  the `REJECT_DUPLICATE` behavior). Honoring the other policies needs the
+  run-chain resolution the client start performs (`ids.resolve_latest_run`),
+  which the in-workflow child-start path does not yet do. Auto-derived child ids
+  (`{parent}_{seq}`, the default) make reuse moot in the common case.
+- **`start_workflow.execution_timeout`** — the whole-execution (run-chain)
+  deadline. We honor the per-run `run_timeout` but not a chain-wide cap spanning
+  continue-as-new / retry / cron. Faithful enforcement lands on the still-pending
+  `TIMED_OUT` status-marker work (D19: a per-run timeout currently surfaces as
+  `TERMINATED`, not a `TIMED_OUT` failure), so it is deferred until that lands —
+  at which point the chain-deadline check at each hop is a natural extension.
+
+Everything else the start verbs honor: `start_child_workflow` honors `run_timeout`
+and `retry_policy` (matching top-level starts — the child carries them in its
+`RunMeta`, `run_timeout` also drives `SetWorkflowTimeout` on the enqueue, and the
+child-result wait follows the resulting retry chain to the final run), alongside
+`id`, `task_queue`, `parent_close_policy`, and `cancellation_type`.

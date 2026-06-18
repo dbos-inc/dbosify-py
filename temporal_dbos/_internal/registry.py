@@ -97,6 +97,10 @@ class WorkflowDefinition:
     # infer the result type when none is passed.
     arg_types: Optional[List[type]] = None
     ret_type: Optional[type] = None
+    # @workflow.defn(versioning_behavior=...): stored for parity. PINNED is what
+    # DBOS enforces anyway (recovery/dequeue scoped to application_version);
+    # AUTO_UPGRADE has no DBOS analog (DEVIATIONS D29).
+    versioning_behavior: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -209,6 +213,22 @@ def set_worker_namespace(namespace: Optional[str]) -> None:
     worker_namespace = namespace
 
 
+# This process's worker deployment NAME, backing
+# workflow.Info.get_current_deployment_version()/get_current_build_id(). Set by
+# the Worker (deployment_config.version.deployment_name, else the DBOS app name);
+# None when no Worker is active (the in-process dispatcher harness) → the
+# accessors return None. The build_id half is NOT stored here: it is read live
+# from the DBOS application_version at access time (the version DBOS actually
+# pins recovery/dequeue to, including a code-hash for auto-versioning), so the
+# surfaced version always equals the enforced one (DEVIATIONS D29).
+worker_deployment_name: Optional[str] = None
+
+
+def set_worker_deployment_name(name: Optional[str]) -> None:
+    global worker_deployment_name
+    worker_deployment_name = name
+
+
 def workflow_definition_of(cls: Type[Any]) -> WorkflowDefinition:
     defn = cls.__dict__.get(WORKFLOW_DEFN_ATTR)
     if defn is None:
@@ -280,6 +300,7 @@ def build_workflow_definition(
     *,
     name: Optional[str],
     failure_exception_types: Sequence[Type[BaseException]],
+    versioning_behavior: Optional[int] = None,
 ) -> WorkflowDefinition:
     """Scan a @workflow.defn-decorated class for handler markers and validate,
     mirroring temporalio's decoration-time checks.
@@ -381,6 +402,7 @@ def build_workflow_definition(
         failure_exception_types=tuple(failure_exception_types),
         arg_types=arg_types,
         ret_type=ret_type,
+        versioning_behavior=versioning_behavior,
     )
 
 

@@ -118,6 +118,7 @@ from .common import (
     RetryPolicy,
     SearchAttributes,
     TypedSearchAttributes,
+    VersioningOverride,
     WorkflowIDConflictPolicy,
     WorkflowIDReusePolicy,
     _warn_on_deprecated_search_attributes,
@@ -578,6 +579,7 @@ class WithStartWorkflowOperation:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
         priority: Optional[Any] = None,
+        versioning_override: Optional[VersioningOverride] = None,
     ) -> None:
         # Required (no default), matching temporalio; explicit UNSPECIFIED
         # is also rejected.
@@ -603,6 +605,7 @@ class WithStartWorkflowOperation:
             rpc_metadata=rpc_metadata,
             rpc_timeout=rpc_timeout,
             priority=priority,
+            versioning_override=versioning_override,
         )
         self._workflow = workflow
         self._handle: Optional["WorkflowHandle"] = None
@@ -1186,6 +1189,7 @@ class Client:
         rpc_timeout: Optional[timedelta] = None,
         request_eager_start: bool = False,
         priority: Optional[Any] = None,
+        versioning_override: Optional[VersioningOverride] = None,
         request_id: Optional[str] = None,
         _with_start_update: Optional[Tuple[Any, str, str]] = None,
         **unsupported: Any,
@@ -1208,6 +1212,9 @@ class Client:
             "request_eager_start": request_eager_start or None,
             "priority": priority,
             "request_id": request_id,
+            # PinnedVersioningOverride matches the enforced default; the
+            # auto-upgrade override has no DBOS analog (DEVIATIONS D29).
+            "versioning_override": versioning_override,
             **unsupported,
         }.items():
             if value is not None:
@@ -1241,7 +1248,7 @@ class Client:
             callbacks=[],
             links=[],
             request_id=request_id,
-            versioning_override=None,
+            versioning_override=versioning_override,
             with_start_update=_with_start_update,
         )
         return await self._impl.start_workflow(input)
@@ -1456,6 +1463,7 @@ class Client:
         rpc_timeout: Optional[timedelta] = None,
         request_eager_start: bool = False,
         priority: Optional[Any] = None,
+        versioning_override: Optional[VersioningOverride] = None,
         **unsupported: Any,
     ) -> Any:
         """Start a workflow and wait for completion. See ``start_workflow``."""
@@ -1484,6 +1492,7 @@ class Client:
             rpc_timeout=rpc_timeout,
             request_eager_start=request_eager_start,
             priority=priority,
+            versioning_override=versioning_override,
             **unsupported,
         )
         return await handle.result()
