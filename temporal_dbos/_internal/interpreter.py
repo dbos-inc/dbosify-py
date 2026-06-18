@@ -257,6 +257,16 @@ def _await_child_result(child_id: str) -> Any:
                         # final run's (Temporal semantics) — follow the
                         # chain. The step records only the final outcome.
                         child_id = marker.envelope["new_run_id"]
+                    except SerializedWorkflowFailure as failed:
+                        # A failed run with a successor (workflow retry from the
+                        # child's retry_policy) is followed to that successor,
+                        # exactly as the client's result(follow_runs=True) and
+                        # temporalio's new_execution_run_id do. A terminal
+                        # failure (no successor) propagates to the handler below.
+                        successor = failed.envelope.get("new_run_id")
+                        if successor is None:
+                            raise
+                        child_id = successor
             except SerializedWorkflowCancellation as cancelled:
                 return {
                     "ok": False,
@@ -602,6 +612,13 @@ class _ChildExec:
     # Interceptor headers in wire form (str -> payload dict), set by the
     # outbound chain; delivered to the child run as ExecuteWorkflowInput.headers.
     headers: Dict[str, Any] = field(default_factory=dict)
+    # Per-run timeout (seconds) and serialized RetryPolicy for the child,
+    # carried in its RunMeta exactly like a top-level start: run_timeout drives
+    # SetWorkflowTimeout on the enqueue and re-applies across the child's chain;
+    # retry_policy gates the child's own workflow retries (the child-result step
+    # follows the resulting chain, so the parent still sees the final outcome).
+    run_timeout: Optional[float] = None
+    retry_policy: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -767,6 +784,8 @@ class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
             cancellation_type=int(input.cancellation_type),
             memo=input.memo,
             search_attributes=input.search_attributes,
+            run_timeout=input.run_timeout,
+            retry_policy=input.retry_policy,
             # Raw Payloads; codec-encoded on the real loop in _start_child.
             headers=input.headers,
         )
@@ -1659,8 +1678,9 @@ class Interpreter(_Runtime):
         to the same child instead of spawning a twin.
         """
         from contextlib import nullcontext
+        from typing import ContextManager
 
-        from dbos import SetWorkflowAttributes, SetWorkflowID
+        from dbos import SetWorkflowAttributes, SetWorkflowID, SetWorkflowTimeout
 
         from . import registry
 
@@ -1713,10 +1733,17 @@ class Interpreter(_Runtime):
                 "workflow_id": ids.parse_run(self._workflow_id)[0],
                 "run_id": self._workflow_id,
             }
+            # run_timeout / retry_policy ride in the child's RunMeta exactly as a
+            # top-level start: the timeout re-applies across the child's own
+            # chain (cron/retry/CAN) and the retry policy gates its workflow
+            # retries. run_timeout also drives SetWorkflowTimeout on this initial
+            # enqueue (mirroring the continue-as-new path).
             child_meta = RunMeta(
                 attributes=child_attrs,
                 headers=child_headers or None,
                 root=child_root,
+                run_timeout=child.run_timeout,
+                retry_policy=child.retry_policy,
             )
             child_payload = wrap_input(child_args, child_meta)
             attrs_ctx = (
@@ -1724,7 +1751,12 @@ class Interpreter(_Runtime):
                 if child_attrs is not None
                 else nullcontext()
             )
-            with SetWorkflowID(child.child_id), attrs_ctx:
+            timeout_ctx: ContextManager[Any] = (
+                SetWorkflowTimeout(child.run_timeout)
+                if child.run_timeout is not None
+                else nullcontext()
+            )
+            with SetWorkflowID(child.child_id), timeout_ctx, attrs_ctx:
                 if child_queue is not None:
                     await child_queue.enqueue_async(dispatch_fn, child_payload)
                 else:
@@ -2954,8 +2986,12 @@ class Interpreter(_Runtime):
         search_attributes: Optional[
             Union[TypedSearchAttributes, SearchAttributes]
         ] = None,
+        run_timeout: Optional[timedelta] = None,
+        retry_policy: Optional[RetryPolicy] = None,
         headers: Optional[Mapping[str, Any]] = None,
     ) -> "ChildWorkflowHandle":
+        from .payloads import serialize_retry_policy
+
         self._assert_not_read_only("start a child workflow")
         seq = self._next_seq("child")
         if child_id is not None:
@@ -2976,6 +3012,14 @@ class Interpreter(_Runtime):
             result_future=self._vloop.create_future(),
             memo=memo,
             search_attributes=search_attributes,
+            run_timeout=(
+                run_timeout.total_seconds() if run_timeout is not None else None
+            ),
+            retry_policy=(
+                serialize_retry_policy(retry_policy)
+                if retry_policy is not None
+                else None
+            ),
             headers=dict(headers or {}),
         )
         self._pending_children[seq] = child

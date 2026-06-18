@@ -922,3 +922,41 @@ runtime options into the DBOSClient. Because `Client` has **no `**kwargs`
 catch-all** (unlike `Worker`), passing one of those subsumed options raises a
 loud `TypeError` instead of being silently ignored — so the Client surface needs
 no explicit-reject list.
+
+### D35. Start-verb options: most honored; a few accepted-but-pending
+
+The start verbs (`Client.start_workflow` / `execute_workflow`,
+`workflow.start_child_workflow` / `execute_child_workflow`,
+`workflow.start_activity`, `workflow.continue_as_new`) accept every temporalio
+parameter as a named argument. Each is classified and machine-checked
+(`tests/unit/test_start_verb_param_audit.py` fails if a new temporalio parameter
+on any of these verbs is left unclassified), in three groups: **honored**,
+**inert** (no behavioral analog in our model — e.g. `task_timeout`, which has no
+workflow-task concept; `versioning_intent`; `static_summary`/`static_details`;
+`priority`; the gRPC `rpc_*` / `request_*` options), and **pending** (a
+behavior-changing option we do not yet enforce — accepted and debug-logged, not
+silently dropped without record). The pending set is small and deliberate:
+
+- **`start_child_workflow.cron_schedule`** — a cron child would spawn a detached
+  run chain that the parent-close sweep (D5/§6.5) would need to follow across
+  `--r{n}` successors, and the parent's child-result wait resolves on the first
+  run. The plumbing (`RunMeta.cron`) exists but the lifecycle interactions are
+  not yet worked out, so cron is honored for **top-level** starts only.
+- **`start_child_workflow.id_reuse_policy`** — children already enforce
+  reject-on-duplicate (an in-use child id raises `WorkflowAlreadyStartedError`,
+  the `REJECT_DUPLICATE` behavior). Honoring the other policies needs the
+  run-chain resolution the client start performs (`ids.resolve_latest_run`),
+  which the in-workflow child-start path does not yet do. Auto-derived child ids
+  (`{parent}_{seq}`, the default) make reuse moot in the common case.
+- **`start_workflow.execution_timeout`** — the whole-execution (run-chain)
+  deadline. We honor the per-run `run_timeout` but not a chain-wide cap spanning
+  continue-as-new / retry / cron. Faithful enforcement lands on the still-pending
+  `TIMED_OUT` status-marker work (D19: a per-run timeout currently surfaces as
+  `TERMINATED`, not a `TIMED_OUT` failure), so it is deferred until that lands —
+  at which point the chain-deadline check at each hop is a natural extension.
+
+Everything else the start verbs honor: `start_child_workflow` honors `run_timeout`
+and `retry_policy` (matching top-level starts — the child carries them in its
+`RunMeta`, `run_timeout` also drives `SetWorkflowTimeout` on the enqueue, and the
+child-result wait follows the resulting retry chain to the final run), alongside
+`id`, `task_queue`, `parent_close_policy`, and `cancellation_type`.

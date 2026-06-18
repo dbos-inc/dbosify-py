@@ -1572,17 +1572,18 @@ async def start_child_workflow(
     """Start a child workflow; returns its handle once the start is durable
     (Temporal semantics: resolves on start, not completion).
 
-    Phase 2 honors arg/args, id (default: ``{parent_id}_{seq}`` — README
-    deviation #5), task_queue, parent_close_policy, and cancellation_type;
-    the remaining parameters are accepted and ignored (debug-logged).
+    Honors arg/args, id (default: ``{parent_id}_{seq}`` — README deviation #5),
+    task_queue, parent_close_policy, cancellation_type, and (matching top-level
+    starts) ``run_timeout`` and ``retry_policy``. ``cron_schedule`` and
+    ``id_reuse_policy`` are accepted-but-pending for children (see the verb
+    audit / DEVIATIONS D35); the remaining parameters are accepted and ignored
+    (debug-logged).
     """
     for key, value in {
         "result_type": result_type,
         "execution_timeout": execution_timeout,
-        "run_timeout": run_timeout,
         "task_timeout": task_timeout,
         "id_reuse_policy": id_reuse_policy,
-        "retry_policy": retry_policy,
         "cron_schedule": cron_schedule or None,
         "versioning_intent": versioning_intent,
         "static_summary": static_summary,

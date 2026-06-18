@@ -15,10 +15,12 @@ from dbos import DBOSClient
 
 from temporal_dbos import activity, workflow
 from temporal_dbos.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from temporal_dbos.common import RetryPolicy
 from temporal_dbos.exceptions import (
     ApplicationError,
     CancelledError,
     ChildWorkflowError,
+    TerminatedError,
     WorkflowAlreadyStartedError,
 )
 from temporal_dbos.worker import Worker
@@ -184,11 +186,69 @@ class ExternalToucher:
         return "sent"
 
 
+# Fast backoff so a multi-attempt child chain completes well under a second.
+FAST_RETRY = RetryPolicy(
+    initial_interval=timedelta(milliseconds=20), maximum_attempts=5
+)
+
+
+@workflow.defn
+class RetryingChild:
+    """Fails until the chain reaches attempt 3, then succeeds — proving the
+    child honors its own retry_policy AND the parent follows the retry chain."""
+
+    @workflow.run
+    async def run(self) -> int:
+        attempt = workflow.info().attempt
+        if attempt < 3:
+            raise ApplicationError(f"child failing attempt {attempt}")
+        return attempt
+
+
+@workflow.defn
+class RetryParent:
+    @workflow.run
+    async def run(self) -> int:
+        winning_attempt: int = await workflow.execute_child_workflow(
+            RetryingChild.run, id="retrying-child", retry_policy=FAST_RETRY
+        )
+        return winning_attempt
+
+
+@workflow.defn
+class TimingOutChild:
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.sleep(30)
+        return "should-not-finish"
+
+
+@workflow.defn
+class TimeoutParent:
+    @workflow.run
+    async def run(self) -> str:
+        try:
+            await workflow.execute_child_workflow(
+                TimingOutChild.run,
+                id="timing-out-child",
+                run_timeout=timedelta(seconds=1),
+            )
+            return "no-timeout"
+        except ChildWorkflowError as err:
+            # run_timeout natively cancels the child → TERMINATED in our scheme
+            # (D19), surfaced to the parent as a terminated child.
+            return f"timed-out:{type(err.cause).__name__}"
+
+
 ALL_WORKFLOWS = [
     ComposeChild,
     FailingChild,
     WaitingChild,
     SlowRecordingChild,
+    RetryingChild,
+    RetryParent,
+    TimingOutChild,
+    TimeoutParent,
     ParentWorkflow,
     CatchingParent,
     SignalingParent,
@@ -248,6 +308,31 @@ async def test_parent_signals_child() -> None:
             SignalingParent.run, id="parent-signaling", task_queue=TASK_QUEUE
         )
         assert result == "child said: released"
+
+
+async def test_child_retry_policy_honored() -> None:
+    # The child fails twice and succeeds on attempt 3. The parent receives the
+    # winning attempt only if (a) the child's retry_policy drove the retries and
+    # (b) the child-result step followed the retry chain to the final run.
+    async with _env() as client:
+        result = await client.execute_workflow(
+            RetryParent.run, id="parent-child-retry", task_queue=TASK_QUEUE
+        )
+        assert result == 3
+        # The chain advanced past run 0 (retries are new runs in the chain).
+        current = await client._current_run("retrying-child")
+        assert current is not None and current[0] >= 2
+
+
+async def test_child_run_timeout_honored() -> None:
+    # The child would sleep 30s; a 1s run_timeout fires first and terminates it.
+    # If run_timeout were silently dropped, the parent would hang past the test
+    # timeout instead of catching a ChildWorkflowError within ~1s.
+    async with _env() as client:
+        result = await client.execute_workflow(
+            TimeoutParent.run, id="parent-child-timeout", task_queue=TASK_QUEUE
+        )
+        assert result == f"timed-out:{TerminatedError.__name__}"
 
 
 async def _wait_for_status(
