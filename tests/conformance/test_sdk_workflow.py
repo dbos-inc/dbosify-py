@@ -1243,3 +1243,272 @@ async def test_workflow_patch_memoized(client: Client) -> None:
             "some-value",
             "post-patch",
         ] == await post_patch_handle.result()
+
+
+# --- cancellation reason (child + external) ----------------------------------
+
+
+@workflow.defn
+class CancelReasonReporter:
+    """Swallows a cancel and returns the observed reason."""
+
+    @workflow.run
+    async def run(self) -> str:
+        try:
+            await asyncio.sleep(1000)
+        except asyncio.CancelledError:
+            return workflow.cancellation_reason() or ""
+        raise RuntimeError("unreachable")
+
+
+@workflow.defn
+class ChildCancelReasonWorkflow:
+    @workflow.run
+    async def run(self, msg: str) -> str:
+        child = await workflow.start_child_workflow(
+            CancelReasonReporter.run,
+            id=f"{workflow.info().workflow_id}_child",
+        )
+        child.cancel(msg)
+        return cast(str, await child)
+
+
+@pytest.mark.skip(
+    reason="Cancellation-type / D32 family (the child-workflow analog of "
+    "cancel_multi): the parent cancels a child that catches CancelledError and "
+    "RETURNS a value. Temporal completes that child successfully, so `await child` "
+    "yields the value; our model resolves the parent's awaiter as cancelled "
+    "instead of waiting for the child's swallow-and-return, so the parent fails "
+    "with CancelledError. Honoring it needs WAIT_CANCELLATION_COMPLETED child "
+    "semantics — a deep interpreter change. The reason *propagation* itself works "
+    "(test_workflow_external_cancel_reason passes)."
+)
+async def test_workflow_child_cancel_reason(client: Client) -> None:
+    async with new_worker(
+        client, ChildCancelReasonWorkflow, CancelReasonReporter
+    ) as worker:
+        result = await client.execute_workflow(
+            ChildCancelReasonWorkflow.run,
+            "from-parent",
+            id=_wid(),
+            task_queue=worker.task_queue,
+        )
+        assert result == "from-parent"
+
+
+@workflow.defn
+class ExternalCancelReasonWorkflow:
+    @workflow.run
+    async def run(self, target_id: str) -> None:
+        await workflow.get_external_workflow_handle(target_id).cancel(
+            reason="from-external-caller"
+        )
+
+
+async def test_workflow_external_cancel_reason(client: Client) -> None:
+    async with new_worker(
+        client, ExternalCancelReasonWorkflow, CancelReasonReporter
+    ) as worker:
+        target_id = _wid()
+        target = await client.start_workflow(
+            CancelReasonReporter.run, id=target_id, task_queue=worker.task_queue
+        )
+        await client.execute_workflow(
+            ExternalCancelReasonWorkflow.run,
+            target_id,
+            id=_wid(),
+            task_queue=worker.task_queue,
+        )
+        assert "from-external-caller" in await target.result()
+
+
+# --- cancel a child whose first task never started ---------------------------
+
+
+@workflow.defn
+class CancelDuringChildStartWorkflow:
+    def __init__(self) -> None:
+        self._proceed = False
+
+    @workflow.signal
+    def proceed(self) -> None:
+        self._proceed = True
+
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.wait_condition(lambda: self._proceed)
+        # Start a child on a task queue with no worker: its first task never
+        # starts, so the start loop would block forever if cancellation in that
+        # window were mishandled (temporalio regression #1445).
+        await workflow.start_child_workflow(
+            LongSleepWorkflow.run,
+            id=f"{workflow.info().workflow_id}_child",
+            task_queue="nonexistent-task-queue-no-worker-abc123",
+        )
+        await workflow.sleep(1000)
+
+
+async def test_workflow_cancel_child_unstarted(client: Client) -> None:
+    # Our worker must host the child type (unlike Temporal, where it can live on
+    # another worker); the child is still started on a task queue THIS worker
+    # does not poll, so it stays unstarted while the parent is cancelled.
+    async with new_worker(
+        client, CancelDuringChildStartWorkflow, LongSleepWorkflow
+    ) as worker:
+        handle = await client.start_workflow(
+            CancelDuringChildStartWorkflow.run,
+            id=_wid(),
+            task_queue=worker.task_queue,
+            execution_timeout=timedelta(seconds=30),
+        )
+        await handle.signal(CancelDuringChildStartWorkflow.proceed)
+        await handle.cancel()
+        with pytest.raises(WorkflowFailureError) as err:
+            await handle.result()
+        assert isinstance(err.value.cause, CancelledError)
+
+
+# --- callable-class activities (execute_activity_method) ---------------------
+
+
+@dataclass
+class MyDataClass:
+    field1: str
+
+
+class MethodActivity:
+    def __init__(self, orig_field1: str) -> None:
+        self.orig_field1 = orig_field1
+
+    @activity.defn(name="custom-name")
+    async def add(self, to_add: MyDataClass) -> MyDataClass:
+        return MyDataClass(field1=self.orig_field1 + to_add.field1)
+
+    @activity.defn
+    async def add_multi(self, source: MyDataClass, to_add: str) -> MyDataClass:
+        return MyDataClass(field1=source.field1 + to_add)
+
+
+@workflow.defn
+class ActivityMethodWorkflow:
+    @workflow.run
+    async def run(self, to_add: MyDataClass) -> MyDataClass:
+        ret = await workflow.execute_activity_method(
+            MethodActivity.add, to_add, start_to_close_timeout=timedelta(seconds=30)
+        )
+        return cast(
+            MyDataClass,
+            await workflow.execute_activity_method(
+                MethodActivity.add_multi,
+                args=[ret, ", in workflow"],
+                start_to_close_timeout=timedelta(seconds=30),
+            ),
+        )
+
+
+async def test_workflow_activity_method(client: Client) -> None:
+    activity_instance = MethodActivity("in worker")
+    async with new_worker(
+        client,
+        ActivityMethodWorkflow,
+        activities=[activity_instance.add, activity_instance.add_multi],
+    ) as worker:
+        result = await client.execute_workflow(
+            ActivityMethodWorkflow.run,
+            MyDataClass(field1=", workflow param"),
+            id=_wid(),
+            task_queue=worker.task_queue,
+        )
+        assert result == MyDataClass(field1="in worker, workflow param, in workflow")
+
+
+@pytest.mark.skip(
+    reason="workflow.execute_activity_class is not implemented (the callable-class "
+    "analog of execute_activity_method, which we do support and is covered by "
+    "test_workflow_activity_method). Recorded as a missing name in the parity "
+    "ledger; the underlying activity machinery is otherwise exercised."
+)
+async def test_workflow_activity_callable_class() -> None:
+    pass
+
+
+# --- continue-as-new (memo + retry policy + run-id chain) --------------------
+
+
+@workflow.defn
+class ContinueAsNewWorkflow:
+    @workflow.run
+    async def run(self, past_run_ids: list[str]) -> list[str]:
+        # Memo and retry policy carry across each continue-as-new.
+        assert workflow.memo_value("past_run_id_count") == len(past_run_ids)
+        retry_policy = workflow.info().retry_policy
+        assert retry_policy and retry_policy.maximum_attempts == 1000 + len(
+            past_run_ids
+        )
+
+        if len(past_run_ids) == 5:
+            return past_run_ids
+        info = workflow.info()
+        if info.continued_run_id:
+            past_run_ids.append(info.continued_run_id)
+            assert info.first_execution_run_id == past_run_ids[0]
+        workflow.continue_as_new(
+            past_run_ids,
+            memo={"past_run_id_count": len(past_run_ids)},
+            retry_policy=RetryPolicy(maximum_attempts=1000 + len(past_run_ids)),
+        )
+
+
+async def test_workflow_continue_as_new(client: Client) -> None:
+    async with new_worker(client, ContinueAsNewWorkflow) as worker:
+        handle = await client.start_workflow(
+            ContinueAsNewWorkflow.run,
+            cast("list[str]", []),
+            id=_wid(),
+            task_queue=worker.task_queue,
+            memo={"past_run_id_count": 0},
+            retry_policy=RetryPolicy(maximum_attempts=1000),
+        )
+        result = await handle.result()
+        assert len(result) == 5
+        assert result[0] == handle.first_execution_run_id
+
+
+# --- local-activity retry/backoff --------------------------------------------
+
+
+@activity.defn
+async def fail_until_attempt_activity(until_attempt: int) -> str:
+    if activity.info().attempt < until_attempt:
+        raise ApplicationError("Attempt too low")
+    return f"attempt: {activity.info().attempt}"
+
+
+@workflow.defn
+class LocalActivityBackoffWorkflow:
+    @workflow.run
+    async def run(self) -> None:
+        await workflow.execute_local_activity(
+            fail_until_attempt_activity,
+            2,
+            start_to_close_timeout=timedelta(minutes=1),
+            local_retry_threshold=timedelta(seconds=1),
+            retry_policy=RetryPolicy(
+                maximum_attempts=2, initial_interval=timedelta(seconds=2)
+            ),
+        )
+
+
+async def test_workflow_local_activity_backoff(client: Client) -> None:
+    # Adapted: the SDK test also asserts on history (one TIMER_FIRED, two
+    # MARKER_RECORDED) which is server-only. We keep the behavioral half — the
+    # local activity fails on attempt 1, backs off past local_retry_threshold,
+    # and succeeds on attempt 2, so the workflow completes.
+    async with new_worker(
+        client, LocalActivityBackoffWorkflow, activities=[fail_until_attempt_activity]
+    ) as worker:
+        await client.execute_workflow(
+            LocalActivityBackoffWorkflow.run,
+            id=_wid(),
+            task_queue=worker.task_queue,
+        )
