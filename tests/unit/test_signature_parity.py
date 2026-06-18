@@ -161,6 +161,8 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
     },
     # no archival tier; fetch_history reads DBOS step checkpoints
     "client.WorkflowHandle.fetch_history": {"skip_archival"},
+    # as fetch_history (the per-execution history fetch it delegates to)
+    "client.WorkflowExecutionAsyncIterator.map_histories": {"skip_archival"},
     # gRPC-era callbacks/links/stack_level (versioning_override is accepted
     # and inert — DEVIATIONS D29)
     "client.Client.start_workflow": {
@@ -811,8 +813,6 @@ KNOWN_MISSING_METHODS: Dict[str, Set[str]] = {
     "client.ScheduleListDescription": {"memo", "memo_value"},
     # The execution object doesn't carry a data-converter handle.
     "client.WorkflowExecution": {"data_converter"},
-    # Mapping over event-log histories needs Temporal history (DEVIATIONS D27).
-    "client.WorkflowExecutionAsyncIterator": {"map_histories"},
     # Static UI metadata not surfaced to describe() (start-verb inert params).
     "client.WorkflowExecutionDescription": {"static_details", "static_summary"},
     # DB-bound history; no offline JSON history (DEVIATIONS D27).

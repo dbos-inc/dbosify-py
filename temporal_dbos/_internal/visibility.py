@@ -32,6 +32,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
 from dbos import WorkflowStatus
 
+from .ids import RUN_SEPARATOR
 from .status import WorkflowExecutionStatus, to_execution_status
 
 # Reserved (system) field names the parser understands; everything else is
@@ -167,6 +168,13 @@ class VisibilityQuery:
     type_not_in: List[str] = field(default_factory=list)
     workflow_ids: Optional[List[str]] = None
     workflow_id_prefix: Optional[str] = None
+    # ``WorkflowId = X``: matches the whole run chain — X and its run-chain
+    # successors X--r1, X--r2, ... (continue-as-new / retry / cron / id-reuse) —
+    # mirroring Temporal, where a WorkflowId query returns every run of that
+    # workflow id. Resolved as a DBOS workflow-id prefix plus a post-filter that
+    # keeps only exact-X and X--r{n} rows (RUN_SEPARATOR is reserved, so no other
+    # user id can collide).
+    workflow_id_chain: Optional[str] = None
     statuses: Optional[Set[WorkflowExecutionStatus]] = None
     start_time_lo: Optional[datetime] = None
     start_time_hi: Optional[datetime] = None
@@ -191,6 +199,11 @@ class VisibilityQuery:
             # list_workflows_async accepts str|list, but get_workflow_aggregates
             # iterates the value, so a bare str there would match per-character.
             filters["workflow_id_prefix"] = [self.workflow_id_prefix]
+        if self.workflow_id_chain is not None:
+            # The chain match runs as a DBOS prefix query (the base id is a
+            # prefix of every run X--r{n}); post_filter() narrows those rows back
+            # to the chain (exact-X or X--r{n}).
+            filters.setdefault("workflow_id_prefix", [self.workflow_id_chain])
         if self.statuses is not None:
             dbos_statuses: List[str] = []
             for s in self.statuses:
@@ -221,13 +234,24 @@ class VisibilityQuery:
         needs_status = self.statuses is not None and any(
             _TEMPORAL_TO_DBOS[s] == ("ERROR",) for s in self.statuses
         )
-        if not needs_status and not self.type_not_in:
+        chain = self.workflow_id_chain
+        if not needs_status and not self.type_not_in and chain is None:
             return None
 
         statuses = self.statuses
         not_in = set(self.type_not_in)
+        chain_prefix = (chain + RUN_SEPARATOR) if chain is not None else None
 
         def predicate(row: WorkflowStatus) -> bool:
+            if chain is not None:
+                # Keep only the chain: exact base id or a run-chain successor
+                # X--r{n} (the prefix query may also match unrelated X-prefixed
+                # ids, which RUN_SEPARATOR keeps distinct).
+                assert chain_prefix is not None
+                if not (
+                    row.workflow_id == chain or row.workflow_id.startswith(chain_prefix)
+                ):
+                    return False
             if statuses is not None:
                 actual = to_execution_status(row.status, error=row.error)
                 if actual not in statuses:
@@ -251,6 +275,7 @@ class VisibilityQuery:
         return (
             not self.search_attributes
             and self.workflow_ids is None
+            and self.workflow_id_chain is None
             and not self.type_not_in
         )
 
@@ -324,7 +349,8 @@ def _apply_clause(q: VisibilityQuery, field_name: str, op: str, value: Any) -> N
         if isinstance(value, list):
             raise VisibilityQueryError("WorkflowId does not support a value list")
         if op == "=":
-            q.workflow_ids = [str(value)]
+            # All runs of this workflow id (the run chain), as in Temporal.
+            q.workflow_id_chain = str(value)
         elif op == "STARTS_WITH":
             q.workflow_id_prefix = str(value)
         else:

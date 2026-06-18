@@ -220,9 +220,14 @@ SAMPLES = {
     # same-id reuse across three workflow types.
     "replay": Sample(
         package="replay",
-        skip="needs WorkflowExecutionAsyncIterator.map_histories (missing) and the "
-        "sample's same-id reuse across types; Replayer.replay_workflows is "
-        "supported (DEVIATIONS D27)",
+        # The sample's replayer.py is client-only, but our Replayer re-executes a
+        # run's checkpoints through a *running Worker's* DBOS runtime — it
+        # requires a Worker for the types in the process (DEVIATIONS D27), unlike
+        # temporalio's worker-less in-sandbox Replayer. (The pieces it also needs
+        # — WorkflowId= returning the whole run chain, and map_histories — are
+        # now supported.)
+        skip="our Replayer needs a Worker for the types in the process; the "
+        "sample's replayer.py is client-only (DEVIATIONS D27)",
     ),
     # Eager workflow start — a server-side optimization (inert, no server); the
     # sample also reads the temporalio-internal __temporal_eagerly_started flag.

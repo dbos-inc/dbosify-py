@@ -17,12 +17,19 @@ from temporal_dbos._internal.visibility import (
 )
 
 
-def _row(status: str, *, name: str = "wf:Foo", error: object = None) -> WorkflowStatus:
+def _row(
+    status: str = "SUCCESS",
+    *,
+    name: str = "wf:Foo",
+    error: object = None,
+    workflow_id: str = "",
+) -> WorkflowStatus:
     """A bare DBOS WorkflowStatus carrying just the fields post_filter reads."""
     s = WorkflowStatus()
     s.status = status  # type: ignore[assignment]
     s.name = name
     s.error = error  # type: ignore[assignment]
+    s.workflow_id = workflow_id
     return s
 
 
@@ -87,9 +94,17 @@ def test_workflow_type_ne_post_filters() -> None:
 
 
 def test_workflow_id_eq() -> None:
-    assert parse_query("WorkflowId = 'order-1'").to_dbos_filters() == {
-        "workflow_ids": ["order-1"]
-    }
+    # WorkflowId = X matches the whole run chain (X and its successors X--r{n}),
+    # as in Temporal: a DBOS prefix query narrowed by a post_filter to chain runs.
+    parsed = parse_query("WorkflowId = 'order-1'")
+    assert parsed.to_dbos_filters() == {"workflow_id_prefix": ["order-1"]}
+    assert not parsed.aggregate_eligible()  # an id filter forces a scan
+    pred = parsed.post_filter()
+    assert pred is not None
+    assert pred(_row(workflow_id="order-1"))  # base run
+    assert pred(_row(workflow_id="order-1--r2"))  # a run-chain successor
+    assert not pred(_row(workflow_id="order-1x"))  # unrelated id sharing prefix
+    assert not pred(_row(workflow_id="order-2"))
 
 
 def test_workflow_id_starts_with() -> None:
@@ -236,13 +251,13 @@ def test_and_combines_heterogeneous_clauses() -> None:
 
 def test_escaped_quote_in_string_literal() -> None:
     parsed = parse_query("WorkflowId = 'O''Brien'")
-    assert parsed.to_dbos_filters()["workflow_ids"] == ["O'Brien"]
+    assert parsed.to_dbos_filters()["workflow_id_prefix"] == ["O'Brien"]
 
 
 def test_and_inside_quoted_value_is_not_a_conjunction() -> None:
     # The tokenizer must not split on AND inside a string.
     parsed = parse_query("WorkflowId = 'a AND b'")
-    assert parsed.to_dbos_filters()["workflow_ids"] == ["a AND b"]
+    assert parsed.to_dbos_filters()["workflow_id_prefix"] == ["a AND b"]
 
 
 # --- rejections of unsupported constructs -------------------------------------
