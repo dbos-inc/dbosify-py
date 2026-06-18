@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, AsyncIterator, Awaitable, Callable, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import pytest
 from dbos import DBOSClient
@@ -35,6 +35,21 @@ class LoopingWorkflow:
             return items
         items.append(f"r{rounds}")
         workflow.continue_as_new(args=[items, rounds - 1])
+
+
+@workflow.defn
+class CanIdProbe:
+    """Continues-as-new once, then reports the ids its *second* run surfaces.
+    Guards the base-vs-run-id contract: workflow_id must stay the stable base
+    across the chain, run_id carries the suffixed DBOS id (the suffix must never
+    leak into workflow_id — cf. the info().workflow_id / list-WorkflowId fixes)."""
+
+    @workflow.run
+    async def run(self, first: bool) -> Dict[str, str]:
+        if first:
+            workflow.continue_as_new(False)
+        info = workflow.info()
+        return {"workflow_id": info.workflow_id, "run_id": info.run_id}
 
 
 @workflow.defn
@@ -347,6 +362,7 @@ async def _env() -> AsyncIterator[Client]:
             SlowChainWorkflow,
             TimeoutOverrideChain,
             LoopingWorkflow,
+            CanIdProbe,
             CarryoverWorkflow,
             CanParent,
             LinkProbeWorkflow,
@@ -373,6 +389,26 @@ async def _env() -> AsyncIterator[Client]:
             yield Client(dbos_client)
         finally:
             dbos_client.destroy()
+
+
+async def test_workflow_id_stays_base_across_continue_as_new() -> None:
+    """Guard: across continue-as-new, the surfaced *workflow id* is the stable
+    base while the *run id* carries the DBOS suffix — the run suffix must never
+    leak into a workflow_id field (regression guard for the audited class of
+    info().workflow_id / list-by-WorkflowId bugs)."""
+    async with _env() as client:
+        # execute_workflow follows the chain to the --r1 run and returns the ids
+        # that run surfaced from inside the workflow.
+        result = await client.execute_workflow(
+            CanIdProbe.run, True, id="can-id-probe", task_queue=TASK_QUEUE
+        )
+        assert result == {
+            "workflow_id": "can-id-probe",  # the stable base, no --r suffix
+            "run_id": "can-id-probe--r1",  # the per-run DBOS id
+        }
+        # Client-side describe agrees: .id is the base, .run_id the DBOS run id.
+        desc = await client.get_workflow_handle("can-id-probe").describe()
+        assert (desc.id, desc.run_id) == ("can-id-probe", "can-id-probe--r1")
 
 
 async def test_run_timeout_is_per_run_across_continue_as_new() -> None:
