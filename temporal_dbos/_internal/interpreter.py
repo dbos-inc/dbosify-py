@@ -880,9 +880,6 @@ class Interpreter(_Runtime):
         # The deterministic random seed (checkpointed once at run start), exposed
         # via workflow.random_seed(); fixed for the run's lifetime.
         self._seed: int = 0
-        # workflow.register_random_seed_callback() callbacks — stored, never
-        # invoked (the seed never changes mid-run, DEVIATIONS D31).
-        self._random_seed_callbacks: List[Callable[[int], None]] = []
         self._workflow_id = ""
         self._start_time = 0.0
         # ("ok", result) | ("failure", exc) | ("task_failure", exc)
@@ -1122,12 +1119,7 @@ class Interpreter(_Runtime):
         anywhere between here and this run's completion replays into an
         idempotent re-attach, never a twin run.
         """
-        from contextlib import nullcontext
-        from typing import ContextManager
-
-        from dbos import SetWorkflowAttributes, SetWorkflowID, SetWorkflowTimeout
-
-        from . import registry
+        from . import enqueue, registry
         from .payloads import serialize_retry_policy
 
         type_name = can._tdb_workflow or self._defn.name
@@ -1178,25 +1170,14 @@ class Interpreter(_Runtime):
         # The new run's args come from user code, so encode them (the next
         # run's interpreter decodes against its run signature).
         payload = wrap_input(await conversion.encode_values(can._tdb_args), carried)
-        # Explicit per-run timeout, else DBOS propagates THIS run's absolute
-        # deadline to the next run (see dispatcher._enqueue_next_run).
-        timeout_ctx: ContextManager[Any] = (
-            SetWorkflowTimeout(carried.run_timeout)
-            if carried.run_timeout is not None
-            else nullcontext()
+        await enqueue.enqueue_run(
+            dispatch_fn,
+            payload,
+            run_id=new_run_id,
+            queue=queue,
+            run_timeout=carried.run_timeout,
+            attributes=carried.attributes,
         )
-        attrs_ctx: ContextManager[Any] = (
-            SetWorkflowAttributes(carried.attributes)
-            if carried.attributes is not None
-            else nullcontext()
-        )
-        with SetWorkflowID(new_run_id), timeout_ctx, attrs_ctx:
-            if queue is not None:
-                await queue.enqueue_async(dispatch_fn, payload)
-            else:
-                # This run wasn't queue-dispatched (Phase 0 helpers): start
-                # the next run directly in-process.
-                await DBOS.start_workflow_async(dispatch_fn, payload)
         return new_run_id
 
     async def _forward_inbox_to(self, new_run_id: str) -> None:
@@ -1677,12 +1658,7 @@ class Interpreter(_Runtime):
         (and SetWorkflowID re-attaches idempotently), so replay re-attaches
         to the same child instead of spawning a twin.
         """
-        from contextlib import nullcontext
-        from typing import ContextManager
-
-        from dbos import SetWorkflowAttributes, SetWorkflowID, SetWorkflowTimeout
-
-        from . import registry
+        from . import enqueue, registry
 
         try:
             dispatch_fn = registry.dbos_workflow_for(child.type_name)
@@ -1746,23 +1722,14 @@ class Interpreter(_Runtime):
                 retry_policy=child.retry_policy,
             )
             child_payload = wrap_input(child_args, child_meta)
-            attrs_ctx = (
-                SetWorkflowAttributes(child_attrs)
-                if child_attrs is not None
-                else nullcontext()
+            await enqueue.enqueue_run(
+                dispatch_fn,
+                child_payload,
+                run_id=child.child_id,
+                queue=child_queue,
+                run_timeout=child.run_timeout,
+                attributes=child_attrs,
             )
-            timeout_ctx: ContextManager[Any] = (
-                SetWorkflowTimeout(child.run_timeout)
-                if child.run_timeout is not None
-                else nullcontext()
-            )
-            with SetWorkflowID(child.child_id), timeout_ctx, attrs_ctx:
-                if child_queue is not None:
-                    await child_queue.enqueue_async(dispatch_fn, child_payload)
-                else:
-                    # Parent wasn't queue-dispatched (Phase 0 helpers):
-                    # start the child directly in-process.
-                    await DBOS.start_workflow_async(dispatch_fn, child_payload)
         except Exception as err:  # noqa: BLE001
             del self._pending_children[child.seq]
             if not child.start_future.cancelled():
@@ -2967,8 +2934,9 @@ class Interpreter(_Runtime):
     def runtime_register_random_seed_callback(
         self, callback: Callable[[int], None]
     ) -> None:
-        # Stored for parity; never invoked — our seed is fixed per run.
-        self._random_seed_callbacks.append(callback)
+        # Accepted for parity but intentionally a no-op: our seed is fixed per
+        # run, so the callback could never fire (DEVIATIONS D31).
+        return None
 
     def runtime_instance(self) -> Any:
         return self._instance

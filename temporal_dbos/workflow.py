@@ -685,6 +685,12 @@ class Info:
         ``application_version`` DBOS pins recovery/dequeue to (DEVIATIONS D29).
         Empty string when no worker deployment version is set.
 
+        .. warning::
+            Read *live* from the executing worker, so it is **not replay-stable**
+            across a version change (a re-execution or :py:class:`Replayer` run on
+            a newer worker reports that worker's build id). Do not branch workflow
+            logic on it — use :py:func:`patched` for versioned code changes.
+
         .. deprecated::
             Use :py:meth:`get_current_deployment_version` instead.
         """
@@ -697,6 +703,11 @@ class Info:
         ``application_version`` DBOS pins recovery/dequeue to). None when no
         worker deployment version is set (e.g. the in-process dispatcher
         harness). DEVIATIONS D29.
+
+        .. warning::
+            Read *live* from the executing worker, so it is **not replay-stable**
+            across a version change. Do not branch workflow logic on it — use
+            :py:func:`patched` for versioned code changes.
         """
         return _runtime().runtime_get_current_deployment_version()
 

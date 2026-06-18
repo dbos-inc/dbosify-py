@@ -6,8 +6,7 @@ temporalio Worker parameter fails this test until it is classified, so no
 behavior-changing option can be silently swallowed.
 """
 
-import inspect
-from typing import Any, Dict, Set, cast
+from typing import Any, Dict, Mapping, Set, cast
 
 import pytest
 import temporalio.worker
@@ -15,6 +14,16 @@ from dbos import DBOSConfig
 
 from temporal_dbos import workflow
 from temporal_dbos.worker import _REJECTED_OPTIONS, Worker
+from tests.unit._param_audit import (
+    Bucket,
+    assert_buckets_disjoint,
+    assert_every_param_classified,
+    assert_honored_are_named,
+    assert_reasons_present,
+    named_params,
+)
+
+NAME = "worker.Worker.__init__"
 
 # We map it onto a DBOS primitive (act on it).
 HONORED: Set[str] = {
@@ -70,62 +79,40 @@ INERT: Dict[str, str] = {
 }
 
 
+# honored is a set; inert is {param: reason}; rejected/deviation are sets.
+BUCKETS: Mapping[str, Bucket] = {
+    "honored": HONORED,
+    "inert": INERT,
+    "rejected": REJECTED,
+    "deviation": DEVIATION,
+}
+
+
 def _temporalio_worker_params() -> Set[str]:
-    return {
-        p.name
-        for p in inspect.signature(
-            temporalio.worker.Worker.__init__
-        ).parameters.values()
-        if p.name != "self"
-        and p.kind
-        not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-    }
+    return named_params(temporalio.worker.Worker.__init__)
 
 
 def _our_worker_explicit_params() -> Set[str]:
-    return {
-        p.name
-        for p in inspect.signature(Worker.__init__).parameters.values()
-        if p.name not in ("self", "config")
-        and p.kind
-        not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-    }
+    # ``config`` is our leading DBOSConfig positional, not a temporalio option.
+    return named_params(Worker.__init__, skip={"config"})
 
 
 def test_every_worker_param_is_classified() -> None:
-    actual = _temporalio_worker_params()
-    classified = HONORED | REJECTED | DEVIATION | set(INERT)
-
-    unclassified = actual - classified
-    assert not unclassified, (
-        f"temporalio Worker params not classified in the audit: {sorted(unclassified)} "
-        "— add each to HONORED / INERT / REJECTED / DEVIATION."
-    )
-    stale = classified - actual
-    assert (
-        not stale
-    ), f"audit classifies names that aren't temporalio Worker params: {sorted(stale)}"
+    assert_every_param_classified(NAME, _temporalio_worker_params(), BUCKETS)
 
 
 def test_buckets_are_disjoint() -> None:
-    buckets = [HONORED, REJECTED, DEVIATION, set(INERT)]
-    for i, a in enumerate(buckets):
-        for b in buckets[i + 1 :]:
-            assert not (a & b), f"param classified in two buckets: {sorted(a & b)}"
+    assert_buckets_disjoint(NAME, BUCKETS)
 
 
 def test_inert_reasons_present() -> None:
-    assert all(reason.strip() for reason in INERT.values())
+    assert_reasons_present(NAME, BUCKETS)
 
 
 def test_honored_params_are_explicitly_accepted() -> None:
     # Every honored param must be a named parameter on our Worker (not swallowed
     # by **unsupported) — that is what makes "honored" verifiable.
-    ours = _our_worker_explicit_params()
-    not_accepted = HONORED - ours
-    assert (
-        not not_accepted
-    ), f"honored but not an explicit Worker param: {sorted(not_accepted)}"
+    assert_honored_are_named(NAME, HONORED, _our_worker_explicit_params())
 
 
 @workflow.defn

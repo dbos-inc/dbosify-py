@@ -252,10 +252,21 @@ _live_attempts: Dict[Tuple[str, int], "_Context"] = {}
 _heartbeat_store: Dict[Tuple[str, int], Sequence[Any]] = {}
 _cancel_requested_keys: "set[Tuple[str, int]]" = set()
 
-# How often the async wait_for_worker_shutdown() re-checks the (threading) event.
-# Worker shutdown is a rare terminal signal, so a coarse poll avoids tying up a
+# How often the async waiters re-check their (threading) event. Cancellation and
+# worker shutdown are rare terminal signals, so a coarse poll avoids tying up a
 # shared-pool thread on a blocking wait; the latency is acceptable.
-_WORKER_SHUTDOWN_POLL_SECONDS = 0.1
+_EVENT_POLL_SECONDS = 0.1
+
+
+async def _poll_until_set(event: threading.Event) -> None:
+    """Await a (threading) ``Event`` without parking a pool thread: poll it on
+    the event loop instead. Used for the rare terminal signals (cancellation,
+    worker shutdown) where parking a thread on the shared DBOS default executor
+    via ``run_in_executor`` would tie it up for the worker's lifetime — enough
+    of them would starve the pool. The small detection latency is acceptable.
+    """
+    while not event.is_set():
+        await asyncio.sleep(_EVENT_POLL_SECONDS)
 
 
 class _ActivityWorkerState:
@@ -297,6 +308,11 @@ class _ActivityWorkerState:
         ``max_concurrent_activities`` (a no-op when unset)."""
         if self._activity_concurrency is None:
             return nullcontext()
+        # Lazily built on first use, and intentionally *not* lock-guarded (unlike
+        # client()): every activity attempt for a worker dispatches on the one
+        # DBOS event loop, and this check-then-set has no await between the test
+        # and the assignment, so two attempts can never race to create two
+        # semaphores. The Semaphore must also be created on the loop it's awaited.
         if self._activity_semaphore is None:
             self._activity_semaphore = asyncio.Semaphore(self._activity_concurrency)
         return self._activity_semaphore
@@ -521,13 +537,7 @@ async def wait_for_cancelled() -> None:
     Raises:
         RuntimeError: When not in an activity.
     """
-    import asyncio
-
-    event = _context().cancelled
-    # Poll the (threading) cancelled event without parking a pool thread; the
-    # poll cadence matches wait_for_worker_shutdown (a rare, terminal signal).
-    while not event.is_set():
-        await asyncio.sleep(_WORKER_SHUTDOWN_POLL_SECONDS)
+    await _poll_until_set(_context().cancelled)
 
 
 def wait_for_cancelled_sync(
@@ -563,15 +573,7 @@ async def wait_for_worker_shutdown() -> None:
     Raises:
         RuntimeError: When not in an activity.
     """
-    import asyncio
-
-    event = _context_shutdown_event(_context())
-    # Poll rather than parking a thread on the shared (DBOS) default executor via
-    # run_in_executor — a never-firing wait there would tie up a pool thread for
-    # the worker's lifetime, and enough of them would starve it. Shutdown is a
-    # rare terminal event, so the small detection latency is acceptable.
-    while not event.is_set():
-        await asyncio.sleep(_WORKER_SHUTDOWN_POLL_SECONDS)
+    await _poll_until_set(_context_shutdown_event(_context()))
 
 
 def wait_for_worker_shutdown_sync(

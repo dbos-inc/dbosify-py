@@ -16,8 +16,7 @@ behavior-changing options we accept but do not yet honor (see DEVIATIONS D35).
 their signatures are pinned separately by ``test_signature_parity``.
 """
 
-import inspect
-from typing import Any, Callable, Dict, Set
+from typing import Any, Callable, Dict, Mapping, Set
 
 import pytest
 import temporalio.client
@@ -25,19 +24,14 @@ import temporalio.workflow
 
 from temporal_dbos import workflow
 from temporal_dbos.client import Client
-
-# Positional / dispatch arguments that are not options to classify.
-_SKIP = {"self", "workflow", "arg", "args", "activity"}
-
-
-def _named_params(fn: Callable[..., Any]) -> Set[str]:
-    return {
-        p.name
-        for p in inspect.signature(fn).parameters.values()
-        if p.name not in _SKIP
-        and p.kind
-        not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-    }
+from tests.unit._param_audit import (
+    Bucket,
+    assert_buckets_disjoint,
+    assert_every_param_classified,
+    assert_honored_are_named,
+    assert_reasons_present,
+    named_params,
+)
 
 
 class _Spec:
@@ -54,6 +48,10 @@ class _Spec:
         self.honored = honored
         self.inert = inert
         self.pending = pending
+
+    @property
+    def buckets(self) -> Mapping[str, Bucket]:
+        return {"honored": self.honored, "inert": self.inert, "pending": self.pending}
 
 
 # --- Client.start_workflow ---------------------------------------------------
@@ -180,25 +178,12 @@ SPECS: Dict[str, _Spec] = {
 @pytest.mark.parametrize("name", sorted(SPECS))
 def test_every_verb_param_is_classified(name: str) -> None:
     spec = SPECS[name]
-    actual = _named_params(spec.theirs)
-    classified = spec.honored | set(spec.inert) | set(spec.pending)
-
-    unclassified = actual - classified
-    assert not unclassified, (
-        f"{name}: temporalio params not classified: {sorted(unclassified)} "
-        "— add each to honored / inert / pending."
-    )
-    stale = classified - actual
-    assert not stale, f"{name}: audit classifies non-params: {sorted(stale)}"
+    assert_every_param_classified(name, named_params(spec.theirs), spec.buckets)
 
 
 @pytest.mark.parametrize("name", sorted(SPECS))
 def test_buckets_are_disjoint(name: str) -> None:
-    spec = SPECS[name]
-    buckets = [spec.honored, set(spec.inert), set(spec.pending)]
-    for i, a in enumerate(buckets):
-        for b in buckets[i + 1 :]:
-            assert not (a & b), f"{name}: param in two buckets: {sorted(a & b)}"
+    assert_buckets_disjoint(name, SPECS[name].buckets)
 
 
 @pytest.mark.parametrize("name", sorted(SPECS))
@@ -206,15 +191,9 @@ def test_honored_params_are_named_arguments(name: str) -> None:
     # "Honored" is only verifiable if we accept the option as a named argument
     # (not swallowed by **unsupported) and therefore can act on it.
     spec = SPECS[name]
-    ours = _named_params(spec.ours)
-    missing = spec.honored - ours
-    assert not missing, f"{name}: honored but not a named argument: {sorted(missing)}"
+    assert_honored_are_named(name, spec.honored, named_params(spec.ours))
 
 
 @pytest.mark.parametrize("name", sorted(SPECS))
 def test_inert_and_pending_reasons_present(name: str) -> None:
-    spec = SPECS[name]
-    assert all(r.strip() for r in spec.inert.values()), f"{name}: blank inert reason"
-    assert all(
-        r.strip() for r in spec.pending.values()
-    ), f"{name}: blank pending reason"
+    assert_reasons_present(name, SPECS[name].buckets)

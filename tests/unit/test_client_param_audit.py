@@ -8,13 +8,22 @@ that. The completeness check is machine-enforced: a new temporalio Client
 parameter fails this test until it is classified.
 """
 
-import inspect
-from typing import Dict, Set
+from typing import Dict, Mapping, Set
 
 import pytest
 import temporalio.client
 
 from temporal_dbos.client import Client
+from tests.unit._param_audit import (
+    Bucket,
+    assert_buckets_disjoint,
+    assert_every_param_classified,
+    assert_honored_are_named,
+    assert_reasons_present,
+    named_params,
+)
+
+NAME = "client.Client.connect"
 
 # We accept it as a named parameter and act on it.
 HONORED: Set[str] = {
@@ -46,57 +55,41 @@ SUBSUMED: Dict[str, str] = {
 }
 
 
-def _params(fn: object) -> Set[str]:
-    return {
-        p.name
-        for p in inspect.signature(fn).parameters.values()  # type: ignore[arg-type]
-        if p.name != "self"
-        and p.kind
-        not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-    }
+# honored/deviation are sets; subsumed is {param: reason}.
+BUCKETS: Mapping[str, Bucket] = {
+    "honored": HONORED,
+    "deviation": DEVIATION,
+    "subsumed": SUBSUMED,
+}
 
 
 def _temporalio_client_params() -> Set[str]:
     # The full surface across both public constructors.
-    return _params(temporalio.client.Client.connect) | _params(
+    return named_params(temporalio.client.Client.connect) | named_params(
         temporalio.client.Client.__init__
     )
 
 
 def _our_client_params() -> Set[str]:
-    return (_params(Client.connect) | _params(Client.__init__)) - {"dbos_client"}
+    return (named_params(Client.connect) | named_params(Client.__init__)) - {
+        "dbos_client"
+    }
 
 
 def test_every_client_param_is_classified() -> None:
-    actual = _temporalio_client_params()
-    classified = HONORED | DEVIATION | set(SUBSUMED)
-
-    unclassified = actual - classified
-    assert not unclassified, (
-        f"temporalio Client params not classified: {sorted(unclassified)} "
-        "— add each to HONORED / SUBSUMED / DEVIATION."
-    )
-    stale = classified - actual
-    assert (
-        not stale
-    ), f"audit classifies names that aren't temporalio Client params: {sorted(stale)}"
+    assert_every_param_classified(NAME, _temporalio_client_params(), BUCKETS)
 
 
 def test_buckets_are_disjoint() -> None:
-    buckets = [HONORED, DEVIATION, set(SUBSUMED)]
-    for i, a in enumerate(buckets):
-        for b in buckets[i + 1 :]:
-            assert not (a & b), f"param classified in two buckets: {sorted(a & b)}"
+    assert_buckets_disjoint(NAME, BUCKETS)
 
 
 def test_subsumed_reasons_present() -> None:
-    assert all(reason.strip() for reason in SUBSUMED.values())
+    assert_reasons_present(NAME, BUCKETS)
 
 
 def test_honored_params_are_accepted() -> None:
-    ours = _our_client_params()
-    not_accepted = HONORED - ours
-    assert not not_accepted, f"honored but not a Client param: {sorted(not_accepted)}"
+    assert_honored_are_named(NAME, HONORED, _our_client_params())
 
 
 def test_unsupported_params_are_not_silently_accepted() -> None:

@@ -27,16 +27,12 @@ import os
 import random
 import time as time_mod
 import uuid
-from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Sequence, Type, Union
 
 from dbos import (
     DBOS,
-    SetEnqueueOptions,
-    SetWorkflowAttributes,
     SetWorkflowID,
-    SetWorkflowTimeout,
     WorkflowHandle,
 )
 from dbos._context import get_local_dbos_context  # see docs/phase0.md
@@ -49,7 +45,7 @@ from .. import exceptions
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from ..workflow import NondeterminismError
 from . import activities as activities_mod
-from . import conversion, ids, inbox, registry
+from . import conversion, enqueue, ids, inbox, registry
 from . import replay as _replay
 from . import schedules
 from . import status as _status
@@ -405,39 +401,15 @@ async def _enqueue_next_run(
         await DBOS.retrieve_queue_async(queue_name) if queue_name is not None else None
     )
     payload = wrap_input(args, meta)
-    delay_ctx = (
-        SetEnqueueOptions(delay_seconds=delay_seconds)
-        if delay_seconds > 0
-        else nullcontext()
+    await enqueue.enqueue_run(
+        dispatch_fn,
+        payload,
+        run_id=new_run_id,
+        queue=queue,
+        run_timeout=meta.run_timeout,
+        attributes=meta.attributes,
+        delay_seconds=delay_seconds,
     )
-    # Re-apply the per-run timeout explicitly: an in-workflow start with no
-    # explicit timeout inherits this (closing) run's *absolute* deadline
-    # (dbos._core._get_timeout_deadline), which would let a backed-off
-    # attempt be born already expired. An explicit timeout on an enqueued
-    # workflow is converted to a deadline at dequeue — Temporal's per-run
-    # semantics. (Runs whose start predates the meta-envelope still inherit;
-    # acceptable for pre-envelope checkpoints.)
-    timeout_ctx = (
-        SetWorkflowTimeout(meta.run_timeout)
-        if meta.run_timeout is not None
-        else nullcontext()
-    )
-    # Carry the chain's memo + search attributes onto the next run's DBOS
-    # attributes column (describe()/visibility); the envelope already carries
-    # them for the next run's in-workflow info().
-    attrs_ctx = (
-        SetWorkflowAttributes(meta.attributes)
-        if meta.attributes is not None
-        else nullcontext()
-    )
-    with SetWorkflowID(new_run_id), timeout_ctx, delay_ctx, attrs_ctx:
-        if queue is not None:
-            await queue.enqueue_async(dispatch_fn, payload)
-        else:
-            # This run wasn't queue-dispatched (Phase 0 helpers): start the
-            # next run directly in-process. Enqueue delays don't apply on
-            # this path; queue-dispatched runs (every Client start) do.
-            await DBOS.start_workflow_async(dispatch_fn, payload)
     return new_run_id
 
 
@@ -587,21 +559,17 @@ async def _start_scheduled_action(action: Dict[str, Any], fired_at: datetime) ->
     payload = wrap_input(action.get("args", []), meta)
     queue = await DBOS.retrieve_queue_async(action["task_queue"])
     assert queue is not None, f"task queue {action['task_queue']!r} is not registered"
-    timeout_ctx = (
-        SetWorkflowTimeout(meta.run_timeout)
-        if meta.run_timeout is not None
-        else nullcontext()
-    )
     # Write memo + SAs to the started workflow's DBOS attributes column
     # (describe()/visibility); the envelope already carries them for in-workflow
     # info()/memo().
-    attrs_ctx = (
-        SetWorkflowAttributes(meta.attributes)
-        if meta.attributes is not None
-        else nullcontext()
+    await enqueue.enqueue_run(
+        dispatch_fn,
+        payload,
+        run_id=occurrence_id,
+        queue=queue,
+        run_timeout=meta.run_timeout,
+        attributes=meta.attributes,
     )
-    with SetWorkflowID(occurrence_id), timeout_ctx, attrs_ctx:
-        await queue.enqueue_async(dispatch_fn, payload)
 
 
 async def _run_workflow_task_loop(
