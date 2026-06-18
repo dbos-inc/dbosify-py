@@ -1045,3 +1045,25 @@ sync activity still observes cancellation through `activity.is_cancelled()` /
 `wait_for_cancelled()` and the `CancelledError` delivered at its next
 `activity.heartbeat()` ([§6.1.2](DESIGN.md)) — identical to temporalio run with
 `no_thread_cancel_exception=True`.
+
+### D38. Dynamic signal/query/update handlers require the new-style signature
+
+temporalio accepts two signatures for a `dynamic=True` handler: the modern
+`(self, name: str, args: Sequence[temporalio.common.RawValue])` and a legacy
+"old dynamic style" `(self, name: str, *args: Any)` where the varargs are
+already-converted positional values. We accept **only** the new style and
+reject the old one at registration with a clear `RuntimeError` ("Dynamic …
+handler must accept (self, name: str, args: Sequence[RawValue])").
+
+Why: the new style is the one temporalio documents and steers users toward; the
+varargs form predates `RawValue` and exists for backward compatibility we have
+no installed base to preserve (pre-alpha, no legacy shims). Requiring the single
+typed form keeps the dynamic-dispatch path uniform — the handler always receives
+the raw payloads and decodes them explicitly, with no per-handler arity guessing.
+
+Migration is mechanical: change `def h(self, name, *args)` reading `args[0]` to
+`def h(self, name, args)` reading
+`workflow.payload_converter().from_payload(args[0].payload, T)`. temporalio's
+own `test_workflow_signal_and_query_old_dynamic_style` exercises the legacy form
+and is therefore skipped in our adapted conformance suite; the new-style
+equivalent (`test_workflow_signal_and_query`) passes.
