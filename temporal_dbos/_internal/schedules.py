@@ -25,7 +25,6 @@ logger = logging.getLogger("temporal_dbos.schedules")
 
 __all__ = [
     "next_fire_delay",
-    "prev_fire_time",
     "parse_cron",
     "validate_cron",
     "interval_to_cron",
@@ -69,27 +68,6 @@ def next_fire_delay(expr: str, now: datetime) -> float:
     it = croniter(fields, now.astimezone(tz), second_at_beginning=True)
     fire_at: datetime = it.get_next(datetime)
     return max(0.0, (fire_at - now).total_seconds())
-
-
-def prev_fire_time(
-    expr: str, before: datetime, tz_name: Optional[str] = None
-) -> datetime:
-    """The expression's most recent occurrence strictly before ``before``.
-
-    ``tz_name`` (the schedule's compiled timezone) is used directly when given;
-    otherwise a ``CRON_TZ=``/``TZ=`` prefix on ``expr`` is honored. Returns a
-    timezone-aware datetime; its absolute instant matches the corresponding
-    forward occurrence, so ``int(result.timestamp())`` aligns with the id a
-    fire at that occurrence used.
-    """
-    fields, tz = parse_cron(expr)
-    if tz_name:
-        tz = ZoneInfo(tz_name)
-    if before.tzinfo is None:
-        before = before.replace(tzinfo=timezone.utc)
-    it = croniter(fields, before.astimezone(tz), second_at_beginning=True)
-    prev: datetime = it.get_prev(datetime)
-    return prev
 
 
 def interval_to_cron(every: timedelta, offset: Optional[timedelta] = None) -> str:

@@ -38,7 +38,7 @@ async def _complete(
 ) -> None:
     dbos_client = DBOSClient(system_database_url=system_database_url())
     try:
-        client = await Client.connect(dbos_client)
+        client = Client(dbos_client)
         handle = client.get_async_activity_handle(task_token=task_token)
         if heartbeat_first:
             # A heartbeat must NOT be mistaken for the completion.

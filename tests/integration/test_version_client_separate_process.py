@@ -27,7 +27,7 @@ async def _client_run(wf_id: str) -> Tuple[str, Optional[str]]:
     # of its own. The enqueue carries no version; the worker stamps its own.
     dbos_client = DBOSClient(system_database_url=system_database_url())
     try:
-        client = await Client.connect(dbos_client)
+        client = Client(dbos_client)
         result: str = await client.execute_workflow(
             VersionEcho.run, "hi", id=wf_id, task_queue=TASK_QUEUE
         )

@@ -57,8 +57,13 @@ def install_shim() -> None:
 
     from dbos import DBOSClient, DBOSConfig
 
+    from temporal_dbos._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
     from temporal_dbos.client import Client
     from temporal_dbos.worker import Worker
+
+    # The default namespace maps to its own DBOS schema (DEVIATIONS D1); the
+    # client must use it, and the Worker derives the same from namespace="default".
+    schema = namespace_schema(DEFAULT_NAMESPACE)
 
     # -- temporal_dbos.envconfig stand-in ------------------------------------
     envconfig = types.ModuleType("temporal_dbos.envconfig")
@@ -83,7 +88,10 @@ def install_shim() -> None:
             forwarded = {
                 k: kwargs[k] for k in ("data_converter", "interceptors") if k in kwargs
             }
-            client = cls(DBOSClient(system_database_url=url), **forwarded)
+            client = cls(
+                DBOSClient(system_database_url=url, dbos_system_schema=schema),
+                **forwarded,
+            )
             # Stash interceptors so the adapted ``Worker(client, ...)`` can
             # harvest them: temporalio Workers inherit the client's
             # interceptors, but ours take them via ``Worker(interceptors=)``

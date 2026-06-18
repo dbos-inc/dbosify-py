@@ -342,7 +342,7 @@ async def _env() -> AsyncIterator[Client]:
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
             TOKENS.clear()
-            yield await Client.connect(dbos_client)
+            yield Client(dbos_client)
         finally:
             dbos_client.destroy()
 
@@ -495,7 +495,7 @@ def test_async_activity_completion_survives_sigkill(tmp_path: Path) -> None:
         token = token_file.read_text().encode()
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = asyncio.run(Client.connect(dbos_client))
+            client = Client(dbos_client)
             asyncio.run(
                 client.get_async_activity_handle(task_token=token).complete("recovered")
             )

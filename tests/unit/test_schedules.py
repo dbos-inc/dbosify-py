@@ -223,12 +223,6 @@ def test_default_overlap_is_skip() -> None:
     assert SchedulePolicy().overlap == ScheduleOverlapPolicy.SKIP
 
 
-def test_prev_fire_time_grid() -> None:
-    before = datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc)
-    prev = schedules.prev_fire_time("*/1 * * * *", before)
-    assert prev == datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-
-
 @pytest.mark.parametrize("override", [None, ScheduleOverlapPolicy.ALLOW_ALL])
 def test_overlap_override_allows_none_and_allow_all(override: object) -> None:
     require_overlap_override_supported(override)  # type: ignore[arg-type]
@@ -246,13 +240,3 @@ def test_overlap_override_allows_none_and_allow_all(override: object) -> None:
 def test_overlap_override_rejects_others(override: ScheduleOverlapPolicy) -> None:
     with pytest.raises(NotImplementedError):
         require_overlap_override_supported(override)
-
-
-def test_prev_fire_time_timezone() -> None:
-    # "0 9 * * *" daily 09:00 in New York; previous before 2026-01-01 12:00 UTC
-    # (07:00 NY) is 2025-12-31 09:00 NY == 14:00 UTC.
-    before = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
-    prev = schedules.prev_fire_time("0 9 * * *", before, "America/New_York")
-    assert prev.astimezone(timezone.utc) == datetime(
-        2025, 12, 31, 14, 0, tzinfo=timezone.utc
-    )

@@ -91,7 +91,7 @@ async def main() -> None:
     ):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
-            client = await Client.connect(dbos_client)
+            client = Client(dbos_client)
             if action == "start":
                 if scenario == "cron":
                     await client.start_workflow(

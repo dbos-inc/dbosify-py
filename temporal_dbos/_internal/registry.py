@@ -202,6 +202,17 @@ def set_worker_task_queue(task_queue: Optional[str]) -> None:
     worker_task_queue = task_queue
 
 
+# The Temporal namespace this process serves (one per process — it maps to the
+# DBOS system schema, which is process-global). Surfaced as
+# workflow.info()/activity.info().namespace. None when no Worker is registered.
+worker_namespace: Optional[str] = None
+
+
+def set_worker_namespace(namespace: Optional[str]) -> None:
+    global worker_namespace
+    worker_namespace = namespace
+
+
 # This process's worker deployment NAME, backing
 # workflow.Info.get_current_deployment_version()/get_current_build_id(). Set by
 # the Worker (deployment_config.version.deployment_name, else the DBOS app name);
