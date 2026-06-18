@@ -142,12 +142,164 @@ SAMPLES = {
         skip="requires the sample's own third-party dependency (dacite); the "
         "harness rewrites imports but does not install per-sample deps",
     ),
+    # ---- skip: a Temporal feature that is a non-goal / unsupported (the
+    #      sample's own code depends on it; documents our coverage gaps) -------
+    # Nexus — non-goal (DESIGN §1, DEVIATIONS D1).
+    "hello_nexus": Sample(
+        package="hello_nexus", skip="Nexus is a non-goal (DEVIATIONS D1)"
+    ),
+    "nexus_cancel": Sample(
+        package="nexus_cancel", skip="Nexus is a non-goal (DEVIATIONS D1)"
+    ),
+    "nexus_messaging": Sample(
+        package="nexus_messaging", skip="Nexus is a non-goal (DEVIATIONS D1)"
+    ),
+    "nexus_multiple_args": Sample(
+        package="nexus_multiple_args", skip="Nexus is a non-goal (DEVIATIONS D1)"
+    ),
+    # Metrics + telemetry runtime — not implemented (DEVIATIONS D33).
+    "custom_metric": Sample(
+        package="custom_metric", skip="metrics are not implemented (DEVIATIONS D33)"
+    ),
+    "prometheus": Sample(
+        package="prometheus",
+        skip="metrics / Prometheus telemetry not implemented (DEVIATIONS D33)",
+    ),
+    "open_telemetry": Sample(
+        package="open_telemetry",
+        skip="OpenTelemetry metrics/tracing runtime not implemented (DEVIATIONS D33)",
+    ),
+    # Client-initiated (standalone) activities — unsupported (DEVIATIONS D36).
+    "hello_standalone_activity": Sample(
+        package="hello_standalone_activity",
+        skip="client-initiated standalone activities are unsupported (DEVIATIONS D36)",
+    ),
+    # Pydantic converter — not provided; configure a custom DataConverter (§6.9).
+    "pydantic_converter": Sample(
+        package="pydantic_converter",
+        skip="contrib.pydantic is not provided; configure a custom DataConverter "
+        "(DESIGN §6.9)",
+    ),
+    "pydantic_converter_v1": Sample(
+        package="pydantic_converter_v1",
+        skip="contrib.pydantic is not provided; configure a custom DataConverter "
+        "(DESIGN §6.9)",
+    ),
+    # External payload storage — not implemented (DESIGN §6.9).
+    "external_storage": Sample(
+        package="external_storage",
+        skip="external payload storage is not implemented (DESIGN §6.9)",
+    ),
+    "external_storage_redis": Sample(
+        package="external_storage_redis",
+        skip="external payload storage (redis) is not implemented (DESIGN §6.9)",
+    ),
+    # Multiprocess activity worker — one Worker per process (DESIGN §5).
+    "worker_multiprocessing": Sample(
+        package="worker_multiprocessing",
+        skip="multiprocess activity executors are unsupported (DESIGN §5)",
+    ),
+    # Worker deployment versioning walkthrough — protobuf + 3 version-workers +
+    # AUTO_UPGRADE; we enforce PINNED only (DEVIATIONS D29).
+    "worker_versioning": Sample(
+        package="worker_versioning",
+        skip="multi-version-worker walkthrough using protobuf + AUTO_UPGRADE; we "
+        "support PINNED only (DEVIATIONS D29)",
+    ),
+    # ---- skip: the sample's structure / a non-Temporal-feature dependency
+    #      makes it un-runnable in this harness --------------------------------
+    # Patching across worker code versions (like hello_patch) — not a single run.
+    "patching": Sample(
+        package="patching",
+        skip="multi-stage version-swap walkthrough (--start-workflow/"
+        "--query-workflow across swapped worker code versions); not a single run. "
+        "patched()/deprecate_patch() themselves are supported (DEVIATIONS D28)",
+    ),
+    # Replay — exercises our Replayer (replay_workflows is supported) but needs
+    # WorkflowExecutionAsyncIterator.map_histories (missing) and the sample's
+    # same-id reuse across three workflow types.
+    "replay": Sample(
+        package="replay",
+        skip="needs WorkflowExecutionAsyncIterator.map_histories (missing) and the "
+        "sample's same-id reuse across types; Replayer.replay_workflows is "
+        "supported (DEVIATIONS D27)",
+    ),
+    # Eager workflow start — a server-side optimization (inert, no server); the
+    # sample also reads the temporalio-internal __temporal_eagerly_started flag.
+    "eager_wf_start": Sample(
+        package="eager_wf_start",
+        skip="eager start is a server-side optimization (inert here); the sample "
+        "reads the temporalio-internal __temporal_eagerly_started flag",
+    ),
+    # Env-config TOML file/profile loading — the harness adapts envconfig away,
+    # and the samples load connection config rather than run a workflow.
+    "env_config": Sample(
+        package="env_config",
+        skip="demonstrates temporalio envconfig TOML file/profile loading (the "
+        "harness stubs envconfig); runs no workflow",
+    ),
+    # Workflow streams — large multi-process pub/sub streaming demo.
+    "workflow_streams": Sample(
+        package="workflow_streams",
+        skip="multi-process workflow-streams pub/sub demo (many run_* "
+        "entrypoints); not a single worker+starter run",
+    ),
+}
+
+# samples-python dirs covered by the other conformance suites (whole corpora).
+_COVERED_ELSEWHERE = {"hello", "message_passing", "activity_worker", "schedules"}
+
+# Dirs intentionally NOT conformance-tested: each exercises a third-party
+# integration (LLM / agent frameworks, an error tracker, a cloud export, an
+# alternative event loop) rather than a Temporal feature. Listed so the matrix
+# stays machine-checked-complete (the guard below fails on any new samples-python
+# dir until it is classified) without cluttering the suite with un-runnable
+# entries.
+_NOT_CONFORMANCE_TESTABLE = {
+    "bedrock",
+    "openai_agents",
+    "langgraph_plugin",
+    "langsmith_tracing",
+    "strands_plugin",
+    "sentry",
+    "cloud_export_to_parquet",
+    "lambda_worker",
+    "gevent_async",
+    "trio_async",
 }
 
 
 @pytest.fixture(scope="session")
 def samples_root() -> Path:
     return ensure_samples()
+
+
+def test_every_samples_python_dir_is_classified(samples_root: Path) -> None:
+    """No silent gaps in the conformance matrix: every top-level samples-python
+    directory must be accounted for — run or skipped here, covered by another
+    conformance suite, or explicitly not-conformance-testable. A new sample
+    (or a forgotten one) fails this until it is classified."""
+    all_dirs = {
+        p.name
+        for p in samples_root.iterdir()
+        if p.is_dir() and not p.name.startswith(".") and p.name != "tests"
+    }
+    classified = (
+        {sample.package for sample in SAMPLES.values()}
+        | _COVERED_ELSEWHERE
+        | _NOT_CONFORMANCE_TESTABLE
+    )
+    unclassified = sorted(all_dirs - classified)
+    assert not unclassified, (
+        f"unclassified samples-python dirs: {unclassified} — add each to "
+        f"test_feature_samples.SAMPLES (run or skip), _COVERED_ELSEWHERE, or "
+        f"_NOT_CONFORMANCE_TESTABLE."
+    )
+    stale = sorted(classified - all_dirs)
+    assert not stale, (
+        f"classified names not present in samples-python: {stale} — the pinned "
+        f"checkout no longer has them; remove or re-point."
+    )
 
 
 @pytest.fixture(scope="session")
