@@ -527,9 +527,13 @@ KNOWN_MISSING_NAMES: Dict[str, Set[str]] = {
         "execute_local_activity_class",
         "start_activity_class",
         "start_local_activity_class",
-        # Imperative runtime get/set handler accessors — handlers are configured
-        # via the @signal/@query/@update decorators incl. dynamic=True (DESIGN
-        # §6.1.1). CANDIDATE GAP: the imperative accessors are not yet exposed.
+        # Imperative runtime get/set handler accessors — an alternate API for
+        # registering handlers (including the catch-all already supported via
+        # @signal/@query/@update dynamic=True, DESIGN §6.1.1). Deliberately not
+        # provided: no conformance dependency, the dynamic=True decorators cover
+        # the common need, and set_signal_handler's buffered-signal flush is
+        # determinism-sensitive for little payoff. Independent of dynamic
+        # *workflows* (D25). Not planned.
         "get_signal_handler",
         "set_signal_handler",
         "get_query_handler",
