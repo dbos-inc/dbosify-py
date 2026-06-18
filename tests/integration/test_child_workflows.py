@@ -240,6 +240,36 @@ class TimeoutParent:
             return f"timed-out:{type(err.cause).__name__}"
 
 
+@workflow.defn
+class AlwaysFailingChild:
+    @workflow.run
+    async def run(self) -> None:
+        raise ApplicationError(
+            f"always fails attempt {workflow.info().attempt}", type="ChildAlwaysFails"
+        )
+
+
+@workflow.defn
+class RetryExhaustParent:
+    @workflow.run
+    async def run(self) -> Dict[str, Any]:
+        try:
+            await workflow.execute_child_workflow(
+                AlwaysFailingChild.run,
+                id="exhausting-child",
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(milliseconds=20), maximum_attempts=2
+                ),
+            )
+            return {"unreachable": True}
+        except ChildWorkflowError as err:
+            cause = err.cause
+            assert isinstance(cause, ApplicationError)
+            # The parent must see the LAST attempt's failure (the follow loop
+            # ran out the retry chain), not the first.
+            return {"cause_type": cause.type, "cause_message": cause.message}
+
+
 ALL_WORKFLOWS = [
     ComposeChild,
     FailingChild,
@@ -249,6 +279,8 @@ ALL_WORKFLOWS = [
     RetryParent,
     TimingOutChild,
     TimeoutParent,
+    AlwaysFailingChild,
+    RetryExhaustParent,
     ParentWorkflow,
     CatchingParent,
     SignalingParent,
@@ -333,6 +365,24 @@ async def test_child_run_timeout_honored() -> None:
             TimeoutParent.run, id="parent-child-timeout", task_queue=TASK_QUEUE
         )
         assert result == f"timed-out:{TerminatedError.__name__}"
+
+
+async def test_child_retry_exhaustion_surfaces_last_failure() -> None:
+    # The child always fails; with maximum_attempts=2 the chain runs attempts 1
+    # and 2, then the terminal failure surfaces. The parent must see attempt 2's
+    # failure (the child-result step followed the chain to the end), not the
+    # first attempt's.
+    async with _env() as client:
+        result = await client.execute_workflow(
+            RetryExhaustParent.run, id="parent-child-exhaust", task_queue=TASK_QUEUE
+        )
+        assert result == {
+            "cause_type": "ChildAlwaysFails",
+            "cause_message": "always fails attempt 2",
+        }
+        # Exactly two runs in the chain: run 0 (attempt 1) and run 1 (attempt 2).
+        current = await client._current_run("exhausting-child")
+        assert current is not None and current[0] == 1
 
 
 async def _wait_for_status(
