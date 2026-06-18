@@ -156,9 +156,10 @@ def install_shim() -> None:
 def main() -> None:
     install_shim()
     target = sys.argv[1]
-    # Samples that argparse must see a clean argv (defaults only), not the
-    # runner's target argument.
-    sys.argv = [target]
+    # Present the sample a clean argv: its own target as argv[0], then any
+    # extra args the test passed after the target (e.g. dsl's YAML file) — but
+    # not the runner's own target argument.
+    sys.argv = [target, *sys.argv[2:]]
     if target.endswith(".py"):
         runpy.run_path(target, run_name="__main__")
     else:
