@@ -35,12 +35,12 @@ namespace=...)` builds the `DBOSClient` pointed at that namespace's schema, so
 the namespace is stated once; the low-level `Client(dbos_client)` instead reads
 its namespace back from the `DBOSClient`'s schema (the single source of truth).
 Because DBOS's launched runtime is process-global, **a worker process serves
-one namespace** (a worker polls one namespace, as in Temporal). Clients are
-likewise one-namespace-per-process *today* only because DBOS's `SystemSchema`
-is a process-global mutable (so a second client's schema would clobber the
-first); that is being lifted upstream (dbos-transact-py #728, per-engine schema
-isolation), after which multiple namespaced clients can coexist in a process. This is
-cheap schema-level isolation, not an authorization boundary: Postgres security
+one namespace** (a worker polls one namespace, as in Temporal). Clients,
+however, are *not* limited to one namespace per process: DBOS isolates the
+system schema per engine (`dbos-transact-py` #728, in the pinned version), so
+multiple `Client`s on different namespaces coexist in a process, each reading
+and writing its own schema. This is cheap schema-level isolation, not an
+authorization boundary: Postgres security
 still applies to the database as a whole, and a client with the connection
 string can point at any namespace's schema.
 

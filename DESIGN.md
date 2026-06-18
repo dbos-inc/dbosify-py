@@ -46,7 +46,8 @@ guarantees (a workflow survives process crashes and resumes correctly).
   Conductor instead.
 - Nexus and advanced visibility (full query language, custom indexed search attributes)
   — partial support only, see §8. Namespaces are supported as per-namespace DBOS system
-  schemas, but one namespace per process (the runtime is process-global) — DEVIATIONS D1.
+  schemas; clients for different namespaces coexist in one process, while a worker process
+  serves one namespace (its launched runtime is process-global) — DEVIATIONS D1.
 
 **Why this is feasible.** Both systems use deterministic re-execution with checkpointed
 effects. Temporal replays workflow code against an event history held by the server; DBOS
