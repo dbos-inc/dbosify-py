@@ -84,8 +84,7 @@ def interval_to_cron(every: timedelta, offset: Optional[timedelta] = None) -> st
         raise ValueError("ScheduleIntervalSpec.every must be positive")
     if offset is not None and offset.total_seconds():
         logger.debug(
-            "schedule interval offset %s is not representable in cron; ignored "
-            "(DEVIATIONS schedules)",
+            "schedule interval offset %s is not representable in cron; ignored",
             offset,
         )
     secs = int(round(total))
@@ -118,7 +117,7 @@ def interval_to_cron(every: timedelta, offset: Optional[timedelta] = None) -> st
 def _approx(every: timedelta) -> None:
     logger.debug(
         "schedule interval every=%s does not divide a cron boundary evenly; "
-        "approximated to the nearest cron expression (DEVIATIONS schedules)",
+        "approximated to the nearest cron expression",
         every,
     )
 
@@ -143,7 +142,7 @@ def calendar_to_cron(
     if year:
         logger.debug(
             "schedule calendar year constraint is not representable in cron; "
-            "ignored (DEVIATIONS schedules)",
+            "ignored",
         )
     sec_field = _ranges_to_field(second, 0, 59)
     fields: List[str] = [

@@ -13,7 +13,7 @@ import pytest
 
 from tests.harness import PythonProcess
 
-WORKER = Path(__file__).parent / "phase3_worker.py"
+WORKER = Path(__file__).parent / "continue_as_new_recovery_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
 ENV = {"PYTHONPATH": str(REPO_ROOT)}
 

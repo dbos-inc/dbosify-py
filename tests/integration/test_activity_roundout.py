@@ -495,7 +495,7 @@ def test_async_activity_completion_survives_sigkill(tmp_path: Path) -> None:
     completion still resolves the workflow."""
     from tests.harness import PythonProcess
 
-    worker_script = Path(__file__).parent / "phase3_worker.py"
+    worker_script = Path(__file__).parent / "continue_as_new_recovery_worker.py"
     env = {
         "PYTHONPATH": str(Path(__file__).parents[2]),
     }

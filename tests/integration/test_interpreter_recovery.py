@@ -16,7 +16,7 @@ from dbosify._internal import conversion, inbox
 from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess
 
-WORKER = Path(__file__).parent / "phase0_worker.py"
+WORKER = Path(__file__).parent / "interpreter_recovery_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
 ENV = {"PYTHONPATH": str(REPO_ROOT)}
 
@@ -28,7 +28,7 @@ def _result_from(line: str) -> Any:
 
 
 class Driver:
-    """Test-side client for a phase0_worker subprocess: signals/updates via
+    """Test-side client for a interpreter_recovery_worker subprocess: signals/updates via
     DBOSClient envelopes, exactly like a cross-process Temporal client.
     """
 

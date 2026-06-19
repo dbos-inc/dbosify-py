@@ -28,7 +28,7 @@ from tests.dbconfig import default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
-TASK_QUEUE = "phase2-cancel-tq"
+TASK_QUEUE = "cancel-tq"
 
 
 @activity.defn

@@ -2860,7 +2860,7 @@ class Interpreter(_Runtime):
             )
             self._reply(reply_key, status="failed", failure=failure)
             return
-        # Queries are synchronous (DEVIATIONS #11): the inbound chain is driven
+        # Queries are synchronous: the inbound chain is driven
         # to completion without suspension (the root invokes the sync handler).
         self._read_only = True
         try:

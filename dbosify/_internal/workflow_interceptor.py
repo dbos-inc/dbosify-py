@@ -291,7 +291,7 @@ class WorkflowInboundInterceptor:
     async def handle_query(self, input: HandleQueryInput) -> Any:
         """Called to handle a query.
 
-        Queries are synchronous in dbosify (DEVIATIONS #11): the chain is
+        Queries are synchronous in dbosify: the chain is
         driven to completion without suspension, so an override must not
         ``await`` anything that would park the event loop.
         """

@@ -28,7 +28,7 @@ from tests.dbconfig import default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
-TASK_QUEUE = "phase2-child-tq"
+TASK_QUEUE = "child-tq"
 
 
 @activity.defn
@@ -339,7 +339,7 @@ async def test_parent_child_result_and_default_id() -> None:
             ParentWorkflow.run, "World", id="parent-basic", task_queue=TASK_QUEUE
         )
         assert result == "Hello, World!"
-        # Default child id: {parent_dbos_id}_{seq} (deviation #5).
+        # Default child id: {parent_dbos_id}_{seq}.
         child = client.get_workflow_handle("parent-basic_1")
         description = await child.describe()
         assert description.status == WorkflowExecutionStatus.COMPLETED

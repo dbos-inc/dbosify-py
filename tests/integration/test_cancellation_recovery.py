@@ -16,7 +16,7 @@ from dbosify._internal import inbox
 from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess
 
-WORKER = Path(__file__).parent / "phase2_worker.py"
+WORKER = Path(__file__).parent / "inflight_recovery_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
 ENV = {"PYTHONPATH": str(REPO_ROOT)}
 

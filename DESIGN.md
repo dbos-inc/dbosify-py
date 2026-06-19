@@ -336,7 +336,7 @@ facade takes DBOS machinery directly.)
 Signatures must mirror `temporalio` 1.28 exactly (copy from the local checkout, including
 `arg` + `args=[...]` calling conventions, keyword-only markers, and defaults). Below is the
 *backing design* per feature, organized by module, with phases. Fidelity notes marked
-**DEVIATION** must end up in the README compatibility table.
+**DEVIATION** must end up in docs/DEVIATIONS.md.
 
 ### 6.1 Core execution
 
@@ -799,7 +799,7 @@ results in call order; (5) `SetWorkflowID` duplicate-start attaches idempotently
 
 ---
 
-## 8. Known deviations (maintain as README table from day one)
+## 8. Known deviations (maintain in docs/DEVIATIONS.md)
 
 1. No Temporal server/UI/CLI; no non-Python clients. Operate via DBOS tooling.
 2. Queries hit Postgres and (v1) require a RUNNING workflow; no queries on closed workflows

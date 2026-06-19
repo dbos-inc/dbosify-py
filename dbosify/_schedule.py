@@ -842,23 +842,18 @@ def compile_spec(spec: ScheduleSpec) -> "tuple[str, Optional[str]]":
     if spec.cron_expressions:
         if len(spec.cron_expressions) > 1:
             _schedules.logger.debug(
-                "multiple cron_expressions on a schedule; using the first "
-                "(DEVIATIONS schedules)"
+                "multiple cron_expressions on a schedule; using the first"
             )
         fields, tz = _schedules.parse_cron(spec.cron_expressions[0])
         return fields, tz_name or (None if str(tz) == "UTC" else str(tz))
     if spec.intervals:
         if len(spec.intervals) > 1:
-            _schedules.logger.debug(
-                "multiple intervals on a schedule; using the first (DEVIATIONS schedules)"
-            )
+            _schedules.logger.debug("multiple intervals on a schedule; using the first")
         i = spec.intervals[0]
         return _schedules.interval_to_cron(i.every, i.offset), tz_name
     if spec.calendars:
         if len(spec.calendars) > 1:
-            _schedules.logger.debug(
-                "multiple calendars on a schedule; using the first (DEVIATIONS schedules)"
-            )
+            _schedules.logger.debug("multiple calendars on a schedule; using the first")
         c = spec.calendars[0]
 
         def rng(rs: Sequence[ScheduleRange]) -> Sequence["tuple[int, int, int]"]:

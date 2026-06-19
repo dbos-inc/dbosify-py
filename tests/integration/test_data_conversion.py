@@ -186,7 +186,7 @@ async def test_untyped_arg_is_plain_dict() -> None:
             id="untyped-arg",
             task_queue=TASK_QUEUE,
         )
-    # Without a type hint the dataclass round-trips as a dict (deviation #12).
+    # Without a type hint the dataclass round-trips as a dict.
     assert result == "dict"
 
 
