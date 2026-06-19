@@ -203,6 +203,7 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
         ctx = activity_api._Context(
             info=activity_api._make_info(meta),
             on_heartbeat=lambda *details: None,
+            is_async=defn.is_async,
             attempt_key=attempt_key,
             # Capture the running worker's activity state: its shutdown event
             # (activity.is_worker_shutdown()) and lazy client (activity.client()).

@@ -86,6 +86,8 @@ class ActivityEnvironment:
         result, or a coroutine to await if the activity is async.
         """
         self._context.info = self.info
+        # client() is async-only; record which kind this activity is (temporalio parity).
+        self._context.is_async = asyncio.iscoroutinefunction(fn)
 
         if asyncio.iscoroutinefunction(fn):
 
