@@ -140,7 +140,20 @@ def defn(
     def decorator(fn: _F) -> _F:
         from ._internal.conversion import type_hints_from_func
 
-        arg_types, ret_type = type_hints_from_func(fn)
+        # A callable-class activity carries @activity.defn on the class, but its
+        # signature and async-ness live on __call__. The worker registers an
+        # *instance*; the dispatcher rebinds defn.fn to it (so calling the defn
+        # invokes __call__). Introspect __call__ for everything but the marker.
+        introspect: Callable[..., Any] = fn
+        if inspect.isclass(fn):
+            call = getattr(fn, "__call__", None)
+            if not callable(call):
+                raise TypeError(
+                    f"{fn.__qualname__} is decorated with @activity.defn but is "
+                    "not callable (define __call__ for a callable-class activity)"
+                )
+            introspect = call
+        arg_types, ret_type = type_hints_from_func(introspect)
         if dynamic:
             _registry.validate_dynamic_activity_sig(arg_types)
         defn = _registry.ActivityDefinition(
@@ -148,7 +161,7 @@ def defn(
                 fn.__name__ if dynamic else (name if name is not None else fn.__name__)
             ),
             fn=fn,
-            is_async=inspect.iscoroutinefunction(fn),
+            is_async=inspect.iscoroutinefunction(introspect),
             arg_types=arg_types,
             ret_type=ret_type,
             dynamic=dynamic,

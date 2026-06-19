@@ -1422,14 +1422,48 @@ async def test_workflow_activity_method(client: Client) -> None:
         assert result == MyDataClass(field1="in worker, workflow param, in workflow")
 
 
-@pytest.mark.skip(
-    reason="workflow.execute_activity_class is not implemented (the callable-class "
-    "analog of execute_activity_method, which we do support and is covered by "
-    "test_workflow_activity_method). Recorded as a missing name in the parity "
-    "ledger; the underlying activity machinery is otherwise exercised."
-)
-async def test_workflow_activity_callable_class() -> None:
-    pass
+@activity.defn(name="custom-name")
+class CallableClassActivity:
+    def __init__(self, orig_field1: str) -> None:
+        self.orig_field1 = orig_field1
+
+    async def __call__(self, to_add: MyDataClass) -> MyDataClass:
+        return MyDataClass(field1=self.orig_field1 + to_add.field1)
+
+
+@workflow.defn
+class ActivityCallableClassWorkflow:
+    @workflow.run
+    async def run(self, to_add: MyDataClass) -> MyDataClass:
+        result = await workflow.execute_activity_class(
+            CallableClassActivity, to_add, start_to_close_timeout=timedelta(seconds=30)
+        )
+        assert isinstance(result, MyDataClass)
+        return result
+
+
+async def test_workflow_activity_callable_class(client: Client) -> None:
+    activity_instance = CallableClassActivity("in worker")
+    async with new_worker(
+        client, ActivityCallableClassWorkflow, activities=[activity_instance]
+    ) as worker:
+        result = await client.execute_workflow(
+            ActivityCallableClassWorkflow.run,
+            MyDataClass(field1=", workflow param"),
+            id=_wid(),
+            task_queue=worker.task_queue,
+        )
+        assert result == MyDataClass(field1="in worker, workflow param")
+
+
+async def test_workflow_activity_callable_class_bad_register(client: Client) -> None:
+    # Registering the class (not an instance) must fail clearly.
+    with pytest.raises(TypeError) as err:
+        async with new_worker(
+            client, ActivityCallableClassWorkflow, activities=[CallableClassActivity]
+        ):
+            pass
+    assert "is a class instead of an instance" in str(err.value)
 
 
 # --- continue-as-new (memo + retry policy + run-id chain) --------------------
