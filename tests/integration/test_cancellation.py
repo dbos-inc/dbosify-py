@@ -67,6 +67,28 @@ class SwallowingWorkflow:
 
 
 @workflow.defn
+class UncancelWorkflow:
+    """Exercises the stdlib asyncio.Task cancel-counter (3.11+) on the virtual
+    loop: a cancel increments ``cancelling()``; ``uncancel()`` decrements it, so
+    the workflow can swallow the cancel (the shield-loop idiom) and complete.
+    There is no ``workflow.uncancel`` to add — user code reaches it through the
+    real ``asyncio.Task`` the interpreter hosts the run coroutine on.
+    """
+
+    @workflow.run
+    async def run(self) -> str:
+        try:
+            await workflow.wait_condition(lambda: False)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            assert task is not None
+            requested = task.cancelling()
+            remaining = task.uncancel()
+            return f"cancelling={requested} uncancelled_to={remaining}"
+        return "unreachable"
+
+
+@workflow.defn
 class CleanupWorkflow:
     @workflow.run
     async def run(self, path: str) -> str:
@@ -98,7 +120,13 @@ async def _env() -> AsyncIterator[Client]:
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[ParkedWorkflow, SwallowingWorkflow, CleanupWorkflow, BusyWorkflow],
+        workflows=[
+            ParkedWorkflow,
+            SwallowingWorkflow,
+            UncancelWorkflow,
+            CleanupWorkflow,
+            BusyWorkflow,
+        ],
         activities=[record, slow_activity],
     )
     async with worker:
@@ -132,6 +160,19 @@ async def test_swallowed_cancel_completes() -> None:
         )
         await handle.cancel(reason="nope")
         assert await handle.result() == "survived:nope"
+        assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
+
+
+async def test_uncancel_clears_cancel_counter() -> None:
+    # asyncio.Task.uncancel()/cancelling() work on the interpreter's real tasks:
+    # the cooperative cancel injects via task.cancel(), so the native counter is
+    # 1 on entry and uncancel() returns it to 0 (the shield-loop idiom).
+    async with _env() as client:
+        handle = await client.start_workflow(
+            UncancelWorkflow.run, id="cancel-uncancel", task_queue=TASK_QUEUE
+        )
+        await handle.cancel()
+        assert await handle.result() == "cancelling=1 uncancelled_to=0"
         assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
 
 
