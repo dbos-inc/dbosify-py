@@ -1121,9 +1121,8 @@ class Interpreter(_Runtime):
                 and self.runtime_history_length() < guard.horizon
             ):
                 raise NondeterminismError(
-                    "workflow completed before consuming all recorded history "
-                    f"(workflow type {self._defn.name!r}); the replayed code "
-                    "diverged from the recorded execution"
+                    f"workflow type {self._defn.name!r} completed before "
+                    "consuming all recorded history"
                 )
             return value
         if kind == "cancelled":
@@ -1374,9 +1373,7 @@ class Interpreter(_Runtime):
 
     def _assert_not_read_only(self, what: str) -> None:
         if self._read_only:
-            raise ReadOnlyContextError(
-                f"Cannot {what} in a read-only context (query or update validator)"
-            )
+            raise ReadOnlyContextError(f"Cannot {what} in a read-only context")
 
     def _create_timer(
         self,
@@ -1436,8 +1433,7 @@ class Interpreter(_Runtime):
             # Reject duplicate open activity ids (which would cross-wire id-keyed
             # async completion routing); like a rejected command, fails the task.
             raise ValueError(
-                f"Activity id {resolved_activity_id!r} is already in use by "
-                "an open activity"
+                f"Activity id {resolved_activity_id!r} is already in use"
             )
         policy = retry_policy if retry_policy is not None else RetryPolicy()
         policy._validate()
@@ -1541,9 +1537,8 @@ class Interpreter(_Runtime):
         ctx = get_local_dbos_context()
         if ctx is not None and ctx.function_id >= guard.horizon:
             raise NondeterminismError(
-                "workflow produced new commands beyond its recorded history "
-                f"(workflow type {self._defn.name!r}); the replayed code diverged "
-                "from the recorded execution"
+                f"workflow type {self._defn.name!r} produced new commands "
+                "beyond its recorded history"
             )
 
     async def _process_commands(self) -> bool:
@@ -1948,8 +1943,7 @@ class Interpreter(_Runtime):
             queue = await DBOS.retrieve_queue_async(exec_state.task_queue)
             if queue is None:
                 raise RuntimeError(
-                    f"Task queue {exec_state.task_queue!r} is not registered "
-                    "(no worker has declared it)"
+                    f"Task queue {exec_state.task_queue!r} is not registered"
                 )
             with SetWorkflowID(activity_dbos_id):
                 await queue.enqueue_async(dispatch_fn, payload)

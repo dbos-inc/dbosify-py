@@ -192,8 +192,8 @@ class WorkflowEnvironment:
     @classmethod
     async def start_time_skipping(cls) -> "WorkflowEnvironment":
         raise NotImplementedError(
-            "time-skipping test environments are out of scope; use start_local "
-            "(real-time) instead"
+            "time-skipping test environments are not supported; use start_local "
+            "instead"
         )
 
     @property

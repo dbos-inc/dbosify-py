@@ -129,12 +129,9 @@ def defn(
         raise RuntimeError("Cannot provide name and dynamic boolean")
     if not no_thread_cancel_exception:
         raise NotImplementedError(
-            "no_thread_cancel_exception=False (Temporal's default: raise the "
-            "cancellation into a sync activity's worker thread) is not "
-            "supported — dbosify delivers activity cancellation "
-            "cooperatively. Leave it True (the default here) and observe "
-            "cancellation via activity.is_cancelled() / activity.heartbeat() / "
-            "activity.wait_for_cancelled_sync() (DEVIATIONS sync-activity-cancel)."
+            "no_thread_cancel_exception=False is not supported; leave it True "
+            "and observe cancellation via activity.is_cancelled() / "
+            "activity.heartbeat() / activity.wait_for_cancelled_sync()"
         )
 
     def decorator(fn: _F) -> _F:
@@ -610,9 +607,8 @@ def client() -> "Client":
     available = ctx.worker_state.client() if ctx.worker_state is not None else None
     if available is None:
         raise RuntimeError(
-            "No client available. On real worker runs the client is built from "
-            "the Worker's configuration; in tests pass a client when creating "
-            "ActivityEnvironment."
+            "No client available; in tests pass a client when creating "
+            "ActivityEnvironment"
         )
     return available
 

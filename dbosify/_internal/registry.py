@@ -131,7 +131,7 @@ def dbos_workflow_for(name: str) -> Callable[..., Any]:
     fn = _dbos_workflows.get(name)
     if fn is None:
         raise KeyError(
-            f"Workflow type {name!r} is not registered with this worker. "
+            f"Workflow type {name!r} is not registered. "
             f"Registered types: {sorted(_dbos_workflows)}"
         )
     return fn
@@ -150,8 +150,8 @@ def register_activity_dispatcher_fn(fn: Callable[..., Any]) -> None:
 def activity_dispatcher_fn() -> Callable[..., Any]:
     if _activity_dispatcher is None:
         raise KeyError(
-            "The __temporal_activity dispatcher is not registered with this "
-            "worker (no Worker has been constructed in this process)."
+            "The __temporal_activity dispatcher is not registered; "
+            "construct a Worker first"
         )
     return _activity_dispatcher
 
@@ -237,7 +237,7 @@ def lookup_workflow(name: str) -> WorkflowDefinition:
     defn = _workflows.get(name)
     if defn is None:
         raise KeyError(
-            f"Workflow type {name!r} is not registered with this worker. "
+            f"Workflow type {name!r} is not registered. "
             f"Registered types: {sorted(_workflows)}"
         )
     return defn
@@ -257,7 +257,7 @@ def lookup_activity(name: str) -> ActivityDefinition:
     defn = _activities.get(name)
     if defn is None:
         raise KeyError(
-            f"Activity type {name!r} is not registered with this worker. "
+            f"Activity type {name!r} is not registered. "
             f"Registered types: {sorted(_activities)}"
         )
     return defn

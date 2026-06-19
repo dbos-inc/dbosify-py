@@ -42,10 +42,8 @@ def namespace_schema(namespace: str) -> str:
     """
     if not _NAMESPACE_RE.match(namespace) or len(namespace) > _MAX_NAMESPACE_LEN:
         raise ValueError(
-            f"namespace {namespace!r} cannot back a Postgres schema: a namespace "
-            f"must match [a-z_][a-z0-9_]* and be at most {_MAX_NAMESPACE_LEN} "
-            "characters (each namespace maps to its own DBOS system schema "
-            f"{_SCHEMA_PREFIX}<namespace>)"
+            f"namespace {namespace!r} cannot back a Postgres schema: it must match "
+            f"[a-z_][a-z0-9_]* and be at most {_MAX_NAMESPACE_LEN} characters"
         )
     return f"{_SCHEMA_PREFIX}{namespace}"
 
@@ -65,7 +63,7 @@ def namespace_from_schema(schema: Optional[str]) -> str:
             return namespace
     raise ValueError(
         f"DBOS system schema {schema!r} is not a temporal namespace schema "
-        f"({_SCHEMA_PREFIX}<namespace>); build the DBOSClient with "
-        "dbos_system_schema=namespace_schema(<namespace>), or use "
-        "Client.connect(system_database_url, namespace=...) which does it for you"
+        f"({_SCHEMA_PREFIX}<namespace>); use Client.connect(system_database_url, "
+        "namespace=...) or build the DBOSClient with "
+        "dbos_system_schema=namespace_schema(<namespace>)"
     )

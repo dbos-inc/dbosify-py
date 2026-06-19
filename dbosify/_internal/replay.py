@@ -285,9 +285,7 @@ class Replayer:
             if defn.name not in registry._dbos_workflows:
                 raise RuntimeError(
                     f"Workflow type {defn.name!r} is not registered; construct a "
-                    "Worker for the types under test (which launches DBOS and "
-                    "registers their dispatchers) before replaying. The Replayer "
-                    "reuses the process's Worker runtime."
+                    "Worker for the types under test before replaying"
                 )
             self._workflow_names.append(defn.name)
 

@@ -224,8 +224,7 @@ class Worker:
             raise ValueError("task_queue must be a non-empty string")
         if _live_worker is not None:
             raise RuntimeError(
-                "Only one Worker per process is supported (an existing "
-                "Worker owns this process's DBOS runtime)"
+                "Only one Worker per process is supported; one already exists"
             )
         if not workflows and not activities:
             raise ValueError("At least one workflow and/or activity must be specified")
@@ -321,11 +320,8 @@ class Worker:
                 and config["application_version"] != explicit_build
             ):
                 raise ValueError(
-                    f"build id {explicit_build!r} (from build_id/deployment_config) "
-                    f"conflicts with the application_version "
-                    f"{config['application_version']!r} already set in the "
-                    "DBOSConfig (a build id IS the DBOS application_version); set "
-                    "only one"
+                    f"build id {explicit_build!r} conflicts with the DBOSConfig "
+                    f"application_version {config['application_version']!r}; set only one"
                 )
             config = {**config, "application_version": explicit_build}
         config = _with_default_app_version(config)

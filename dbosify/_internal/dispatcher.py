@@ -144,8 +144,8 @@ def register_worker(
             # A callable-class activity must be registered as an *instance* (so
             # __call__ runs against its constructor state), not the class.
             raise TypeError(
-                f"{fn.__qualname__} is a class instead of an instance; register "
-                "an instance of the callable class as the activity"
+                f"{fn.__qualname__} is a class instead of an instance; "
+                "register an instance of the callable class"
             )
         activity_defn = registry.activity_definition_of(fn)
         if activity_defn.fn is not fn:

@@ -617,12 +617,11 @@ class WithStartWorkflowOperation:
                 # Used, but the workflow start itself raised (e.g. a FAIL /
                 # REJECT_DUPLICATE conflict), so no run was started/attached.
                 raise RuntimeError(
-                    "WithStartWorkflowOperation was used but the workflow "
-                    "start did not complete; no handle is available"
+                    "WithStartWorkflowOperation was used but the workflow start "
+                    "did not complete; no handle is available"
                 )
             raise RuntimeError(
-                "WithStartWorkflowOperation has not been used in an "
-                "update-with-start call yet"
+                "WithStartWorkflowOperation has not been used yet"
             )
         return self._handle
 
@@ -1591,24 +1590,19 @@ class Client:
         sys_db: Any = getattr(self._dbos_client, "_sys_db", None)
         if sys_db is None:
             raise RuntimeError(
-                "count_workflows requires DBOS system-database access "
-                "(the wrapped DBOSClient exposes no _sys_db)"
+                "count_workflows requires DBOS system-database access"
             )
 
         if not parsed.aggregate_eligible() or parsed.post_filter() is not None:
             raise _visibility.VisibilityQueryError(
-                "count_workflows runs only what DBOS's aggregate operator can "
-                "express: it cannot filter by exact WorkflowId, a search "
-                "attribute, WorkflowType !=, or an ERROR-family ExecutionStatus "
-                "(Failed/Canceled/TimedOut/ContinuedAsNew, stored as one ERROR "
-                "status). Narrow the query or enumerate with list_workflows."
+                "count_workflows cannot filter by exact WorkflowId, a search "
+                "attribute, WorkflowType !=, or an ERROR-family ExecutionStatus; "
+                "narrow the query or enumerate with list_workflows."
             )
         if parsed.group_by == "ExecutionStatus":
             raise _visibility.VisibilityQueryError(
-                "count_workflows cannot GROUP BY ExecutionStatus: DBOS stores "
-                "Failed/Canceled/TimedOut/ContinuedAsNew under a single ERROR "
-                "status, so distinguishing them would require reading each "
-                "workflow's outcome. GROUP BY WorkflowType is supported."
+                "count_workflows cannot GROUP BY ExecutionStatus; "
+                "GROUP BY WorkflowType is supported."
             )
 
         # Group by name so we count only user workflows (``wf:{type}``) and
@@ -2142,8 +2136,7 @@ class WorkflowHandle:
             # to a queryable final state — fail clearly (DEVIATIONS replay).
             raise WorkflowQueryFailedError(
                 f"cannot query a workflow in state {status.name}: rehydrate-by-"
-                "replay supports COMPLETED/FAILED/CANCELED runs only "
-                "(see DEVIATIONS replay)"
+                "replay supports COMPLETED/FAILED/CANCELED runs only"
             )
         if reply is None:
             raise WorkflowQueryFailedError(f"query did not complete within {timeout}s")
@@ -2178,7 +2171,7 @@ class WorkflowHandle:
                 raise WorkflowQueryFailedError(
                     "rehydrate-by-replay produced no query reply: the workflow's "
                     "code may have changed since it ran, or no worker for this "
-                    "type is running in the querying process (DEVIATIONS replay)"
+                    "type is running in the querying process"
                 )
             return reply
         finally:
@@ -2482,7 +2475,7 @@ class WorkflowHandle:
         :class:`WorkflowHistory`."""
         raise NotImplementedError(
             "dbosify has no Temporal event history; use "
-            "WorkflowHandle.fetch_history() for a DBOS-step-derived history"
+            "WorkflowHandle.fetch_history() instead"
         )
 
     async def cancel(

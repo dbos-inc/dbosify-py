@@ -308,10 +308,7 @@ def defn(
     if dynamic:
         raise NotImplementedError(
             "dbosify does not support dynamic workflows "
-            "(@workflow.defn(dynamic=True)): a catch-all workflow type has no "
-            "per-type DBOS registration to dispatch to (DESIGN §10.1, "
-            "DEVIATIONS dynamic-handlers). Register each workflow type explicitly. Dynamic "
-            "signal/query/update handlers and dynamic activities are supported."
+            "(@workflow.defn(dynamic=True)); register each workflow type explicitly."
         )
 
     def decorator(cls: _CT) -> _CT:

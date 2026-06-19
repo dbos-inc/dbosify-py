@@ -65,8 +65,8 @@ def attempt_step_for(activity_name: str) -> AttemptStep:
     if _dynamic_attempt_step is not None:
         return _dynamic_attempt_step
     raise KeyError(
-        f"Activity type {activity_name!r} is not registered with this worker. "
-        f"Registered types: {sorted(_attempt_steps)}"
+        f"Activity type {activity_name!r} is not registered with this worker "
+        f"(registered: {sorted(_attempt_steps)})"
     )
 
 

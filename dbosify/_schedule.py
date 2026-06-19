@@ -946,8 +946,7 @@ def require_supported_overlap(overlap: Optional[ScheduleOverlapPolicy]) -> None:
     ):
         raise NotImplementedError(
             "dbosify does not support ScheduleOverlapPolicy.BUFFER_ONE / "
-            "BUFFER_ALL yet (DEVIATIONS schedules); SKIP, CANCEL_OTHER, "
-            "TERMINATE_OTHER, and ALLOW_ALL are supported"
+            "BUFFER_ALL; use SKIP, CANCEL_OTHER, TERMINATE_OTHER, or ALLOW_ALL"
         )
 
 
@@ -962,9 +961,8 @@ def require_overlap_override_supported(
     if overlap is not None and overlap != ScheduleOverlapPolicy.ALLOW_ALL:
         raise NotImplementedError(
             "dbosify does not honor a per-call ScheduleOverlapPolicy "
-            f"override of {overlap!r} on trigger/backfill (DEVIATIONS schedules); the "
-            "schedule's configured overlap policy applies. Only None or "
-            "ALLOW_ALL are accepted."
+            f"override of {overlap!r} on trigger/backfill; only None or "
+            "ALLOW_ALL are accepted"
         )
 
 
