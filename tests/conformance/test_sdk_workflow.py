@@ -41,6 +41,8 @@ from temporal_dbos.client import (
     WorkflowFailureError,
     WorkflowHandle,
     WorkflowQueryFailedError,
+    WorkflowUpdateFailedError,
+    WorkflowUpdateStage,
 )
 from temporal_dbos.common import RawValue, RetryPolicy
 from temporal_dbos.exceptions import (
@@ -49,6 +51,7 @@ from temporal_dbos.exceptions import (
     CancelledError,
     ChildWorkflowError,
     TimeoutError,
+    WorkflowAlreadyStartedError,
 )
 from temporal_dbos.worker import Worker
 from tests.dbconfig import default_config, system_database_url
@@ -1546,3 +1549,263 @@ async def test_workflow_local_activity_backoff(client: Client) -> None:
             id=_wid(),
             task_queue=worker.task_queue,
         )
+
+
+# --- workflow updates (handlers, validators, dynamic, errors) ----------------
+
+
+@workflow.defn
+class UpdateHandlersWorkflow:
+    def __init__(self) -> None:
+        self._last_event: str | None = None
+
+    @workflow.run
+    async def run(self) -> None:
+        workflow.set_update_handler("first_task_update", lambda: "worked")
+        await asyncio.Future()  # wait forever
+
+    @workflow.update
+    def last_event(self, an_arg: str) -> str:
+        if an_arg == "fail":
+            raise ApplicationError("SyncFail")
+        le = self._last_event or "<no event>"
+        self._last_event = an_arg
+        return le
+
+    @last_event.validator
+    def last_event_validator(self, an_arg: str) -> None:
+        if an_arg == "reject_me":
+            raise ApplicationError("Rejected")
+
+    @workflow.update
+    async def last_event_async(self, an_arg: str) -> str:
+        await asyncio.sleep(1)
+        if an_arg == "fail":
+            raise ApplicationError("AsyncFail")
+        le = self._last_event or "<no event>"
+        self._last_event = an_arg
+        return le
+
+    @workflow.update(name="renamed")
+    async def async_named(self) -> str:
+        return "named"
+
+    @workflow.update
+    async def set_dynamic(self) -> str:
+        def dynahandler(name: str, _args: Sequence[RawValue]) -> str:
+            return "dynahandler - " + name
+
+        def dynavalidator(name: str, _args: Sequence[RawValue]) -> None:
+            if name == "reject_me":
+                raise ApplicationError("Rejected")
+
+        workflow.set_dynamic_update_handler(dynahandler, validator=dynavalidator)
+        return "set"
+
+
+async def test_workflow_update_handlers_happy(client: Client) -> None:
+    async with new_worker(
+        client, UpdateHandlersWorkflow, activities=[say_hello]
+    ) as worker:
+        wf_id = _wid()
+        handle = await client.start_workflow(
+            UpdateHandlersWorkflow.run, id=wf_id, task_queue=worker.task_queue
+        )
+
+        # Normal handling (returns the previous event)
+        assert "<no event>" == await handle.execute_update(
+            UpdateHandlersWorkflow.last_event, "val2"
+        )
+        # Async handler
+        assert "val2" == await handle.execute_update(
+            UpdateHandlersWorkflow.last_event_async, "val3"
+        )
+        # Dynamic handler, registered at runtime then invoked by name
+        await handle.execute_update(UpdateHandlersWorkflow.set_dynamic)
+        assert "dynahandler - made_up" == await handle.execute_update("made_up")
+        # Name overload
+        assert "named" == await handle.execute_update(
+            UpdateHandlersWorkflow.async_named
+        )
+        # Untyped handle
+        assert "val3" == await client.get_workflow_handle(wf_id).execute_update(
+            UpdateHandlersWorkflow.last_event, "val4"
+        )
+
+
+async def test_workflow_update_handlers_unhappy(client: Client) -> None:
+    async with new_worker(client, UpdateHandlersWorkflow) as worker:
+        handle = await client.start_workflow(
+            UpdateHandlersWorkflow.run, id=_wid(), task_queue=worker.task_queue
+        )
+
+        # Undefined handler
+        with pytest.raises(WorkflowUpdateFailedError) as err:
+            await handle.execute_update("whargarbl", "whatever")
+        assert isinstance(err.value.cause, ApplicationError)
+        assert "whargarbl" in err.value.cause.message
+
+        # Rejection by validator
+        with pytest.raises(WorkflowUpdateFailedError) as err:
+            await handle.execute_update(UpdateHandlersWorkflow.last_event, "reject_me")
+        assert isinstance(err.value.cause, ApplicationError)
+        assert "Rejected" == err.value.cause.message
+
+        # Failure inside the (sync) handler
+        with pytest.raises(WorkflowUpdateFailedError) as err:
+            await handle.execute_update(UpdateHandlersWorkflow.last_event, "fail")
+        assert isinstance(err.value.cause, ApplicationError)
+        assert "SyncFail" == err.value.cause.message
+
+        # Failure inside the async handler
+        with pytest.raises(WorkflowUpdateFailedError) as err:
+            await handle.execute_update(UpdateHandlersWorkflow.last_event_async, "fail")
+        assert isinstance(err.value.cause, ApplicationError)
+        assert "AsyncFail" == err.value.cause.message
+        # NOTE: temporalio's suite also asserts that cancelling an activity
+        # inside the handler surfaces CancelledError. That relies on a cancel
+        # before the task first yields *removing the un-sent command*; we
+        # dispatch activities eagerly (the cancel_unsent / cancel_multi
+        # deviation), so it is omitted here.
+
+        # Dynamic handler registered, then rejected by its validator
+        await handle.execute_update(UpdateHandlersWorkflow.set_dynamic)
+        with pytest.raises(WorkflowUpdateFailedError) as err:
+            await handle.execute_update("reject_me")
+        assert isinstance(err.value.cause, ApplicationError)
+        assert "Rejected" == err.value.cause.message
+
+
+@workflow.defn
+class UpdateSeparateHandleWorkflow:
+    def __init__(self) -> None:
+        self._complete = False
+        self._complete_update = False
+
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.wait_condition(lambda: self._complete)
+        return "workflow-done"
+
+    @workflow.update
+    async def update(self) -> str:
+        await workflow.wait_condition(lambda: self._complete_update)
+        self._complete = True
+        return "update-done"
+
+    @workflow.signal
+    async def signal(self) -> None:
+        self._complete_update = True
+
+
+async def test_workflow_update_separate_handle(client: Client) -> None:
+    async with new_worker(client, UpdateSeparateHandleWorkflow) as worker:
+        handle = await client.start_workflow(
+            UpdateSeparateHandleWorkflow.run, id=_wid(), task_queue=worker.task_queue
+        )
+
+        # Start an update, waiting only until it is accepted (it then blocks).
+        update_handle_1 = await handle.start_update(
+            UpdateSeparateHandleWorkflow.update,
+            wait_for_stage=WorkflowUpdateStage.ACCEPTED,
+        )
+        assert update_handle_1.workflow_run_id == handle.first_execution_run_id
+
+        # A second, independently-constructed handle to the same update.
+        update_handle_2 = client.get_workflow_handle(
+            handle.id, run_id=handle.result_run_id
+        ).get_update_handle_for(UpdateSeparateHandleWorkflow.update, update_handle_1.id)
+        task1 = asyncio.create_task(update_handle_1.result())
+        task2 = asyncio.create_task(update_handle_2.result())
+
+        # Unblock the update; both handles observe the same result.
+        await handle.signal(UpdateSeparateHandleWorkflow.signal)
+        assert "update-done" == await task1
+        assert "update-done" == await task2
+        assert "workflow-done" == await handle.result()
+
+
+# --- already-started (duplicate workflow id) ---------------------------------
+
+
+async def test_workflow_already_started(client: Client) -> None:
+    async with new_worker(client, LongSleepWorkflow) as worker:
+        wf_id = _wid()
+        await client.start_workflow(
+            LongSleepWorkflow.run, id=wf_id, task_queue=worker.task_queue
+        )
+        with pytest.raises(WorkflowAlreadyStartedError):
+            await client.start_workflow(
+                LongSleepWorkflow.run, id=wf_id, task_queue=worker.task_queue
+            )
+
+
+@workflow.defn
+class ChildAlreadyStartedWorkflow:
+    @workflow.run
+    async def run(self) -> None:
+        child_id = f"{workflow.info().workflow_id}_child"
+        await workflow.start_child_workflow(LongSleepWorkflow.run, id=child_id)
+        try:
+            await workflow.start_child_workflow(LongSleepWorkflow.run, id=child_id)
+        except WorkflowAlreadyStartedError:
+            raise ApplicationError("Already started")
+
+
+async def test_workflow_child_already_started(client: Client) -> None:
+    async with new_worker(
+        client, ChildAlreadyStartedWorkflow, LongSleepWorkflow
+    ) as worker:
+        with pytest.raises(WorkflowFailureError) as err:
+            await client.execute_workflow(
+                ChildAlreadyStartedWorkflow.run,
+                id=_wid(),
+                task_queue=worker.task_queue,
+            )
+        assert isinstance(err.value.cause, ApplicationError)
+        assert err.value.cause.message == "Already started"
+
+
+# --- bad signal param (un-deserializable signals are dropped) ----------------
+
+
+@dataclass
+class BadSignalParam:
+    some_str: str
+
+
+@workflow.defn
+class BadSignalParamWorkflow:
+    def __init__(self) -> None:
+        self._signals: list[BadSignalParam] = []
+
+    @workflow.run
+    async def run(self) -> list[BadSignalParam]:
+        await workflow.wait_condition(
+            lambda: bool(self._signals) and self._signals[-1].some_str == "finish"
+        )
+        return self._signals
+
+    @workflow.signal
+    async def some_signal(self, param: BadSignalParam) -> None:
+        self._signals.append(param)
+
+
+async def test_workflow_bad_signal_param(client: Client) -> None:
+    # Adapted: the SDK test also asserts on the captured "Failed deserializing
+    # signal input" log record (impl-internal). We keep the behavioral half — a
+    # badly-typed signal payload is dropped and the workflow keeps running,
+    # collecting only the well-typed signals.
+    async with new_worker(client, BadSignalParamWorkflow) as worker:
+        handle = await client.start_workflow(
+            BadSignalParamWorkflow.run, id=_wid(), task_queue=worker.task_queue
+        )
+        # First and third are the wrong type and must be dropped.
+        await handle.signal("some_signal", "bad")
+        await handle.signal("some_signal", BadSignalParam(some_str="good"))
+        await handle.signal("some_signal", 123)
+        await handle.signal("some_signal", BadSignalParam(some_str="finish"))
+        assert [
+            BadSignalParam(some_str="good"),
+            BadSignalParam(some_str="finish"),
+        ] == await handle.result()

@@ -2752,7 +2752,22 @@ class Interpreter(_Runtime):
                 envelope["name"],
             )
             return
-        decoded = await self._decode_message_args(envelope)
+        try:
+            decoded = await self._decode_message_args(envelope)
+        except Exception as err:  # noqa: BLE001 — a bad payload drops the signal
+            # Temporal logs and drops a signal whose input cannot be deserialized
+            # to the handler's parameter type; the workflow keeps running. The
+            # failure is deterministic (payload + handler signature), so the drop
+            # replays identically — like the malformed-message drop in
+            # _deliver_inbox.
+            logger.warning(
+                "Workflow %s: Failed deserializing signal input for %r; "
+                "dropping signal (%s)",
+                self._workflow_id,
+                envelope["name"],
+                err,
+            )
+            return
         # Decode headers here (real loop) so the codec runs off the virtual loop;
         # the handler task gets ready Payloads.
         headers = await conversion.decode_headers(envelope.get("headers"))
