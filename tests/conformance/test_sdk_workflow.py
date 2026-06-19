@@ -15,6 +15,7 @@ advanced visibility) are left in the SDK suite, not adapted.
 import asyncio
 import time
 import uuid
+from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
@@ -25,9 +26,11 @@ from typing import (
     Callable,
     Iterator,
     NoReturn,
+    Protocol,
     Sequence,
     TypeVar,
     cast,
+    runtime_checkable,
 )
 
 import pytest
@@ -1378,6 +1381,11 @@ async def test_workflow_cancel_child_unstarted(client: Client) -> None:
 class MyDataClass:
     field1: str
 
+    def assert_expected(self) -> None:
+        # Calling this at all confirms the right *type* survived round-tripping;
+        # the field check confirms the value (used by the dataclass-typed trio).
+        assert self.field1 == "some value"
+
 
 class MethodActivity:
     def __init__(self, orig_field1: str) -> None:
@@ -1809,3 +1817,289 @@ async def test_workflow_bad_signal_param(client: Client) -> None:
             BadSignalParam(some_str="good"),
             BadSignalParam(some_str="finish"),
         ] == await handle.result()
+
+
+# --- dataclass-typed handlers + interface (Protocol / ABC) references ---------
+# One workflow scaffold drives three tests: typed dataclass round-tripping
+# through activities/child/signals/queries, plus using a Protocol and an
+# abstract base as the typed "interface" reference when the impl is absent.
+
+
+@activity.defn
+async def data_class_typed_activity(param: MyDataClass) -> MyDataClass:
+    param.assert_expected()
+    return param
+
+
+@runtime_checkable
+@workflow.defn(name="DataClassTypedWorkflow")
+class DataClassTypedWorkflowProto(Protocol):
+    @workflow.run
+    async def run(self, arg: MyDataClass) -> MyDataClass: ...
+
+    @workflow.signal
+    def signal_sync(self, param: MyDataClass) -> None: ...
+
+    @workflow.query
+    def query_sync(self, param: MyDataClass) -> MyDataClass: ...
+
+    @workflow.signal
+    def complete(self) -> None: ...
+
+
+@workflow.defn(name="DataClassTypedWorkflow")
+class DataClassTypedWorkflowAbstract(ABC):
+    @workflow.run
+    @abstractmethod
+    async def run(self, param: MyDataClass) -> MyDataClass: ...
+
+    @workflow.signal
+    @abstractmethod
+    def signal_sync(self, param: MyDataClass) -> None: ...
+
+    @workflow.query
+    @abstractmethod
+    def query_sync(self, param: MyDataClass) -> MyDataClass: ...
+
+    @workflow.signal
+    @abstractmethod
+    def complete(self) -> None: ...
+
+
+@workflow.defn
+class DataClassTypedWorkflow(DataClassTypedWorkflowAbstract):
+    def __init__(self) -> None:
+        self._should_complete = asyncio.Event()
+
+    @workflow.run
+    async def run(self, param: MyDataClass) -> MyDataClass:
+        param.assert_expected()
+        # Only exercise activities/child at the top level.
+        if not workflow.info().parent:
+            param = await workflow.execute_activity(
+                data_class_typed_activity,
+                param,
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            param.assert_expected()
+            param = await workflow.execute_local_activity(
+                data_class_typed_activity,
+                param,
+                start_to_close_timeout=timedelta(seconds=30),
+            )
+            param.assert_expected()
+            child_handle = await workflow.start_child_workflow(
+                DataClassTypedWorkflow.run,
+                param,
+                id=f"{workflow.info().workflow_id}_child",
+            )
+            await child_handle.signal(DataClassTypedWorkflow.signal_sync, param)
+            await child_handle.signal(DataClassTypedWorkflow.signal_async, param)
+            await child_handle.signal(DataClassTypedWorkflow.complete)
+            param = await child_handle
+            param.assert_expected()
+        await self._should_complete.wait()
+        return param
+
+    @workflow.signal
+    def signal_sync(self, param: MyDataClass) -> None:
+        param.assert_expected()
+
+    @workflow.signal
+    async def signal_async(self, param: MyDataClass) -> None:
+        param.assert_expected()
+
+    @workflow.query
+    def query_sync(self, param: MyDataClass) -> MyDataClass:
+        param.assert_expected()
+        return param
+
+    # temporalio declares this async (a deprecated form); we require sync query
+    # handlers (DEVIATIONS D17), so it is a normal def here.
+    @workflow.query
+    def query_async(self, param: MyDataClass) -> MyDataClass:
+        return param
+
+    @workflow.signal
+    def complete(self) -> None:
+        self._should_complete.set()
+
+
+async def test_workflow_dataclass_typed(client: Client) -> None:
+    async with new_worker(
+        client, DataClassTypedWorkflow, activities=[data_class_typed_activity]
+    ) as worker:
+        val = MyDataClass(field1="some value")
+        handle = await client.start_workflow(
+            DataClassTypedWorkflow.run, val, id=_wid(), task_queue=worker.task_queue
+        )
+        await handle.signal(DataClassTypedWorkflow.signal_sync, val)
+        await handle.signal(DataClassTypedWorkflow.signal_async, val)
+        (await handle.query(DataClassTypedWorkflow.query_sync, val)).assert_expected()
+        query_result: MyDataClass = await handle.query(
+            DataClassTypedWorkflow.query_async, val
+        )
+        query_result.assert_expected()
+        await handle.signal(DataClassTypedWorkflow.complete)
+        (await handle.result()).assert_expected()
+
+
+async def test_workflow_separate_protocol(client: Client) -> None:
+    # A Protocol can stand in as the typed "interface" when the impl is absent.
+    async with new_worker(
+        client, DataClassTypedWorkflow, activities=[data_class_typed_activity]
+    ) as worker:
+        assert isinstance(DataClassTypedWorkflow(), DataClassTypedWorkflowProto)
+        val = MyDataClass(field1="some value")
+        handle = await client.start_workflow(
+            DataClassTypedWorkflowProto.run,
+            val,
+            id=_wid(),
+            task_queue=worker.task_queue,
+        )
+        await handle.signal(DataClassTypedWorkflowProto.signal_sync, val)
+        (
+            await handle.query(DataClassTypedWorkflowProto.query_sync, val)
+        ).assert_expected()
+        await handle.signal(DataClassTypedWorkflowProto.complete)
+        (await handle.result()).assert_expected()
+
+
+async def test_workflow_separate_abstract(client: Client) -> None:
+    # An abstract base can likewise stand in as the typed "interface".
+    async with new_worker(
+        client, DataClassTypedWorkflow, activities=[data_class_typed_activity]
+    ) as worker:
+        assert issubclass(DataClassTypedWorkflow, DataClassTypedWorkflowAbstract)
+        val = MyDataClass(field1="some value")
+        handle = await client.start_workflow(
+            DataClassTypedWorkflowAbstract.run,
+            val,
+            id=_wid(),
+            task_queue=worker.task_queue,
+        )
+        await handle.signal(DataClassTypedWorkflowAbstract.signal_sync, val)
+        (
+            await handle.query(DataClassTypedWorkflowAbstract.query_sync, val)
+        ).assert_expected()
+        await handle.signal(DataClassTypedWorkflowAbstract.complete)
+        (await handle.result()).assert_expected()
+
+
+# --- timers ------------------------------------------------------------------
+
+
+@workflow.defn
+class WorkflowSleepWorkflow:
+    @workflow.run
+    async def run(self) -> float:
+        start_time = workflow.time()
+        await workflow.sleep(1)
+        return workflow.time() - start_time
+
+
+async def test_workflow_sleep(client: Client) -> None:
+    async with new_worker(client, WorkflowSleepWorkflow) as worker:
+        workflow_elapsed = await client.execute_workflow(
+            WorkflowSleepWorkflow.run, id=_wid(), task_queue=worker.task_queue
+        )
+        assert workflow_elapsed >= 1
+
+
+# --- completion-command ordering (first completion wins) ---------------------
+
+
+@workflow.defn
+class FirstCompletionCommandIsHonoredWorkflow:
+    def __init__(
+        self, main_workflow_returns_before_signal_completions: bool = False
+    ) -> None:
+        self.seen_first_signal = False
+        self.seen_second_signal = False
+        self.main_workflow_returns_before_signal_completions = (
+            main_workflow_returns_before_signal_completions
+        )
+        self.run_finished = False
+
+    @workflow.run
+    async def run(self) -> str:
+        await workflow.wait_condition(
+            lambda: self.seen_first_signal and self.seen_second_signal
+        )
+        self.run_finished = True
+        return "workflow-result"
+
+    @workflow.signal
+    async def this_signal_executes_first(self) -> None:
+        self.seen_first_signal = True
+        if self.main_workflow_returns_before_signal_completions:
+            await workflow.wait_condition(lambda: self.run_finished)
+        raise ApplicationError(
+            "Client should see this error unless doing ping-pong "
+            "(in which case main coroutine returns first)"
+        )
+
+    @workflow.signal
+    async def this_signal_executes_second(self) -> None:
+        await workflow.wait_condition(lambda: self.seen_first_signal)
+        self.seen_second_signal = True
+        if self.main_workflow_returns_before_signal_completions:
+            await workflow.wait_condition(lambda: self.run_finished)
+        raise ApplicationError("Client should never see this error!")
+
+
+@workflow.defn
+class FirstCompletionCommandIsHonoredSignalWaitWorkflow(
+    FirstCompletionCommandIsHonoredWorkflow
+):
+    def __init__(self) -> None:
+        super().__init__(main_workflow_returns_before_signal_completions=True)
+
+    @workflow.run
+    async def run(self) -> str:
+        return await super().run()
+
+
+async def _do_first_completion_command_is_honored_test(
+    client: Client, main_workflow_returns_before_signal_completions: bool
+) -> None:
+    workflow_cls: type[FirstCompletionCommandIsHonoredWorkflow] = (
+        FirstCompletionCommandIsHonoredSignalWaitWorkflow
+        if main_workflow_returns_before_signal_completions
+        else FirstCompletionCommandIsHonoredWorkflow
+    )
+    async with new_worker(client, workflow_cls) as worker:
+        handle = await client.start_workflow(
+            workflow_cls.run, id=_wid(), task_queue=worker.task_queue
+        )
+        await handle.signal(workflow_cls.this_signal_executes_second)
+        await handle.signal(workflow_cls.this_signal_executes_first)
+        try:
+            result = await handle.result()
+        except WorkflowFailureError as err:
+            if main_workflow_returns_before_signal_completions:
+                raise RuntimeError(
+                    "Expected no error due to main workflow coroutine returning first"
+                )
+            assert str(err.cause).startswith("Client should see this error")
+        else:
+            assert (
+                main_workflow_returns_before_signal_completions
+                and result == "workflow-result"
+            )
+
+
+async def test_first_of_two_signal_completion_commands_is_honored(
+    client: Client,
+) -> None:
+    await _do_first_completion_command_is_honored_test(
+        client, main_workflow_returns_before_signal_completions=False
+    )
+
+
+async def test_workflow_return_is_honored_when_it_precedes_signal_completion_command(
+    client: Client,
+) -> None:
+    await _do_first_completion_command_is_honored_test(
+        client, main_workflow_returns_before_signal_completions=True
+    )
