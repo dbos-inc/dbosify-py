@@ -87,7 +87,9 @@ EXPECTATIONS = {
     "hello_mtls": Expectation(skip="requires mTLS certificates and a TLS endpoint"),
     "hello_parallel_activity": Expectation(expect_output="Result:"),
     "hello_patch": Expectation(
-        skip="multi-invocation versioning walkthrough; patched() is Phase 4"
+        skip="manual multi-deploy walkthrough (not runnable in one harness pass); "
+        "patched()/deprecate_patch() are implemented and covered by "
+        "tests/integration/test_patched_recovery.py"
     ),
     "hello_query": Expectation(
         # The second query hits a *completed* workflow; rehydrate-by-replay

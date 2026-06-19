@@ -117,8 +117,8 @@ SAMPLES = {
     # ---- skip: not runnable in this harness ---------------------------------
     "sleep_for_days": Sample(
         package="sleep_for_days",
-        skip="workflow sleeps timedelta(days=30) with no auto-complete; needs the "
-        "time-skipping WorkflowEnvironment (Phase 4)",
+        skip="workflow sleeps timedelta(days=30) with no auto-complete; needs a "
+        "time-skipping WorkflowEnvironment (out of scope — DESIGN §9)",
     ),
     "polling_infrequent": Sample(
         package="polling",
