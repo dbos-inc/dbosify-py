@@ -114,8 +114,10 @@ async def _env() -> AsyncIterator[Client]:
 
 
 async def _wait_for_chain_index(
-    client: Client, workflow_id: str, index: int, timeout: float = 8.0
+    client: Client, workflow_id: str, index: int, timeout: float = 30.0
 ) -> None:
+    # Generous patience bound for CI load: this polls for an effect that will happen,
+    # not a latency SLA — it returns as soon as the index is reached.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         current = await client._current_run(workflow_id)
@@ -209,7 +211,7 @@ async def test_cron_cancel_of_parked_run_stops_chain() -> None:
         )
         # Wait for the first fire (the run parks in wait_condition): cancel
         # is only deliverable once the run is consuming its inbox.
-        deadline = time.monotonic() + 8.0
+        deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
             status = await client._status_of("parked-cron")
             if status.status == "PENDING":

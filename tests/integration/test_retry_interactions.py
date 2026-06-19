@@ -132,7 +132,7 @@ async def test_cancel_then_fail_suppresses_retry() -> None:
             retry_policy=FAST_RETRY,
         )
         # Park, then cancel; the run's cleanup raises an ApplicationError.
-        deadline = asyncio.get_running_loop().time() + 8.0
+        deadline = asyncio.get_running_loop().time() + 30.0
         while asyncio.get_running_loop().time() < deadline:
             if (await client._status_of("cancel-fail")).status == "PENDING":
                 break
@@ -157,7 +157,7 @@ async def test_cancel_reaches_retry_attempt() -> None:
             retry_policy=FAST_RETRY,
         )
         # Wait until attempt 2 (run --r1) is the parked, running latest.
-        deadline = asyncio.get_running_loop().time() + 10.0
+        deadline = asyncio.get_running_loop().time() + 30.0
         while asyncio.get_running_loop().time() < deadline:
             current = await client._current_run("cancel-retry")
             if (

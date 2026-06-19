@@ -377,7 +377,13 @@ async def _env() -> AsyncIterator[Client]:
             dbos_client.destroy()
 
 
-async def _wait_for_file_line(path: Path, line: str, timeout: float = 10.0) -> None:
+# These effects are written cross-process by (sometimes abandoned) activity threads,
+# so the line can lag the triggering action by the cancel-signal/heartbeat round trip.
+# This is a patience bound, not an expected latency: on a healthy run the line is
+# already present and we return immediately; the generous ceiling only absorbs a
+# saturated CI machine (a 10s bound flaked here by ~36ms). The test still requires the
+# line to appear — it just waits longer before giving up.
+async def _wait_for_file_line(path: Path, line: str, timeout: float = 30.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
         if path.exists() and line in path.read_text().splitlines():
@@ -438,7 +444,7 @@ async def test_heartbeat_details_reach_next_attempt(tmp_path: Path) -> None:
         assert result == ["progress-1"]
 
 
-async def _token(timeout: float = 10.0) -> bytes:
+async def _token(timeout: float = 30.0) -> bytes:
     deadline = asyncio.get_running_loop().time() + timeout
     while not TOKENS:
         assert asyncio.get_running_loop().time() < deadline, "no task token"
@@ -569,7 +575,7 @@ async def test_async_activity_fail_retries() -> None:
         await client.get_async_activity_handle(task_token=first_token).fail(
             ApplicationError("transient", type="Flaky")
         )
-        deadline = asyncio.get_running_loop().time() + 10
+        deadline = asyncio.get_running_loop().time() + 30
         while len(TOKENS) < 2:
             assert asyncio.get_running_loop().time() < deadline, "no retry attempt"
             await asyncio.sleep(0.05)
@@ -662,7 +668,7 @@ async def test_completer_learns_of_cancellation() -> None:
         )
         async_handle = client.get_async_activity_handle(task_token=await _token())
         await handle.cancel()
-        deadline = asyncio.get_running_loop().time() + 10
+        deadline = asyncio.get_running_loop().time() + 30
         while True:
             try:
                 await async_handle.heartbeat("still here?")
