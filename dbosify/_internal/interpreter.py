@@ -157,7 +157,7 @@ CHILD_POLL_INTERVAL_SECONDS = 0.25
 # is_continue_as_new_suggested() threshold on the run's checkpoint count
 # (Temporal's server suggests around 10k history events).
 CAN_SUGGESTION_THRESHOLD = int(
-    os.environ.get("TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD", "10000")
+    os.environ.get("DBOSIFY_CAN_SUGGESTION_THRESHOLD", "10000")
 )
 
 # Created lazily (not at import) so decoration binds to the live DBOS

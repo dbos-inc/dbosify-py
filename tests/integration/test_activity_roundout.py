@@ -720,7 +720,7 @@ async def test_duplicate_open_activity_id_rejected(
     """Duplicate open activity ids are rejected (Temporal's server rejects
     the command; here, like any rejected command, it fails the workflow
     task — surfaced via FAIL_FAST for the test)."""
-    monkeypatch.setenv("TEMPORAL_DBOS_FAIL_FAST", "1")
+    monkeypatch.setenv("DBOSIFY_FAIL_FAST", "1")
     async with _env() as client:
         handle = await client.start_workflow(
             DuplicateIdWorkflow.run, id="dup-act-id", task_queue=TASK_QUEUE

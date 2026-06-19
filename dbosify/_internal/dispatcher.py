@@ -12,7 +12,7 @@ boundary), rewinds the DBOS checkpoint cursor (``ctx.function_id``) to where
 the interpreter started, and re-runs it — which replays from checkpoints,
 exactly like crash recovery. The workflow stays PENDING (Temporal: RUNNING),
 so users can fix the bug, redeploy, and the workflow resumes. Set
-``TEMPORAL_DBOS_FAIL_FAST=1`` to fail immediately instead (dev/test).
+``DBOSIFY_FAIL_FAST=1`` to fail immediately instead (dev/test).
 
 This module also carries the Phase 0 in-process client helpers (start /
 signal / update / query). The real ``Client`` facade replaces them in
@@ -73,8 +73,8 @@ from .payloads import (
 
 logger = logging.getLogger("dbosify.dispatcher")
 
-FAIL_FAST_ENV = "TEMPORAL_DBOS_FAIL_FAST"
-TASK_RETRY_INITIAL_ENV = "TEMPORAL_DBOS_TASK_RETRY_INITIAL_SECONDS"
+FAIL_FAST_ENV = "DBOSIFY_FAIL_FAST"
+TASK_RETRY_INITIAL_ENV = "DBOSIFY_TASK_RETRY_INITIAL_SECONDS"
 TASK_RETRY_MAX_SECONDS = 60.0
 
 

@@ -703,7 +703,7 @@ async def test_explicit_child_id_with_separator_rejected(
 ) -> None:
     """Explicit child ids obey the same `--r` reservation as client-side
     starts (auto ids are exempt by construction)."""
-    monkeypatch.setenv("TEMPORAL_DBOS_FAIL_FAST", "1")
+    monkeypatch.setenv("DBOSIFY_FAIL_FAST", "1")
     async with _env() as client:
         handle = await client.start_workflow(
             BadChildIdWorkflow.run, id="bad-child-id", task_queue=TASK_QUEUE

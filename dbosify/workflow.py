@@ -707,7 +707,7 @@ class Info:
     def is_continue_as_new_suggested(self) -> bool:
         """Whether this run's checkpoint count has passed the
         continue-as-new suggestion threshold
-        (``TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD``, default 10000)."""
+        (``DBOSIFY_CAN_SUGGESTION_THRESHOLD``, default 10000)."""
         return _runtime().runtime_can_suggested()
 
     def get_current_build_id(self) -> str:

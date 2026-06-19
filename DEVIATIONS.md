@@ -25,10 +25,10 @@ Postgres security: there is no Temporal-style mTLS endpoint or
 namespace-level access control.
 
 **Namespaces map to DBOS system schemas.** Each Temporal namespace gets its
-own Postgres schema (`temporal_<namespace>`) holding the DBOS system tables, so
+own Postgres schema (`dbosify_<namespace>`) holding the DBOS system tables, so
 workflows in different namespaces are isolated: the same workflow id can exist
 independently in two namespaces, and `list`/`describe` in one never sees the
-other. No namespace is privileged — `default` maps to `temporal_default`, not
+other. No namespace is privileged — `default` maps to `dbosify_default`, not
 the bare `dbos` schema. A `Worker` derives its `dbos_system_schema` from its
 `namespace` (it owns the runtime). `Client.connect(system_database_url,
 namespace=...)` builds the `DBOSClient` pointed at that namespace's schema, so
