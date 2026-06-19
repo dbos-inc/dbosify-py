@@ -1,7 +1,7 @@
-"""Regression: heartbeats issued from a *background asyncio task* inside an
-async activity must reset the heartbeat-timeout watchdog, so a long activity
-outlives its heartbeat timeout. This is the samples-python ``custom_decorator``
-(``@auto_heartbeater``) pattern.
+"""Heartbeats issued from a *background asyncio task* inside an async activity
+reset the heartbeat-timeout watchdog, so a long activity outlives its heartbeat
+timeout. This is the samples-python ``custom_decorator`` (``@auto_heartbeater``)
+pattern.
 """
 
 import asyncio
@@ -32,8 +32,7 @@ async def _beat_forever(delay: float) -> None:
 @activity.defn
 async def background_heartbeat_activity() -> str:
     # Mirrors @auto_heartbeater: a background task issues heartbeats so a long
-    # activity outlives its heartbeat timeout. The activity itself yields to the
-    # loop (sleep), so the background task gets to run.
+    # activity outlives its heartbeat timeout; the activity yields (sleep).
     hb = activity.info().heartbeat_timeout
     assert hb is not None, "heartbeat_timeout not propagated to activity.info()"
     beater = asyncio.create_task(_beat_forever(hb.total_seconds() / 2))

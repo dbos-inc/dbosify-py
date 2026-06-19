@@ -50,9 +50,8 @@ def test_sigkill_mid_cron_run(tmp_path: Path) -> None:
     # The counter threaded through last_completion_result is unbroken across
     # the crash: run 1's recovery saw run 0's result, run 2 saw run 1's.
     assert results == [0, 1, 2]
-    # Each fire's activity executed exactly once across both processes: the
-    # recovered run replayed its record from the checkpoint, and the
-    # replayed hop re-attached to run 2 rather than starting a twin.
+    # Each fire's activity executed exactly once: the recovered run replayed its
+    # record from the checkpoint, and the replayed hop re-attached to run 2.
     fires = sorted(effects.read_text().splitlines())
     assert fires[:3] == ["fire0", "fire1", "fire2"]
     assert len(fires) == len(set(fires))

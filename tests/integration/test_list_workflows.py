@@ -218,9 +218,8 @@ async def test_list_by_workflow_id_and_prefix() -> None:
 
 async def test_list_by_workflow_id_returns_run_chain() -> None:
     async with _env() as client:
-        # Reuse one workflow id three times: the runs become chain-1, chain-1--r1,
-        # chain-1--r2. WorkflowId = X must return the whole chain (as in Temporal,
-        # where a WorkflowId query returns every run of that id), not just run 0.
+        # Reuse one workflow id three times (chain-1, chain-1--r1, chain-1--r2):
+        # WorkflowId = X returns the whole chain (as in Temporal), not just run 0.
         for v in ["a", "b", "c"]:
             await client.execute_workflow(
                 Completer.run, v, id="chain-1", task_queue=TASK_QUEUE
@@ -325,8 +324,7 @@ def _groups(count: WorkflowExecutionCount) -> Dict[Any, Optional[int]]:
 
 async def test_count_group_by_execution_status_rejected() -> None:
     # DBOS lumps Failed/Canceled/TimedOut/ContinuedAsNew under one ERROR status,
-    # so a faithful GROUP BY ExecutionStatus can't be computed by the aggregate
-    # operator alone — count_workflows fails it rather than scanning rows.
+    # so GROUP BY ExecutionStatus is rejected rather than computed by aggregate.
     async with _env() as client:
         await client.execute_workflow(
             Completer.run, "a", id="c1", task_queue=TASK_QUEUE
@@ -491,8 +489,8 @@ async def test_list_status_terminated() -> None:
 
 
 async def test_list_canceled_distinct_from_failed() -> None:
-    # Both Canceled and Failed are stored as DBOS ERROR; the post-filter must
-    # tell them apart by the recorded marker.
+    # Both Canceled and Failed are stored as DBOS ERROR; the post-filter tells
+    # them apart by the recorded marker.
     async with _env() as client:
         with pytest.raises(WorkflowFailureError):
             await client.execute_workflow(Failer.run, id="f1", task_queue=TASK_QUEUE)
@@ -576,9 +574,8 @@ async def test_list_continue_as_new_chain_rows() -> None:
 
 
 async def test_list_pagination_post_filter_no_skip_or_dup() -> None:
-    # Interleave completers and failers, then page Failed with a tiny page so
-    # most rows in each raw page are dropped. The iterator must advance by the
-    # raw rows scanned, not by survivors — otherwise it skips or duplicates.
+    # Page Failed with a tiny page so most rows in each raw page are dropped: the
+    # iterator must advance by raw rows scanned, not survivors, or it skips/dups.
     async with _env() as client:
         for i in range(3):
             await client.execute_workflow(
@@ -628,10 +625,8 @@ async def test_list_search_attribute_value_types() -> None:
         assert await ids(f"CustomDatetime = '{WHEN_VAL.isoformat()}'") == {"typed"}
         # a non-matching value finds nothing.
         assert await ids("CustomInt = 999") == set()
-        # DEVIATION (memo-search-attributes): keyword-LIST attributes are not filterable. The value
-        # is stored as a JSON array (["red", "blue"]) and our containment filter
-        # is scalar-shaped ({"v": "red"}); with no cluster type registry the
-        # query can't know to wrap the value as an array, so it never matches.
+        # DEVIATION (memo-search-attributes): keyword-LIST attributes are not
+        # filterable (array storage vs. scalar-shaped containment filter).
         assert await ids("CustomTags = 'red'") == set()
 
 
@@ -732,8 +727,7 @@ async def test_count_group_by_workflow_type_with_filter() -> None:
 
 async def test_visibility_excludes_internal_plumbing_workflows() -> None:
     # A schedule fire runs an internal `__temporal_schedule_fire` DBOS workflow
-    # that in turn starts the user action workflow. list/count must surface only
-    # the latter (a `wf:` workflow), never the dispatcher.
+    # that starts the user action; list/count surface only the latter (`wf:`).
     async with _env() as client:
         sched = await client.create_schedule(
             "sched-x",

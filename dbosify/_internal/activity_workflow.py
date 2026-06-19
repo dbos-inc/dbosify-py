@@ -94,14 +94,13 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         else RetryPolicy()
     )
     meta = dict(payload["meta"])
-    # Surface the activity's timeouts/retry policy to activity.info() (the local
-    # path carries these in meta too); they live at payload level on this path.
+    # Surface the activity's timeouts/retry policy to activity.info(); on this
+    # path they live at payload level, so copy them into meta.
     meta["start_to_close"] = start_to_close
     meta["schedule_to_close"] = schedule_to_close
     meta["retry_policy"] = serialized_policy
     # ``attempt_step_for`` raises a clear KeyError if the activity type is not
-    # registered with *this* worker — the correct failure for a task_queue
-    # pointed at a worker that doesn't host the activity.
+    # registered with *this* worker — the correct failure for a misrouted task_queue.
     step_fn = activities_mod.attempt_step_for(activity_name)
     started_at = await _activity_started_at()
 
@@ -132,10 +131,8 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         meta["attempt"] = attempt
         envelope: Dict[str, Any] = await step_fn(args, start_to_close, meta)
         if envelope.get("async_pending"):
-            # raise_complete_async(): park for external completion via
-            # AsyncActivityHandle (which sends to this workflow's recv topic).
-            # A fail re-runs the activity per policy (fall through); complete /
-            # cancelled / timeout are handled inside.
+            # raise_complete_async(): park for external completion. A fail re-runs the
+            # activity per policy (fall through); complete/cancelled/timeout end here.
             timeout = (
                 start_to_close
                 if start_to_close is not None
@@ -153,8 +150,7 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         failure = envelope["failure"]
         if failure.get("cls") == "CancelledError":
             # Cancellation is terminal — a cancelled activity is never retried
-            # (Temporal semantics). The interpreter resolves the awaiter as
-            # cancelled (and confirms a WAIT_CANCELLATION_COMPLETED unwind).
+            # (Temporal semantics). The interpreter resolves the awaiter as cancelled.
             return envelope
         elapsed = float(envelope.get("ended_at", started_at)) - started_at
         delay, retry_state = activities_mod.retry_decision(
@@ -203,8 +199,7 @@ async def _await_async_completion(
                 "ended_at": ended_at,
             }
         if completion.get("kind") == "activity_heartbeat":
-            # A heartbeat keeps the parked activity alive but is not a
-            # completion; wait for the next message.
+            # A heartbeat keeps the parked activity alive but is not a completion.
             continue
         ended_at = float(completion.get("sent_at", ended_at))
         if completion.get("cancelled"):
@@ -222,8 +217,8 @@ async def _await_async_completion(
                 "result": completion.get("result"),
                 "ended_at": ended_at,
             }
-        # An external fail: hand it back so the caller's loop retries per the
-        # policy (which may re-run the activity and park again).
+        # An external fail: hand it back so the caller's loop retries per policy
+        # (which may re-run the activity and park again).
         return {
             "ok": False,
             "failure": completion["failure"],

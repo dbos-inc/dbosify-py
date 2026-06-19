@@ -400,9 +400,8 @@ async def test_workflow_cancel_child_started(client: Client, use_execute: bool) 
             task_queue=worker.task_queue,
         )
 
-        # Adapted: replaced assert_workflow_exists_eventually (server-only history
-        # lookup) with polling the parent's ready() query, which is set only after
-        # the child workflow has been started.
+        # Adapted: poll the parent's ready() query (set only after the child has
+        # been started) instead of a server-only history lookup.
         async def ready() -> bool:
             return bool(await handle.query(CtCancelChildWorkflow.ready))
 
@@ -561,10 +560,8 @@ class CtConcurrentSleepsWorkflow:
 
 
 async def test_concurrent_sleeps_use_proper_options(client: Client) -> None:
-    # Adapted: dropped the timer-summary history assertions (server-only:
-    # get_workflow_execution_history / EventType / user_metadata). The behavioral
-    # core kept here is that many concurrent sleeps/wait_conditions with summaries
-    # and timeouts run to completion without error.
+    # Adapted: dropped timer-summary history assertions (server-only). Core: many
+    # concurrent sleeps/wait_conditions with summaries and timeouts complete without error.
     async with new_worker(client, CtConcurrentSleepsWorkflow) as worker:
         handle = await client.start_workflow(
             CtConcurrentSleepsWorkflow.run,
@@ -691,8 +688,7 @@ async def test_workflow_timeout_support(client: Client, approach: str) -> None:
         assert isinstance(err.value.cause, ActivityError)
         assert isinstance(err.value.cause.cause, CancelledError)
         # Adapted: dropped the timer_started_event_attributes history assertion
-        # (server-only). The behavioral half — each approach cancels the activity —
-        # is kept above.
+        # (server-only); the behavioral half — each approach cancels the activity — is kept.
 
 
 # ---------------------------------------------------------------------------

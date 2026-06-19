@@ -99,9 +99,8 @@ class UpsertDictWorkflow:
 class UpsertBadDatetimeWorkflow:
     @workflow.run
     async def run(self) -> str:
-        # A tz-naive datetime is invalid. The error must surface synchronously
-        # at the upsert call (catchable), not later in the deferred attribute
-        # write where it would escape the dispatcher uncatchably.
+        # A tz-naive datetime is invalid: the error surfaces synchronously at the
+        # upsert call (catchable), not later in the deferred attribute write.
         try:
             workflow.upsert_search_attributes([WHEN.value_set(datetime(2026, 6, 16))])
         except ValueError:
@@ -368,11 +367,8 @@ async def test_dict_form_search_attributes_warn_on_inworkflow_upsert() -> None:
 
 
 async def test_inworkflow_upsert_invalid_value_is_catchable() -> None:
-    # An invalid search-attribute value (tz-naive datetime) upserted from inside
-    # a workflow must raise synchronously at the upsert call — catchable by the
-    # workflow, leaving state unchanged — not escape uncatchably via the
-    # deferred attribute write (which would terminally fail the run and re-fail
-    # on every recovery). The workflow catches it and returns normally.
+    # An invalid value (tz-naive datetime) upserted in-workflow raises synchronously
+    # at the call (catchable, state unchanged); the workflow catches it and returns.
     async with _env() as client:
         result = await client.execute_workflow(
             UpsertBadDatetimeWorkflow.run,

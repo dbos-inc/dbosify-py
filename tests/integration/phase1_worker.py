@@ -1,6 +1,5 @@
-"""Subprocess worker for Phase 1 recovery tests, written entirely against
-the public API (Client.connect + Worker), the way a real Temporal worker
-process is.
+"""Subprocess worker for recovery tests, written entirely against the public
+API (Client.connect + Worker), the way a real Temporal worker process is.
 
 Run as: python phase1_worker.py <start|resume> <workflow_id>
 """

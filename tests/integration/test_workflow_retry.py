@@ -1,5 +1,5 @@
-"""Workflow retry policies (Phase 3, DESIGN §6.4): a failed run starts run
-n+1 of the chain with attempt+1 and backoff, `workflow.info().attempt` is
+"""Workflow retry policies (DESIGN §6.4): a failed run starts run n+1 of the
+chain with attempt+1 and backoff, `workflow.info().attempt` is
 real, attempts see the previous failure via `workflow.get_last_failure()`,
 and `result(follow_runs=True)` follows a failed run to its retry successor.
 """
@@ -206,13 +206,10 @@ async def test_non_retryable_error_stops_immediately() -> None:
 
 
 async def test_run_timeout_is_per_attempt() -> None:
-    """A retry attempt gets a FRESH run_timeout, assigned when it dequeues.
-
-    Regression: without explicit re-application on the hop, DBOS propagates
-    the failed run's *absolute* deadline to the runs it enqueues — here the
-    2.5s backoff exceeds the 2s run_timeout, so attempt 2 would be born
-    already expired and natively killed at dequeue (surfacing as
-    TERMINATED). Temporal applies run_timeout per run.
+    """A retry attempt gets a FRESH run_timeout, assigned when it dequeues, so a
+    backoff longer than the run_timeout does not leave the next attempt born
+    already-expired. Temporal applies run_timeout per run; here the 2.5s backoff
+    exceeds the 2s run_timeout yet attempt 2 still runs.
     """
     async with _env() as client:
         result = await client.execute_workflow(

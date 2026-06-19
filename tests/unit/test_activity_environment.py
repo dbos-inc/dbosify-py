@@ -67,8 +67,7 @@ def test_cancellation() -> None:
 
 def test_worker_lifecycle_helpers_without_worker() -> None:
     # ActivityEnvironment gives each activity its own (unset) worker-shutdown
-    # event, so is_worker_shutdown() reads False regardless of any prior worker
-    # test in the same process — no manual reset needed.
+    # event, so is_worker_shutdown() reads False with no manual reset needed.
     env = ActivityEnvironment()
     assert env.run(worker_lifecycle_activity) == "shutdown=False"
 
@@ -101,10 +100,8 @@ def test_is_worker_shutdown_requires_activity_context() -> None:
 
 
 def test_worker_states_have_independent_latched_events() -> None:
-    # Each Worker gets its own _ActivityWorkerState with a fresh shutdown event:
-    # tripping one never affects another (a straggler from a prior worker keeps
-    # its own flag), and the flag is latched (no clear path). A context bound to
-    # a shut-down worker's state observes is_worker_shutdown() == True.
+    # Each Worker gets its own _ActivityWorkerState with a fresh, latched shutdown
+    # event: tripping one never affects another, and a bound context reads True.
     s1 = activity._ActivityWorkerState({"name": "app"})
     s2 = activity._ActivityWorkerState({"name": "app"})
     assert not s1.shutdown_event.is_set()
@@ -112,7 +109,7 @@ def test_worker_states_have_independent_latched_events() -> None:
 
     s1.shutdown_event.set()
     assert s1.shutdown_event.is_set()
-    assert not s2.shutdown_event.is_set()  # per-worker isolation (#4)
+    assert not s2.shutdown_event.is_set()  # per-worker isolation
 
     ctx = activity._Context(
         info=activity.Info(), on_heartbeat=lambda *a: None, worker_state=s1
@@ -125,8 +122,8 @@ def test_worker_states_have_independent_latched_events() -> None:
 
 
 def test_default_info_parity_fields() -> None:
-    """The fields cleaned out of the parity ledger carry their honest defaults
-    on a default-constructed Info (single-namespace, FIFO/no-priority)."""
+    """The parity-ledger fields carry their honest defaults on a
+    default-constructed Info (single-namespace, FIFO/no-priority)."""
     info = ActivityEnvironment().info
     assert info.namespace == "default"
     assert info.workflow_namespace == "default"

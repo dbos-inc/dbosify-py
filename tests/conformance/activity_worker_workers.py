@@ -4,10 +4,9 @@ The samples-python ``activity_worker/`` corpus is a single cross-language
 sample: a Go workflow invoking a Python activity over a Temporal server. It
 cannot run as written against dbosify (no server, no Go worker;
 ``execute_workflow("say-hello-workflow", ...)`` targets a workflow registered
-only in Go). This helper discharges the Phase-3 exit gate by proving the
-capability the directory demonstrates — an **activity-only** Python worker
-reachable from a workflow on a **different task queue** (the cross-queue /
-distributed activity path, DESIGN §6.1.2).
+only in Go). This helper proves the capability the directory demonstrates — an
+**activity-only** Python worker reachable from a workflow on a **different task
+queue** (the cross-queue / distributed activity path, DESIGN §6.1.2).
 
 The Go ``say-hello-workflow`` is substituted by ``SayHelloWorkflow`` (the
 documented migration delta); the activity is the sample's ``say_hello_activity``

@@ -34,13 +34,11 @@ HONORED: Set[str] = {
 }
 
 # The connection itself — ``target_host`` is replaced by ``connect``'s
-# ``system_database_url``, ``service_client`` by the ``dbos_client`` the
-# constructor takes (connection-surface).
+# ``system_database_url``, ``service_client`` by the ``dbos_client`` (connection-surface).
 DEVIATION: Set[str] = {"target_host", "service_client"}
 
 # Carried by the DBOSClient you pass, or with no analog (no Temporal server /
-# gRPC). Not accepted by our Client → passing one raises TypeError (never
-# silently ignored). Each with a defensible reason.
+# gRPC). Not accepted by our Client → passing one raises TypeError, with a reason.
 SUBSUMED: Dict[str, str] = {
     "api_key": "no Temporal-server auth (no-server)",
     "plugins": "Client plugins not supported; use interceptors=",
@@ -99,8 +97,7 @@ def test_honored_params_are_accepted() -> None:
 
 def test_unsupported_params_are_not_silently_accepted() -> None:
     # No **kwargs catch-all: every non-honored temporalio param is *not* a
-    # parameter on our Client, so passing one raises TypeError (loud) rather
-    # than being silently ignored.
+    # parameter on our Client, so passing one raises TypeError rather than ignoring it.
     ours = _our_client_params()
     silently_accepted = (DEVIATION | set(SUBSUMED)) & ours
     assert (

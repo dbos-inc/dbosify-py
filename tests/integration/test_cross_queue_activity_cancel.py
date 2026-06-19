@@ -1,4 +1,4 @@
-"""Cooperative cancellation of a cross-queue activity (Phase 3, §6.1.2).
+"""Cooperative cancellation of a cross-queue activity (§6.1.2).
 
 The activity runs on a different worker than the workflow, so cancellation must
 cross the process boundary *cooperatively*: the interpreter sets a checkpointed
@@ -57,10 +57,8 @@ def test_cross_queue_activity_is_cancelled(tmp_path: Path, cancel_type: str) -> 
             line = workflow_worker.wait_for_line("RESULT ", timeout=90)
             assert workflow_worker.wait(timeout=30) == 0
             assert line.split("RESULT ", 1)[1].strip() == "activity-cancelled"
-            # TRY_CANCEL resolves the workflow without waiting for the activity's
-            # cross-process cleanup, so the "cancelled" effect can land after the
-            # RESULT. Synchronize on the activity worker actually running its
-            # cleanup before tearing it down and reading the effects file.
+            # TRY_CANCEL resolves the workflow before the activity's cross-process
+            # cleanup, so sync on that cleanup before reading the effects file.
             activity_worker.wait_for_line("ACTIVITY_CANCELLED", timeout=30)
         finally:
             workflow_worker.terminate_and_wait()
@@ -78,21 +76,16 @@ def test_cross_queue_activity_is_cancelled(tmp_path: Path, cancel_type: str) -> 
 def test_cross_queue_activity_cancelled_before_dispatch(
     tmp_path: Path, cancel_type: str
 ) -> None:
-    """Regression: cancel a cross-queue activity *before* its dispatch commits
-    (no awaiting boundary between start and cancel), so ``queued_dbos_id`` is
-    still unset when the cancellation sweep runs.
+    """Cancel a cross-queue activity *before* its dispatch commits (no awaiting
+    boundary between start and cancel), so ``queued_dbos_id`` is still unset
+    when the cancellation sweep runs.
 
-    The cancel must still take effect rather than being silently dropped:
+    The cancel still takes effect rather than being silently dropped:
       * TRY_CANCEL cancels the awaiting future, retiring the exec before the
         dispatch runs — the activity is never enqueued (it leaves no effects);
       * WAIT_CANCELLATION_COMPLETED keeps the exec open, so the cross-process
         cancel is deferred to dispatch time and delivered once the activity
         workflow exists — the activity starts on its worker and unwinds.
-
-    Before the fix, TRY raised ``KeyError`` in the command loop (a workflow-task
-    failure that never produces a result) and WAIT dropped the cancel (the
-    workflow blocked until the start-to-close timeout), so both would hang past
-    this test's wait rather than reporting ``activity-cancelled``.
     """
     effects = tmp_path / "effects"
     activity_worker = PythonProcess(
@@ -115,8 +108,6 @@ def test_cross_queue_activity_cancelled_before_dispatch(
         )
         workflow_worker.start()
         try:
-            # A regression keeps RESULT from ever arriving within this window
-            # (TRY task-failure loop) or delays it ~60s (WAIT start-to-close).
             line = workflow_worker.wait_for_line("RESULT ", timeout=45)
             assert workflow_worker.wait(timeout=30) == 0
             assert line.split("RESULT ", 1)[1].strip() == "activity-cancelled"

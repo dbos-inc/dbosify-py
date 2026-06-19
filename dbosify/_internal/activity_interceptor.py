@@ -92,8 +92,7 @@ class ExecuteActivityInput:
     # ``asyncio.to_thread``, not a user-supplied executor. Present for parity.
     executor: Any | None
     # Headers (str -> Payload) a workflow outbound interceptor set on
-    # StartActivityInput, propagated here; empty when nothing
-    # set them. Decode values with ``activity.payload_converter()``.
+    # StartActivityInput, propagated here. Decode with ``activity.payload_converter()``.
     headers: Mapping[str, Any]
 
 

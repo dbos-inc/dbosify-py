@@ -21,18 +21,15 @@ from typing import Optional
 # Default namespace, matching Temporal.
 DEFAULT_NAMESPACE = "default"
 
-# Every namespace's schema is ``dbosify_<namespace>`` (no namespace is
-# privileged — ``default`` maps to ``dbosify_default``, not the bare ``dbos``
-# schema). The prefix keeps namespace schemas clear of DBOS's own ``dbos``
-# schema and of reserved words (e.g. ``default``).
+# Every namespace's schema is ``dbosify_<namespace>`` (``default`` maps to
+# ``dbosify_default``); the prefix keeps these clear of DBOS's own ``dbos`` schema.
 _SCHEMA_PREFIX = "dbosify_"
 
 # Postgres identifiers are capped at 63 bytes; reserve room for the prefix.
 _MAX_NAMESPACE_LEN = 63 - len(_SCHEMA_PREFIX)
 
 # A namespace must be a plain lowercase identifier so it maps to an unambiguous,
-# unquoted Postgres schema (case-folding and quoting hazards avoided). Temporal
-# namespace names are typically already this shape.
+# unquoted Postgres schema (avoiding case-folding and quoting hazards).
 _NAMESPACE_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 

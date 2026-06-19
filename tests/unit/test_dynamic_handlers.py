@@ -151,10 +151,8 @@ def test_payload_converter_exposed() -> None:
 
 
 def test_dynamic_handler_accepts_both_sequence_spellings() -> None:
-    # temporalio accepts the dynamic-handler arg typed as either
-    # typing.Sequence[RawValue] or collections.abc.Sequence[RawValue]
-    # (get_type_hints preserves whichever the user wrote, and the two are not
-    # ==). Both must validate.
+    # temporalio accepts the dynamic-handler arg typed as either typing.Sequence
+    # or collections.abc.Sequence of RawValue (not == each other); both must validate.
     for seq in (typing.Sequence[RawValue], collections.abc.Sequence[RawValue]):
 
         @workflow.defn
@@ -181,7 +179,7 @@ def test_dynamic_activity_accepts_both_sequence_spellings() -> None:
 
 def test_dynamic_handler_rejects_wrong_sequence_element() -> None:
     # Sequence of the wrong element type, or a non-Sequence container, is
-    # still rejected (the fix widens the Sequence spelling, not the element).
+    # rejected: the widened Sequence spelling covers the container, not the element.
     with pytest.raises(RuntimeError, match="Dynamic signal handler"):
 
         @workflow.defn

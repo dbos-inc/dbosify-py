@@ -1,4 +1,4 @@
-"""Subprocess worker for Phase 2 recovery tests.
+"""Subprocess worker for recovery tests.
 
 Run as: python phase2_worker.py <scenario>-<start|resume> <workflow_id> <effects_path>
 

@@ -1,5 +1,5 @@
-"""Replayer integration tests (Phase 4): re-execute a recorded run's DBOS
-checkpoints under the currently-registered code and detect non-determinism.
+"""Replayer integration tests: re-execute a recorded run's DBOS checkpoints
+under the currently-registered code and detect non-determinism.
 
 Each test records a run with a Worker up, then constructs a Replayer (which
 reuses that Worker's registered code) and replays the fetched history.
@@ -187,10 +187,8 @@ async def test_replay_clean_no_failure() -> None:
 
 
 async def test_replay_patched_workflow_clean() -> None:
-    # A workflow that took the patched (newer) path recorded a patch marker.
-    # Replaying it must read that marker back so patched() still returns True and
-    # the patched activity lines up at its recorded checkpoint — a clean verify,
-    # not a false divergence (exercises the patch branch's replay-horizon guard).
+    # A patched run recorded a marker; replay reads it back so patched() returns
+    # True and the activity lines up — a clean verify, not a false divergence.
     async with _worker(PatchedReplayWf):
         dbos_client = DBOSClient(system_database_url=system_database_url())
         try:
@@ -343,11 +341,8 @@ async def test_query_on_closed_workflow_rehydrates() -> None:
             handle = await client.start_workflow(
                 GreetingWf.run, "World", id="rp-query", task_queue=TASK_QUEUE
             )
-            # This test exercises the CLOSED/rehydrate path. The live RUNNING
-            # query path is covered deterministically by
-            # test_client_worker.test_handle_signal_query_update (a workflow that
-            # blocks on wait_condition); a live query here would race GreetingWf's
-            # ~0.05s completion and time out under load.
+            # Exercises the CLOSED/rehydrate path (live RUNNING queries are covered
+            # elsewhere); a live query here would race the ~0.05s completion.
             assert await handle.result() == "Goodbye, World!"
 
             # The workflow is now closed; the query rehydrates it by replay and
@@ -483,9 +478,8 @@ async def test_query_on_closed_with_changed_code_fails_clearly() -> None:
             )
             assert await handle.result() == "Goodbye, World!"
 
-            # Simulate a code change: the rehydrate fork now diverges from the
-            # recorded history, so it can't reconstruct state — the query must
-            # fail with a clear message, not a generic timeout.
+            # Simulate a code change: the rehydrate fork diverges from history and
+            # can't reconstruct state, so the query fails clearly, not by timeout.
             MODE["greet_extra"] = True
             with pytest.raises(WorkflowQueryFailedError, match="code may have changed"):
                 await handle.query(

@@ -24,8 +24,7 @@ def test_bad_signal_drop_survives_crash() -> None:
     first.start()
     try:
         # PARKED prints only after the good signal is recorded and the bad one
-        # has already been processed (and dropped), so the state we crash with
-        # excludes the bad signal.
+        # dropped, so the state we crash with excludes the bad signal.
         first.wait_for_line("PARKED", timeout=60)
         first.sigkill()
         assert first.wait() == -9

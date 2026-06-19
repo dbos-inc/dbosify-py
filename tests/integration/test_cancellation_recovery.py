@@ -1,5 +1,5 @@
-"""SIGKILL mid-cancellation-unwind (the new Phase 2 recovery window): kill
-after the cancel was consumed and the cleanup activity checkpointed, but
+"""SIGKILL mid-cancellation-unwind: kill after the cancel was consumed and
+the cleanup activity checkpointed, but
 before the unwind finishes. Recovery must replay the cancel delivery and the
 cleanup (exactly once), reconstruct the mid-unwind state, and still record
 CANCELED.
@@ -37,9 +37,8 @@ def test_sigkill_during_cancellation_unwind(tmp_path: Path) -> None:
         first.wait_for_line("STARTED", timeout=60)
         client = DBOSClient(system_database_url=system_database_url())
         client.send(wf_id, inbox.cancel_envelope("chaos test"), inbox.INBOX_TOPIC)
-        # CLEANUP_DONE: the cancel was consumed, the unwind ran, and the
-        # cleanup activity's checkpoint committed; the workflow is parked
-        # mid-unwind. Kill here.
+        # CLEANUP_DONE: the cancel was consumed, the unwind ran, and the cleanup
+        # checkpoint committed; the workflow is parked mid-unwind. Kill here.
         first.wait_for_line("CLEANUP_DONE", timeout=60)
         first.sigkill()
         assert first.wait() == -9

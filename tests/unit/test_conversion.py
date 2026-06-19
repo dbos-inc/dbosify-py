@@ -80,9 +80,8 @@ def test_extra_metadata_is_preserved() -> None:
 
 
 async def test_more_hints_than_values_keeps_per_position_hint() -> None:
-    # A call site with fewer args than the signature has typed params (the
-    # rest are default-valued). The single value present must still be
-    # reconstructed from its hint, not dropped to a plain dict.
+    # Fewer args than typed params (rest default-valued): the value present must
+    # still be reconstructed from its hint, not dropped to a plain dict.
     encoded = await encode_values([_Point(1, 2)])
     decoded = await decode_values(encoded, [_Point, _Point])
     assert decoded == [_Point(1, 2)] and isinstance(decoded[0], _Point)

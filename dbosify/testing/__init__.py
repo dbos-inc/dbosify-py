@@ -65,10 +65,8 @@ class ActivityEnvironment:
         self._context.cancelled.set()
 
     def worker_shutdown(self) -> None:
-        """Mark the environment's worker as shut down, mirroring
-        ``temporalio.testing.ActivityEnvironment.worker_shutdown``:
-        ``is_worker_shutdown()`` becomes true and ``wait_for_worker_shutdown*``
-        unblocks.
+        """Mark the worker as shut down: ``is_worker_shutdown()`` becomes true
+        and ``wait_for_worker_shutdown*`` unblocks.
         """
         self._context.worker_shutdown_event.set()
 
@@ -172,10 +170,8 @@ class WorkflowEnvironment:
                 engine.dispose()
 
         await asyncio.to_thread(_create)
-        # The env runs in the default namespace; build the DBOSClient for that
-        # namespace's schema so the low-level Client() accepts it (it derives the
-        # namespace from the schema). Without this, a real start_local() outside
-        # the test harness hits the bare "dbos" schema and raises.
+        # Build the DBOSClient on the default namespace's schema so Client() (which
+        # derives the namespace from the schema) accepts it.
         dbos_client = DBOSClient(
             system_database_url=env_url,
             dbos_system_schema=namespace_schema(DEFAULT_NAMESPACE),

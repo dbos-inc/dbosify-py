@@ -1,6 +1,6 @@
-"""The §4.3 SIGKILL-recovery suite (DESIGN.md Phase 0 exit criteria 1, 2, 4,
-and 5), driven through real worker subprocesses against real Postgres. The
-non-kill criteria (3 and 6) live in test_interpreter_basic.py.
+"""The §4.3 SIGKILL-recovery suite (criteria 1, 2, 4, and 5), driven through
+real worker subprocesses against real Postgres. The non-kill criteria (3 and 6)
+live in test_interpreter_basic.py.
 """
 
 import json

@@ -1,14 +1,13 @@
-"""Conformance: the samples-python ``activity_worker/`` corpus — part of the
-Phase 3 exit gate (DESIGN §9).
+"""Conformance: the samples-python ``activity_worker/`` corpus (DESIGN §9).
 
 That corpus is a single **cross-language** sample (a Go workflow calling a
 Python activity over a Temporal server), so it cannot run as written against a
-serverless, in-process model. We discharge the gate by proving the capability
-it demonstrates: an **activities-only** worker reachable from a workflow on a
-**different task queue** — the cross-queue / distributed activity path
-(DESIGN §6.1.2). The Go workflow is substituted by a Python ``SayHelloWorkflow``
-(the documented migration delta); the activity body is the sample's
-``say_hello_activity`` verbatim. See ``activity_worker_workers.py``.
+serverless, in-process model. We prove the capability it demonstrates: an
+**activities-only** worker reachable from a workflow on a **different task
+queue** — the cross-queue / distributed activity path (DESIGN §6.1.2). The Go
+workflow is substituted by a Python ``SayHelloWorkflow`` (the documented
+migration delta); the activity body is the sample's ``say_hello_activity``
+verbatim. See ``activity_worker_workers.py``.
 
 Two real worker processes run concurrently (a workflows-only worker and an
 activities-only worker on separate queues), so the activity genuinely executes
@@ -34,14 +33,12 @@ def test_activity_worker_cross_queue() -> None:
     base_env = {
         "PYTHONPATH": str(REPO_ROOT),
         "DBOSIFY_TEST_SYSTEM_DATABASE_URL": system_database_url(),
-        # Cooperating workers register different function sets but share the
-        # Worker's pinned default DBOS app version, so the activity worker
-        # dequeues the workflow worker's __temporal_activity enqueue.
+        # Cooperating workers register different function sets but share the pinned
+        # default DBOS app version, so activity worker dequeues the workflow worker's enqueue.
     }
 
-    # Distinct executor ids so each worker only ever recovers its own queue's
-    # workflows (here there are no crashes, but it keeps the two cleanly
-    # separated on the shared database).
+    # Distinct executor ids so each worker only recovers its own queue's workflows
+    # (no crashes here, but keeps the two cleanly separated on the shared database).
     activity_worker = PythonProcess(
         WORKERS, "activity", env={**base_env, "DBOS__VMID": "dbosify-activity"}
     )

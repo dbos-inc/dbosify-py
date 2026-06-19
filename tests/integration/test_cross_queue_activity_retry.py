@@ -1,4 +1,4 @@
-"""Retry policy on the cross-queue / distributed activity path (Phase 2, §6.1.2).
+"""Retry policy on the cross-queue / distributed activity path (§6.1.2).
 
 The ``__temporal_activity`` workflow owns the retry loop on the activity worker
 (Design A): attempts, durable backoff, ``maximum_attempts`` / non-retryable, and
@@ -107,9 +107,8 @@ def test_sigkill_activity_worker_mid_backoff_resumes(tmp_path: Path) -> None:
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
         workflow_worker.start()
-        # Let a couple of attempts fail, then kill during the (2s) backoff that
-        # follows attempt 2 — the attempt itself fails instantly, so a brief
-        # pause reliably lands the kill inside the durable sleep.
+        # Let a couple of attempts fail, then kill during the (2s) backoff after
+        # attempt 2 — a brief pause lands the kill inside the durable sleep.
         activity_worker.wait_for_line("ATTEMPT 2", timeout=90)
         time.sleep(0.6)
         activity_worker.sigkill()

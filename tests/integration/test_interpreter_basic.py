@@ -250,8 +250,8 @@ def test_activities_and_sleep() -> None:
 
 @pytest.mark.usefixtures("dbosify")
 def test_workflow_and_activity_info_parity_fields() -> None:
-    """The Phase-4 parity-cleanup fields carry real run data: the run-chain
-    base id, init time, no-parent, and the activity's scheduled timeouts/retry
+    """The parity-cleanup fields carry real run data: the run-chain base id,
+    init time, no-parent, and the activity's scheduled timeouts/retry
     policy/namespace surfaced through activity.info()."""
     dispatcher.register_worker(
         workflows=[InfoWorkflow], activities=[report_activity_info]

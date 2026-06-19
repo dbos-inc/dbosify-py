@@ -1,4 +1,4 @@
-"""Phase 1 public-API tests: the hello-world quad and friends, written the
+"""Public-API tests: the hello-world quad and friends, written the
 way a dbosify app is: a Worker built from a DBOSConfig (owning the
 process's DBOS lifecycle), a Client wrapping a DBOSClient.
 """
@@ -274,11 +274,8 @@ async def test_signal_with_start() -> None:
 
 
 async def test_signal_with_start_attaches_to_running() -> None:
-    # USE_EXISTING signal-with-start against an already-running run must deliver
-    # the signal to it, not silently drop it (the early-return-before-send gap).
-    # The first call starts the run (atomically delivering "first"); the run
-    # blocks waiting for a second greeting, so it's still open when the second
-    # call attaches and must deliver "second" to that same run.
+    # USE_EXISTING signal-with-start against a running run delivers the signal to
+    # it: the first call starts the run, the second attaches and adds "second".
     async with _env() as client:
         first = await client.start_workflow(
             SignalStartWorkflow.run,
@@ -296,18 +293,16 @@ async def test_signal_with_start_attaches_to_running() -> None:
             start_signal="greet",
             start_signal_args=["second"],
         )
-        # The USE_EXISTING attach handle carries the attached run's ids (not None),
-        # so reading result_run_id / first_execution_run_id works and matches the
-        # run the first call started.
+        # The USE_EXISTING attach handle carries the attached run's ids, matching
+        # the run the first call started.
         assert second.result_run_id == first.result_run_id == "sws-attach-wf"
         assert (
             second.first_execution_run_id
             == first.first_execution_run_id
             == "sws-attach-wf"
         )
-        # The second call attached to the running run rather than starting a new
-        # one, and its start signal reached that run (else run() hangs at one
-        # greeting): both handles resolve the same result.
+        # The second call attached to the running run and its start signal reached
+        # that run: both handles resolve the same result.
         assert await first.result() == ["first", "second"]
         assert await second.result() == ["first", "second"]
 
@@ -460,8 +455,7 @@ async def test_unfinished_handler_warnings() -> None:
         )
         assert "stuck_update" in message and "stuck-upd" in message
         # The abandoned update fails its caller promptly (Temporal fails
-        # accepted-but-incomplete updates at workflow close) rather than
-        # leaving it to time out.
+        # accepted-but-incomplete updates at workflow close).
         with pytest.raises(WorkflowUpdateFailedError) as upd_err:
             await handle.get_update_handle("stuck-upd").result()
         cause = upd_err.value.__cause__

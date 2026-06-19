@@ -1,4 +1,4 @@
-"""The kill-and-recover harness must itself work before Phase 0 leans on it."""
+"""The kill-and-recover harness must itself work before the rest leans on it."""
 
 from pathlib import Path
 

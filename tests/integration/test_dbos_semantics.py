@@ -38,9 +38,8 @@ def test_concurrent_step_determinism_across_sigkill(tmp_path: Path) -> None:
     first = PythonProcess(WORKER, "chaos-start", wf_id, str(effects), env=ENV)
     first.start()
     try:
-        # STEP_START b2 implies: steps d and b completed and checkpointed, and
-        # the first two asyncio_wait rounds (winners d, then b) are recorded.
-        # Steps a and c (and chained d2, b2) are mid-flight.
+        # STEP_START b2 implies: steps d and b completed and checkpointed, the
+        # first two asyncio_wait rounds recorded, a/c (and d2/b2) mid-flight.
         first.wait_for_line("STEP_START b2")
         first.sigkill()
         assert first.wait() == -9
@@ -85,8 +84,7 @@ def test_recv_order_replays_across_sigkill(tmp_path: Path) -> None:
         first.start()
         try:
             # Wait for the workflow row to exist: sends to a not-yet-started
-            # workflow fail on a foreign-key constraint, and the client can
-            # only connect once the worker's launch has created the database.
+            # workflow fail on a foreign-key constraint.
             first.wait_for_line("STARTED")
             client = DBOSClient(system_database_url=system_database_url())
             client.send(wf_id, "m1", "inbox")

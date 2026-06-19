@@ -149,12 +149,8 @@ class MiManualResultTypeWorkflow:
         return MiManualResultType(some_string="from-query")
 
 
-# Adapted to a deliberate, documented deviation: an activity/child/workflow
-# invoked by string name WITHOUT an explicit result_type decodes via the target's
-# REGISTERED return annotation (so it returns the MiManualResultType dataclass, not
-# the untyped dict temporalio returns). A string-named QUERY does NOT use the
-# registered type (it returns the untyped dict, matching temporalio). The
-# explicit-result_type paths match temporalio exactly.
+# Deliberate deviation: a string-named activity/child/workflow without an explicit
+# result_type decodes via the target's REGISTERED annotation; a string-named QUERY does not.
 async def test_manual_result_type(client: Client) -> None:
     async with new_worker(
         client,
@@ -177,7 +173,7 @@ async def test_manual_result_type(client: Client) -> None:
         res2 = cast(MiManualResultType, await handle.result())
         assert res2 == MiManualResultType(some_string="from-workflow")
         # Query without result type and with (a string-named query returns the
-        # untyped dict — the registered-type decode does not apply to queries).
+        # untyped dict — registered-type decode does not apply to queries).
         res3 = await handle.query("some_query")
         assert res3 == {"some_string": "from-query"}
         res4 = cast(
@@ -333,10 +329,8 @@ class MiExposeRootWorkflow:
 
 
 async def test_expose_root_execution(client: Client) -> None:
-    # NOTE: the original also asserts describe().root_id / root_run_id on the
-    # child description. Our WorkflowExecution has no root_id/root_run_id fields,
-    # so that server-coupled portion is dropped; the behavioral core
-    # (workflow.info().root surfaced to a cross-chain child) is kept.
+    # The original also asserts describe().root_id / root_run_id (no such fields
+    # here); only the behavioral core (workflow.info().root on a child) is kept.
     async with new_worker(
         client, MiExposeRootWorkflow, MiExposeRootChildWorkflow
     ) as worker:
@@ -498,11 +492,8 @@ async def mi_return_name_activity(_args: Sequence[RawValue]) -> str:
     "pytest.raises on. (The dynamic catch-all variant still passes.)"
 )
 async def test_workflow_missing_local_activity(client: Client) -> None:
-    # The original asserts a Temporal workflow-task-failure history event with a
-    # Temporal-specific message. Here a missing local activity raises inside the
-    # workflow (KeyError), surfacing as a WorkflowFailureError whose cause names
-    # the unregistered activity. The behavioral core (missing local activity =>
-    # failure naming the activity) is preserved.
+    # A missing local activity raises a KeyError, surfacing as a
+    # WorkflowFailureError whose cause names the unregistered activity.
     async with new_worker(
         client, MiSimpleLocalActivityWorkflow, activities=[mi_custom_error_activity]
     ) as worker:
@@ -636,9 +627,8 @@ class MiInfoWorkflow:
 
 
 async def test_workflow_info(client: Client) -> None:
-    # Server-only fields (history-event-derived start times, task_timeout, the
-    # JSON-stringified retry_policy round-trip, run_id UUID v7 shape) are dropped;
-    # the stable behavioral fields surfaced by workflow.info() are kept.
+    # Server-only fields (history-derived start times, task_timeout, retry_policy
+    # round-trip, run_id shape) are dropped; the stable info() fields are kept.
     async with new_worker(client, MiInfoWorkflow) as worker:
         workflow_id = wid()
         retry_policy = RetryPolicy(

@@ -41,7 +41,7 @@ def test_encode_decode_headers_empty() -> None:
 
 def test_encode_headers_applies_codec() -> None:
     """A configured PayloadCodec transforms header bytes at rest and the
-    round-trip restores them (the codec-protection fix)."""
+    round-trip restores them."""
     from dbosify.converter import DataConverter, PayloadCodec
 
     class _XorCodec(PayloadCodec):

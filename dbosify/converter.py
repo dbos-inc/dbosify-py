@@ -87,10 +87,8 @@ __all__ = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Payload — our local stand-in for temporalio.api.common.v1.Payload (a
-# protobuf). Same logical shape: encoding-tagged metadata + raw bytes.
-# ---------------------------------------------------------------------------
+# Payload — local stand-in for the temporalio.api.common.v1.Payload protobuf;
+# same logical shape: encoding-tagged metadata + raw bytes.
 @dataclass(frozen=True)
 class Payload:
     """An encoding-tagged unit of serialized data.
@@ -593,9 +591,8 @@ def value_to_type(
                     ) from err
         return hint(**field_values)
 
-    # Pydantic v1 model (``parse_obj``). Pydantic v2 models are not specially
-    # supported by the default converter (no ``contrib.pydantic`` — configure a
-    # custom ``DataConverter`` for them; DESIGN §6.9).
+    # Pydantic v1 model (``parse_obj``). Pydantic v2 models need a custom
+    # ``DataConverter`` (the default converter doesn't support them; DESIGN §6.9).
     parse_obj_attr = inspect.getattr_static(hint, "parse_obj", None)
     if isinstance(parse_obj_attr, (classmethod, staticmethod)):
         if not isinstance(value, dict):
@@ -686,15 +683,8 @@ class PayloadCodec(ABC):
         raise NotImplementedError
 
 
-# ---------------------------------------------------------------------------
-# Failure converter.
-#
-# temporalio's converts to/from a protobuf ``Failure`` in place; we have no
-# such proto, so ours converts to/from the failure-envelope dict that
-# ``_internal.payloads`` already defines (DELIBERATE_DEVIATION). The payload
-# converter routes embedded user values (details, heartbeat details); detail
-# encoding lands when the converter is wired through the interpreter.
-# ---------------------------------------------------------------------------
+# Failure converter: where temporalio uses a protobuf ``Failure``, ours converts
+# to/from the failure-envelope dict ``_internal.payloads`` defines.
 Failure = Dict[str, Any]
 
 

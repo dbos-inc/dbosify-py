@@ -39,10 +39,8 @@ def activity_api_complete_async_error() -> "type[BaseException]":
 
 _attempt_steps: Dict[str, AttemptStep] = {}
 
-# The single catch-all step (DBOS name ``act:__dynamic__``) for the dynamic
-# activity, if one is registered. Any activity type with no exact step falls
-# back to this — the requested type rides in ``meta["activity_type"]``, so the
-# recorded step identity is stable across replay regardless of the type called.
+# Catch-all step (DBOS name ``act:__dynamic__``) for the dynamic activity: any
+# unmatched type falls back to it, with the real type carried in meta.
 _DYNAMIC_STEP_NAME = "__dynamic__"
 _dynamic_attempt_step: Optional[AttemptStep] = None
 
@@ -145,10 +143,8 @@ class _RootActivityInbound(activity_interceptor.ActivityInboundInterceptor):
         async with slot:
             if self._is_async:
                 return await input.fn(*input.args)
-            # Run the sync activity on the Worker's activity_executor if it set
-            # one, else the loop default. run_in_executor does not copy
-            # contextvars (unlike asyncio.to_thread), so copy the current context
-            # explicitly — the activity context (info/heartbeat) rides one.
+            # Run the sync activity on the Worker's activity_executor (else the loop
+            # default). run_in_executor doesn't copy contextvars, so copy them.
             executor = state.activity_executor if state is not None else None
             ctx = contextvars.copy_context()
             loop = asyncio.get_running_loop()
@@ -180,9 +176,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
     ) -> Dict[str, Any]:
         from .. import activity as activity_api
 
-        # The dynamic step handles any unmatched activity type: resolve the
-        # single dynamic activity rather than one keyed by the requested name
-        # (which has no registration). The real type rides in meta.
+        # The dynamic step handles any unmatched type: resolve the single dynamic
+        # activity rather than one keyed by the requested name (the real type is in meta).
         defn = (
             registry.require_dynamic_activity()
             if dynamic
@@ -192,10 +187,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
         attempt_started_at = time_mod.time()
         attempt_key = (str(meta.get("workflow_run_id", "")), int(meta.get("seq", -1)))
         heartbeat_timeout = meta.get("heartbeat_timeout")
-        # On the queued path the workflow runs in another process, so it can't
-        # set our in-process cancel Event; instead it sets a checkpointed cancel
-        # event on its run that we poll here (§6.1.2). Reads inside this step are
-        # not recorded as workflow steps, so the polling stays replay-safe.
+        # On the queued path the workflow can't set our in-process cancel Event;
+        # it sets a checkpointed cancel event on its run that we poll here (§6.1.2).
         queued = bool(meta.get("queued"))
         cancel_target = str(meta.get("workflow_run_id", ""))
         cancel_key = inbox.activity_cancel_key(str(meta.get("activity_id", "")))
@@ -205,12 +198,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
 
             return bool(await DBOS.get_event_async(cancel_target, cancel_key, 0))
 
-        # The activity context (activity.info()/heartbeat()) rides a
-        # contextvar; asyncio.to_thread copies the context, so sync
-        # activities see it too. Registering the context lets the
-        # interpreter deliver cancellation into a running attempt (the
-        # threading.Event outlives task cancellation, so an abandoned
-        # sync thread still observes it at its next heartbeat).
+        # The activity context (info()/heartbeat()) rides a contextvar; registering
+        # it lets the interpreter deliver cancellation into a running attempt.
         ctx = activity_api._Context(
             info=activity_api._make_info(meta),
             on_heartbeat=lambda *details: None,
@@ -224,9 +213,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
             from . import conversion
 
             if dynamic:
-                # A dynamic activity receives a single Sequence[RawValue]: wrap
-                # each raw payload untouched so the activity converts it itself
-                # via activity.payload_converter().
+                # A dynamic activity receives a single Sequence[RawValue]: wrap each
+                # raw payload untouched so the activity converts it itself.
                 from ..common import RawValue
 
                 raw = await conversion.decode_values(args, [RawValue] * len(args))
@@ -237,11 +225,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
             activity_api._register_attempt(attempt_key, ctx)
             token = activity_api._current_context.set(ctx)
             try:
-                # Build the activity interceptor chain for this attempt
-                # (DESIGN §6.8): inbound interceptors wrap the invocation,
-                # outbound wraps activity.info()/heartbeat() (installed via
-                # init()). With no configured interceptors this is just the
-                # root, preserving the prior dispatch exactly.
+                # Build the activity interceptor chain for this attempt (DESIGN
+                # §6.8): inbound wraps the invocation, outbound wraps info()/heartbeat().
                 impl: activity_interceptor.ActivityInboundInterceptor = (
                     _RootActivityInbound(ctx, defn.is_async)
                 )
@@ -269,17 +254,12 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
             }
 
         async def run_attempt() -> Dict[str, Any]:
-            # A watchdog loop is needed when there's a heartbeat timeout to
-            # enforce, OR on the queued path to poll for cross-process
-            # cancellation. Otherwise run the activity directly.
+            # A watchdog loop is needed to enforce a heartbeat timeout, or on the
+            # queued path to poll for cross-process cancellation; else run directly.
             if heartbeat_timeout is None and not queued:
                 return await call_user_activity()
-            # Heartbeat-timeout watchdog (Temporal's liveness contract): an
-            # attempt that stops heartbeating for longer than the timeout
-            # fails with TimeoutType.HEARTBEAT (and retries per policy). The
-            # hung function is marked cancelled — a still-live thread
-            # unwinds at its next heartbeat — and abandoned, like
-            # start-to-close enforcement.
+            # Heartbeat-timeout watchdog: an attempt that stops heartbeating past the
+            # timeout fails with TimeoutType.HEARTBEAT, marking the function cancelled.
             task = asyncio.ensure_future(call_user_activity())
             poll = (
                 max(0.05, float(heartbeat_timeout) / 4)
@@ -289,9 +269,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
             try:
                 return await _watch(task, poll)
             except asyncio.CancelledError:
-                # asyncio.wait does NOT cancel what it waits on: propagate
-                # explicitly so TRY_CANCEL / start-to-close actually stop an
-                # async activity function rather than orphaning it.
+                # asyncio.wait does NOT cancel what it waits on: propagate explicitly
+                # so TRY_CANCEL / start-to-close stop the async function, not orphan it.
                 task.cancel()
                 raise
 
@@ -303,10 +282,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
                 if done:
                     return task.result()
                 if queued and await _cancel_requested():
-                    # Cross-process cancellation: deliver it into the activity
-                    # (its next heartbeat raises; cancelling the task unwinds an
-                    # awaiting async activity now), let its cleanup run, then
-                    # report the attempt as cancelled.
+                    # Cross-process cancellation: deliver it into the activity, let
+                    # cleanup run, then report the attempt as cancelled.
                     ctx.cancelled.set()
                     task.cancel()
                     try:
@@ -320,15 +297,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
                         "ended_at": time_mod.time(),
                     }
                 if not queued and defn.is_async and ctx.cancelled.is_set():
-                    # Local cancellation requested by the workflow (handle.cancel()
-                    # / scope cancel set ctx.cancelled via _request_cancel). A
-                    # *sync* activity observes that through activity.heartbeat();
-                    # an *async* one awaiting something other than a heartbeat
-                    # (asyncio.Future, sleep, a child) must be cancelled at the
-                    # task level, or it never unwinds and the heartbeat watchdog
-                    # below fires a spurious HEARTBEAT timeout. The user may catch
-                    # the CancelledError and return a value (preserved, as in
-                    # Temporal).
+                    # Local cancellation: an async activity must be cancelled at the
+                    # task level or it never unwinds (a caught-and-returned value is kept).
                     task.cancel()
                     try:
                         return await task
@@ -356,14 +326,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
                         }
 
         async def run_to_deadline() -> Dict[str, Any]:
-            # Enforce start-to-close OURSELVES rather than via asyncio.wait_for.
-            # wait_for returns the coroutine's value if it swallows the timeout
-            # cancellation — an activity that catches CancelledError and returns
-            # would thereby defeat the deadline and be recorded as a success.
-            # The deadline is authoritative: once it passes we cancel + abandon
-            # the attempt and discard whatever it later produces, so a
-            # start-to-close timeout is always surfaced (matching the
-            # heartbeat-timeout watchdog above and Temporal's hard enforcement).
+            # Enforce start-to-close ourselves: the deadline is authoritative, so once
+            # it passes we cancel and abandon the attempt and discard any late result.
             if start_to_close is None:
                 return await run_attempt()
             task = asyncio.ensure_future(run_attempt())
@@ -371,7 +335,7 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
                 done, _ = await asyncio.wait({task}, timeout=start_to_close)
             except asyncio.CancelledError:
                 # External cancellation (workflow cancel / scope): propagate the
-                # cancel into the attempt like wait_for would, then re-raise.
+                # cancel into the attempt, then re-raise.
                 task.cancel()
                 raise
             if done:
@@ -384,17 +348,12 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
             raise asyncio.TimeoutError
 
         try:
-            # User exceptions (including user-raised TimeoutError) are
-            # converted inside call_user_activity, so a TimeoutError here is
-            # unambiguously the start-to-close enforcement firing.
+            # User exceptions (including user-raised TimeoutError) are converted inside
+            # call_user_activity, so a TimeoutError here is the start-to-close deadline.
             return await run_to_deadline()
         except activity_api_complete_async_error():
-            # raise_complete_async(): the function returned, but the
-            # activity stays pending until externally completed (the
-            # checkpointed marker makes the parked state replay-stable).
-            # started_at lets the interpreter arm the *remaining*
-            # start-to-close for the parked wait (per-attempt, as in
-            # Temporal).
+            # raise_complete_async(): the function returned but the activity stays
+            # pending until externally completed; started_at arms the parked wait.
             return {
                 "async_pending": True,
                 "started_at": attempt_started_at,

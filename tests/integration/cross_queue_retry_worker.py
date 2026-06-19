@@ -1,4 +1,4 @@
-"""Subprocess worker for cross-queue activity *retry* tests (Phase 2, §6.1.2).
+"""Subprocess worker for cross-queue activity *retry* tests (§6.1.2).
 
 The retry loop lives on the activity worker (Design A): a queued activity that
 fails retries on its own worker, with durable backoff, until success or the

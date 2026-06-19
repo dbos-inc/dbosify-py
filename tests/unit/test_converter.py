@@ -145,8 +145,7 @@ def test_datetime_roundtrip() -> None:
 
 def test_datetime_parses_zulu_suffix() -> None:
     # A trailing "Z" is valid ISO-8601 but datetime.fromisoformat rejects it
-    # before Python 3.11; value_to_type falls back to dateutil there (mirrors
-    # temporalio). This must parse on every supported version.
+    # before Python 3.11; value_to_type falls back to dateutil there, like temporalio.
     parsed = value_to_type(datetime, "2020-01-02T03:04:05Z")
     assert parsed == datetime(2020, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 

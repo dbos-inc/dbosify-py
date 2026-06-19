@@ -1,7 +1,7 @@
 """Client-side interceptors, mirroring ``temporalio.client`` interceptors
 (``temporalio/client/_interceptor.py``).
 
-This is the Phase-3 surface. The classes are re-exported from
+The classes are re-exported from
 :py:mod:`dbosify.client` so user code extends
 ``dbosify.client.Interceptor`` exactly as it would
 ``temporalio.client.Interceptor``.
@@ -126,11 +126,8 @@ class StartWorkflowInput:
     links: Sequence[Any]
     request_id: Optional[str]
     versioning_override: Optional[Any] = None
-    # An update request as ``(envelope, topic, idempotency_key)`` delivered by
-    # the start itself — bundled into the enqueue transaction on a fresh start,
-    # or sent to the attached run under USE_EXISTING (see
-    # ``Client._start_workflow_impl``). Set by update-with-start. Internal; not
-    # part of the temporalio interceptor surface.
+    # An update request as ``(envelope, topic, idempotency_key)`` delivered by the
+    # start itself (update-with-start). Internal; not part of the temporalio surface.
     with_start_update: Optional[Tuple[Any, str, str]] = None
 
 
@@ -213,10 +210,8 @@ class StartWorkflowUpdateInput:
     ret_type: Optional[type]
     rpc_metadata: Mapping[str, Any]
     rpc_timeout: Optional[timedelta]
-    # When set, this is an update-with-start: the terminal starts the workflow
-    # (delivering this update atomically with a fresh run, or to the attached
-    # run) instead of sending to an already-resolved run. Carries the
-    # WithStartWorkflowOperation. Internal; not part of the temporalio surface.
+    # When set, an update-with-start: the terminal starts the workflow (delivering
+    # this update with the run). Internal; not part of the temporalio surface.
     with_start_op: Optional[Any] = None
 
 

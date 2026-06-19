@@ -45,9 +45,8 @@ _SYSTEM_FIELDS = {
     "closetime": "CloseTime",
 }
 
-# Temporal ExecutionStatus name -> our enum. Accepts both Temporal's PascalCase
-# spelling (``Running``, ``ContinuedAsNew``) and our SCREAMING_SNAKE enum names,
-# plus the British ``Cancelled`` for forgiveness.
+# Temporal ExecutionStatus name -> our enum. Accepts Temporal's PascalCase and our
+# SCREAMING_SNAKE names, plus the British ``Cancelled`` for forgiveness.
 _STATUS_BY_NAME: Dict[str, WorkflowExecutionStatus] = {
     "running": WorkflowExecutionStatus.RUNNING,
     "completed": WorkflowExecutionStatus.COMPLETED,
@@ -62,8 +61,7 @@ _STATUS_BY_NAME: Dict[str, WorkflowExecutionStatus] = {
 }
 
 # Each Temporal status -> the DBOS status string(s) that can hold it. The four
-# ERROR-family statuses all collapse onto DBOS ``ERROR`` and are only told apart
-# by the recorded failure marker, so they need a post-filter (see post_filter).
+# ERROR-family statuses all collapse onto DBOS ``ERROR`` and need a post-filter.
 _TEMPORAL_TO_DBOS: Dict[WorkflowExecutionStatus, Tuple[str, ...]] = {
     WorkflowExecutionStatus.RUNNING: ("PENDING", "ENQUEUED", "DELAYED"),
     WorkflowExecutionStatus.COMPLETED: ("SUCCESS",),
@@ -168,12 +166,8 @@ class VisibilityQuery:
     type_not_in: List[str] = field(default_factory=list)
     workflow_ids: Optional[List[str]] = None
     workflow_id_prefix: Optional[str] = None
-    # ``WorkflowId = X``: matches the whole run chain — X and its run-chain
-    # successors X--r1, X--r2, ... (continue-as-new / retry / cron / id-reuse) —
-    # mirroring Temporal, where a WorkflowId query returns every run of that
-    # workflow id. Resolved as a DBOS workflow-id prefix plus a post-filter that
-    # keeps only exact-X and X--r{n} rows (RUN_SEPARATOR is reserved, so no other
-    # user id can collide).
+    # ``WorkflowId = X``: matches the whole run chain (X and its successors X--r{n}),
+    # as in Temporal. A DBOS prefix query plus a post-filter narrows to the chain.
     workflow_id_chain: Optional[str] = None
     statuses: Optional[Set[WorkflowExecutionStatus]] = None
     start_time_lo: Optional[datetime] = None
@@ -196,13 +190,11 @@ class VisibilityQuery:
             filters["workflow_ids"] = self.workflow_ids
         if self.workflow_id_prefix is not None:
             # A list (not a bare str) so it's uniform across both DBOS calls:
-            # list_workflows_async accepts str|list, but get_workflow_aggregates
-            # iterates the value, so a bare str there would match per-character.
+            # get_workflow_aggregates iterates it, so a bare str matches per-char.
             filters["workflow_id_prefix"] = [self.workflow_id_prefix]
         if self.workflow_id_chain is not None:
-            # The chain match runs as a DBOS prefix query (the base id is a
-            # prefix of every run X--r{n}); post_filter() narrows those rows back
-            # to the chain (exact-X or X--r{n}).
+            # The chain match runs as a DBOS prefix query (base id prefixes every
+            # X--r{n}); post_filter() narrows those rows back to the chain.
             filters.setdefault("workflow_id_prefix", [self.workflow_id_chain])
         if self.statuses is not None:
             dbos_statuses: List[str] = []
@@ -245,8 +237,7 @@ class VisibilityQuery:
         def predicate(row: WorkflowStatus) -> bool:
             if chain is not None:
                 # Keep only the chain: exact base id or a run-chain successor
-                # X--r{n} (the prefix query may also match unrelated X-prefixed
-                # ids, which RUN_SEPARATOR keeps distinct).
+                # X--r{n} (RUN_SEPARATOR keeps unrelated X-prefixed ids distinct).
                 assert chain_prefix is not None
                 if not (
                     row.workflow_id == chain or row.workflow_id.startswith(chain_prefix)

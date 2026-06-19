@@ -58,9 +58,8 @@ SAMPLES = {
         package="context_propagation",
         # Starter logs the workflow result (via logging -> stderr).
         expect_output="Workflow result: Hello, Temporal",
-        # Proof of propagation: the activity, on the worker, logs the user id
-        # carried from the client header ("None" here would mean the header
-        # never reached the activity). Exercises interceptor header propagation end-to-end.
+        # Proof of propagation: the activity logs the user id carried from the
+        # client header, exercising interceptor header propagation end-to-end.
         worker_expect="Activity called by user some-user",
     ),
     "polling_frequent": Sample(
@@ -78,28 +77,22 @@ SAMPLES = {
     ),
     "custom_decorator": Sample(
         package="custom_decorator",
-        # An auto-heartbeat activity decorator (a background task heartbeats)
-        # keeps a long async activity alive so a signal can cancel it cleanly
-        # rather than it dying of heartbeat timeout. Regression-guarded by
-        # tests/integration/test_heartbeat_background_task.py.
+        # An auto-heartbeat activity decorator keeps a long async activity alive
+        # so a signal can cancel it cleanly rather than it dying of heartbeat timeout.
         expect_output="Result:",
         starter_timeout=30,
     ),
     "batch_sliding_window": Sample(
         package="batch_sliding_window",
         # Sliding-window batch: 90 records via ~18 continue-as-new hops + 90
-        # child workflows, driven by runtime set_signal_handler /
-        # set_query_handler. Runs long at our per-write latency (deviation #7):
-        # ~68s locally, so a generous budget for slower CI.
+        # child workflows. Runs ~68s locally, so a generous budget for slower CI.
         expect_output="Workflow completed successfully!",
         starter_timeout=180,
     ),
     "resource_pool": Sample(
         package="resource_pool",
         # A long-lived pool lends resources to user workflows via cross-workflow
-        # signals, registered with runtime get/set_signal_handler. No success
-        # print — the starter completing (exit 0) after terminating the pool is
-        # the proof.
+        # signals. No success print — the starter exiting 0 is the proof.
         starter_timeout=60,
     ),
     # ---- skip: not runnable — a fundamental deviation the sample's own code
@@ -142,8 +135,7 @@ SAMPLES = {
         skip="requires the sample's own third-party dependency (dacite); the "
         "harness rewrites imports but does not install per-sample deps",
     ),
-    # ---- skip: a Temporal feature that is a non-goal / unsupported (the
-    #      sample's own code depends on it; documents our coverage gaps) -------
+    # ---- skip: sample depends on a non-goal/unsupported Temporal feature (coverage gaps) ----
     # Nexus — non-goal (DESIGN §1, DEVIATIONS no-server).
     "hello_nexus": Sample(
         package="hello_nexus", skip="Nexus is a non-goal (DEVIATIONS no-server)"
@@ -159,7 +151,8 @@ SAMPLES = {
     ),
     # Metrics + telemetry runtime — not implemented (DEVIATIONS no-metrics).
     "custom_metric": Sample(
-        package="custom_metric", skip="metrics are not implemented (DEVIATIONS no-metrics)"
+        package="custom_metric",
+        skip="metrics are not implemented (DEVIATIONS no-metrics)",
     ),
     "prometheus": Sample(
         package="prometheus",
@@ -206,8 +199,7 @@ SAMPLES = {
         skip="multi-version-worker walkthrough using protobuf + AUTO_UPGRADE; we "
         "support PINNED only (DEVIATIONS worker-versioning)",
     ),
-    # ---- skip: the sample's structure / a non-Temporal-feature dependency
-    #      makes it un-runnable in this harness --------------------------------
+    # ---- skip: sample structure / non-Temporal dependency makes it un-runnable here ----
     # Patching across worker code versions (like hello_patch) — not a single run.
     "patching": Sample(
         package="patching",
@@ -215,17 +207,12 @@ SAMPLES = {
         "--query-workflow across swapped worker code versions); not a single run. "
         "patched()/deprecate_patch() themselves are supported",
     ),
-    # Replay — exercises our Replayer (replay_workflows is supported) but needs
-    # WorkflowExecutionAsyncIterator.map_histories (missing) and the sample's
-    # same-id reuse across three workflow types.
+    # Replay — exercises our Replayer (replay_workflows is supported) but the
+    # sample's replayer.py is client-only.
     "replay": Sample(
         package="replay",
-        # The sample's replayer.py is client-only, but our Replayer re-executes a
-        # run's checkpoints through a *running Worker's* DBOS runtime — it
-        # requires a Worker for the types in the process (DEVIATIONS replay), unlike
-        # temporalio's worker-less in-sandbox Replayer. (The pieces it also needs
-        # — WorkflowId= returning the whole run chain, and map_histories — are
-        # now supported.)
+        # Our Replayer re-executes checkpoints through a running Worker's DBOS runtime,
+        # so it needs a Worker for the types (DEVIATIONS replay), unlike temporalio's.
         skip="our Replayer needs a Worker for the types in the process; the "
         "sample's replayer.py is client-only (DEVIATIONS replay)",
     ),
@@ -254,12 +241,8 @@ SAMPLES = {
 # samples-python dirs covered by the other conformance suites (whole corpora).
 _COVERED_ELSEWHERE = {"hello", "message_passing", "activity_worker", "schedules"}
 
-# Dirs intentionally NOT conformance-tested: each exercises a third-party
-# integration (LLM / agent frameworks, an error tracker, a cloud export, an
-# alternative event loop) rather than a Temporal feature. Listed so the matrix
-# stays machine-checked-complete (the guard below fails on any new samples-python
-# dir until it is classified) without cluttering the suite with un-runnable
-# entries.
+# Dirs intentionally NOT conformance-tested: each exercises a third-party integration
+# rather than a Temporal feature. Listed so the classification guard stays complete.
 _NOT_CONFORMANCE_TESTABLE = {
     "bedrock",
     "openai_agents",

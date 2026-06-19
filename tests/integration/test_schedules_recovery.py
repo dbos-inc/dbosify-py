@@ -54,9 +54,6 @@ def test_sigkill_mid_scheduled_action(tmp_path: Path) -> None:
     # The schedule resumed firing after the crash (distinct occurrences beyond
     # the one in flight at kill time).
     assert len(counts) >= 2, occurrences
-    # The deterministic per-occurrence id bars a twin / replay storm: no
-    # occurrence is recorded more than twice — the original write plus at most a
-    # single at-least-once recovery re-run for an action that was mid-activity
-    # (side-effect done, step not yet checkpointed) at the kill (DEVIATIONS failover).
-    # A real twin or replay loop would push some id past two.
+    # The deterministic per-occurrence id bars a twin / replay storm: no occurrence
+    # is recorded more than twice (original write + one at-least-once re-run, DEVIATIONS failover).
     assert max(counts.values()) <= 2, occurrences

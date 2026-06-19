@@ -475,9 +475,8 @@ class ScheduleHandle:
         )
 
     async def _update_impl(self, input: UpdateScheduleInput) -> None:
-        # Read the row directly rather than via describe() so a
-        # describe_schedule interceptor is not invoked as a side effect of an
-        # update.
+        # Read the row directly rather than via describe(), so a describe_schedule
+        # interceptor isn't invoked as a side effect of an update.
         row = await self._client._dbos_client.get_schedule_async(self.id)
         if row is None:
             raise RuntimeError(f"Schedule {self.id!r} not found")
@@ -603,10 +602,8 @@ class ScheduleHandle:
         await self._client._dbos_client.delete_schedule_async(self.id)
 
 
-# ---------------------------------------------------------------------------
-# Context (de)serialization — the schedule's DBOS ``context`` payload. The
-# fire dispatcher reads ``context["action"]`` directly (see dispatcher.py).
-# ---------------------------------------------------------------------------
+# Context (de)serialization — the schedule's DBOS ``context`` payload; the fire
+# dispatcher reads ``context["action"]`` directly (see dispatcher.py).
 
 
 def _resolve_args(arg: Any, args: Sequence[Any]) -> List[Any]:
@@ -791,11 +788,8 @@ def _deserialize_priority(raw: Optional[Mapping[str, Any]]) -> Optional[Priority
 
 async def _action_from_context(ctx: Mapping[str, Any]) -> ScheduleActionStartWorkflow:
     a = ctx["action"]
-    # Fully round-trip the action: memo + search attributes are decoded back
-    # from the stored attributes (untyped attributes come back as typed, as in
-    # temporalio); the remaining fields are plain config. So describe()/update()
-    # reconstruct an action that re-encodes to the same stored form. ``attributes``
-    # is the one optional key — absent when the action has no memo/search attrs.
+    # Fully round-trip the action so describe()/update() re-encode to the same
+    # stored form (untyped search attributes come back as typed, as in temporalio).
     memo, typed_sa = await _attributes.decode_attributes(a.get("attributes"))
     serialized_retry = a["retry_policy"]
     return ScheduleActionStartWorkflow(
@@ -998,10 +992,8 @@ async def create_schedule_row(
     action_attributes = await encode_action_attributes(schedule.action)
     if action_attributes is not None:
         context["action"]["attributes"] = action_attributes
-    # Carried in the schedule's DBOS context: cron gates overlap handling
-    # (recurring schedules only); created_at backs describe()'s
-    # ScheduleInfo.created_at; schedule_id is what DBOS tags each fire's status
-    # with, so the dispatcher finds prior occurrences by an indexed lookup.
+    # Carried in the DBOS context: cron gates overlap handling, created_at backs
+    # describe(), schedule_id tags each fire so the dispatcher finds prior occurrences.
     context["cron"] = cron
     context["created_at"] = datetime.now(timezone.utc).isoformat()
     context["schedule_id"] = id

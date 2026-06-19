@@ -29,11 +29,8 @@ from typing import (
 
 from ..converter import DataConverter, Payload
 
-# What gets embedded in checkpoints for a user value: a small dict (DESIGN
-# §6.9 envelope), NOT a raw Payload. This keeps DBOS observability (Conductor,
-# list_workflows) readable — a json/plain payload with no codec is stored as
-# its *inline* JSON value (the actual fields show up in the dashboard), and
-# only genuinely-binary or codec-transformed bytes fall back to base64.
+# Checkpoints embed a user value as a small dict (DESIGN §6.9 envelope), not a raw
+# Payload: codec-less json/plain inlines its JSON; binary/codec bytes use base64.
 _active_converter: DataConverter = DataConverter.default
 
 
@@ -108,10 +105,8 @@ async def decode_values(
     if not items:
         return items
     payloads = [_payload_from_dict(v) for v in items]
-    # Apply hints per position (like temporalio's zip_longest): slicing covers
-    # both extra hints (default-valued params, called with fewer args) and the
-    # short/absent case (extra payloads decode hint-free). A whole-list length
-    # check would instead drop ALL hints whenever the arity differs.
+    # Apply hints per position (like temporalio's zip_longest): slicing covers both
+    # extra hints (fewer args than params) and extra payloads (which decode hint-free).
     hints = list(type_hints)[: len(payloads)] if type_hints is not None else None
     return await _active_converter.decode(payloads, hints)
 
@@ -133,10 +128,10 @@ async def decode_value(value: Any, type_hint: Optional[type] = None) -> Any:
 def encode_values_sync(
     values: Sequence[Any], converter: Optional[DataConverter] = None
 ) -> List[Dict[str, Any]]:
-    """Payload-only (no codec) encode for the rare sync caller — the Phase-0
-    dispatcher helpers and failure-detail encoding. Codecs are async, so they
-    do not apply here. ``converter`` overrides the process converter (e.g. a
-    per-handle async-activity converter encoding failure details)."""
+    """Payload-only (no codec) encode for the rare sync caller — the dispatcher
+    helpers and failure-detail encoding. Codecs are async, so they do not apply
+    here. ``converter`` overrides the process converter (e.g. a per-handle
+    async-activity converter encoding failure details)."""
     conv = converter if converter is not None else _active_converter
     payloads = conv.payload_converter.to_payloads(list(values))
     return [_payload_to_dict(p, inline_json=True) for p in payloads]
@@ -149,23 +144,14 @@ def encode_value_sync(value: Any) -> Dict[str, Any]:
 
 
 def decode_value_sync(value: Any, type_hint: Optional[type] = None) -> Any:
-    """Payload-only (no codec) decode for the Phase-0 dispatcher helpers."""
+    """Payload-only (no codec) decode for the dispatcher helpers."""
     payload = _payload_from_dict(value)
     hints = [type_hint] if type_hint is not None else None
     return _active_converter.payload_converter.from_payloads([payload], hints)[0]
 
 
-# ---------------------------------------------------------------------------
-# Headers (interceptor header-propagation channel).
-#
-# At the interceptor boundary a header value is a :py:class:`Payload` (as in
-# temporalio — the user encodes/decodes it with ``workflow.payload_converter``/
-# ``activity.payload_converter``). On the wire (run meta, inbox envelopes,
-# activity step meta) it is the same small payload dict every other value uses,
-# so it checkpoints as JSON. A configured ``PayloadCodec`` runs on header bytes
-# too (like args), so an encrypting codec protects header values; both are async
-# and called only on the real loop, at the same boundaries args are encoded.
-# ---------------------------------------------------------------------------
+# Headers (interceptor header-propagation channel): a boundary Payload becomes the
+# same payload dict on the wire (checkpoints as JSON); a PayloadCodec can encrypt it.
 
 
 async def encode_headers(headers: Optional[Mapping[str, Payload]]) -> Dict[str, Any]:

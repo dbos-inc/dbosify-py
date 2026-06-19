@@ -1,9 +1,9 @@
 """Activity author API, mirroring ``temporalio.activity``.
 
-Phase 1 surface: the ``defn`` decorator plus the runtime context functions
-(``info``, ``heartbeat``, ``is_cancelled``, ``wait_for_cancelled_sync``,
-``in_activity``). The context is set by the worker's attempt step for real
-runs and by ``dbosify.testing.ActivityEnvironment`` for unit tests.
+The ``defn`` decorator plus the runtime context functions (``info``,
+``heartbeat``, ``is_cancelled``, ``wait_for_cancelled_sync``, ``in_activity``).
+The context is set by the worker's attempt step for real runs and by
+``dbosify.testing.ActivityEnvironment`` for unit tests.
 
 ``heartbeat`` raises CancelledError when cancellation of the activity has
 been requested (how sync activities observe cancellation, as in Temporal)
@@ -141,9 +141,7 @@ def defn(
         from ._internal.conversion import type_hints_from_func
 
         # A callable-class activity carries @activity.defn on the class, but its
-        # signature and async-ness live on __call__. The worker registers an
-        # *instance*; the dispatcher rebinds defn.fn to it (so calling the defn
-        # invokes __call__). Introspect __call__ for everything but the marker.
+        # signature and async-ness live on __call__: introspect that, not the class.
         introspect: Callable[..., Any] = fn
         if inspect.isclass(fn):
             call = getattr(fn, "__call__", None)
@@ -176,8 +174,8 @@ def defn(
 
 @dataclass(frozen=True)
 class Info:
-    """Information about the running activity (Phase 1 subset of
-    temporalio's ``activity.Info``; field order matches theirs).
+    """Information about the running activity (a subset of temporalio's
+    ``activity.Info``; field order matches theirs).
 
     Constructed by the SDK, never by users — the defaults exist only for
     construction convenience.
@@ -236,38 +234,28 @@ class _Context:
     last_heartbeat_at: float = field(default_factory=time_mod.monotonic)
     # (workflow_run_id, seq) for real runs; None in ActivityEnvironment.
     attempt_key: Optional[Tuple[str, int]] = None
-    # Head of the activity *outbound* interceptor chain (an
-    # ActivityOutboundInterceptor), installed per attempt by the worker
-    # (DESIGN §6.8). ``info()``/``heartbeat()`` route through it. Left None by
-    # ActivityEnvironment, where the functions use the root behavior directly.
+    # Head of the activity *outbound* interceptor chain, installed per attempt
+    # (DESIGN §6.8); ``info()``/``heartbeat()`` route through it. None in tests.
     outbound: Optional[Any] = None
-    # A Temporal client set explicitly by ``ActivityEnvironment(client=...)``. On
-    # real worker runs this is None and ``client()`` uses ``worker_state`` below.
+    # A Temporal client set explicitly by ``ActivityEnvironment(client=...)``;
+    # None on real worker runs, where ``client()`` uses ``worker_state`` below.
     client: Optional["Client"] = None
-    # The running Worker's activity state (a per-Worker shutdown event + lazily
-    # built client). Set on real activity attempts; None in ActivityEnvironment
-    # and the in-process dispatcher harness — which then fall back to ``client``
-    # and the fresh ``worker_shutdown_event`` below.
+    # The running Worker's activity state (per-Worker shutdown event + lazy
+    # client). None in ActivityEnvironment / the dispatcher harness.
     worker_state: Optional["_ActivityWorkerState"] = None
     # ActivityEnvironment's own shutdown event (fresh, unset) — consulted only
     # when ``worker_state`` is None, so a test never observes a worker's flag.
     worker_shutdown_event: threading.Event = field(default_factory=threading.Event)
 
 
-# Worker-process state for in-flight activity attempts, keyed by
-# (workflow_run_id, seq). `_live_attempts` lets the interpreter deliver
-# cancellation into a running (possibly sync, threaded) attempt;
-# `_heartbeat_store` carries last-heartbeat details to the next retry
-# attempt (in-memory: Temporal persists these server-side, throttled — a
-# durable write per heartbeat is the wrong trade on this hot path);
-# `_cancel_requested_keys` covers cancels that land between attempts.
+# Worker-process state for in-flight attempts, keyed by (workflow_run_id, seq):
+# live attempts (for cancel delivery), last-heartbeat details, between-attempt cancels.
 _live_attempts: Dict[Tuple[str, int], "_Context"] = {}
 _heartbeat_store: Dict[Tuple[str, int], Sequence[Any]] = {}
 _cancel_requested_keys: "set[Tuple[str, int]]" = set()
 
-# How often the async waiters re-check their (threading) event. Cancellation and
-# worker shutdown are rare terminal signals, so a coarse poll avoids tying up a
-# shared-pool thread on a blocking wait; the latency is acceptable.
+# How often the async waiters re-check their (threading) event. A coarse poll for
+# rare terminal signals avoids tying up a shared-pool thread; latency is acceptable.
 _EVENT_POLL_SECONDS = 0.1
 
 
@@ -309,8 +297,7 @@ class _ActivityWorkerState:
         self._lock = threading.Lock()
         self._closed = False
         # Worker(max_concurrent_activities=...): caps concurrent activity-step
-        # execution in this process. The semaphore is created lazily on the
-        # worker's running loop (first activity), so all attempts share one.
+        # execution. The semaphore is built lazily on the loop, shared by all attempts.
         self._activity_concurrency = activity_concurrency
         self._activity_semaphore: Optional[asyncio.Semaphore] = None
         # Worker(activity_executor=...): the executor sync activities run on.
@@ -321,11 +308,8 @@ class _ActivityWorkerState:
         ``max_concurrent_activities`` (a no-op when unset)."""
         if self._activity_concurrency is None:
             return nullcontext()
-        # Lazily built on first use, and intentionally *not* lock-guarded (unlike
-        # client()): every activity attempt for a worker dispatches on the one
-        # DBOS event loop, and this check-then-set has no await between the test
-        # and the assignment, so two attempts can never race to create two
-        # semaphores. The Semaphore must also be created on the loop it's awaited.
+        # Lazily built, not lock-guarded (unlike client()): all attempts share the
+        # one DBOS loop and this check-then-set has no await, so two can't race.
         if self._activity_semaphore is None:
             self._activity_semaphore = asyncio.Semaphore(self._activity_concurrency)
         return self._activity_semaphore
@@ -342,11 +326,8 @@ class _ActivityWorkerState:
             if self._closed:
                 return None
             if self._client is None:
-                # Match the worker's DBOS connection exactly: forward every URL
-                # key and the system schema (namespacing rides on
-                # ``dbos_system_schema``). ``database_url`` is DBOS's deprecated
-                # *application*-DB alias — pass it through and let DBOSClient
-                # derive the system DB rather than using it as system_database_url.
+                # Match the worker's DBOS connection: forward every URL key and the
+                # system schema. ``database_url`` is the deprecated *application*-DB alias.
                 kwargs: Dict[str, Any] = {
                     "system_database_url": self._config.get("system_database_url"),
                     "database_url": self._config.get("database_url"),
@@ -373,9 +354,8 @@ class _ActivityWorkerState:
         return client
 
 
-# The running Worker's activity state (one Worker per process). Set at worker
-# construction, detached on teardown. Activity attempts read it at dispatch and
-# capture a reference on their ``_Context.worker_state``.
+# The running Worker's activity state (one per process). Set at construction,
+# detached on teardown; attempts capture a reference on their ``worker_state``.
 _active: Optional[_ActivityWorkerState] = None
 
 
@@ -388,9 +368,8 @@ def _on_worker_start(
     """Called by the Worker at construction: install a fresh per-worker activity
     state (new shutdown event, no client yet) and return it."""
     global _active
-    # Defensive: a leftover state should already be torn down (one Worker per
-    # process), but if a prior Worker was constructed and never fully run, close
-    # and dispose it so its client (if any) can't leak.
+    # Defensive: a prior Worker constructed but never fully run leaves a state;
+    # close and dispose it so its client (if any) can't leak.
     if _active is not None:
         stale = _active.close()
         if stale is not None:
@@ -431,10 +410,8 @@ def _context_shutdown_event(ctx: "_Context") -> threading.Event:
 def _register_attempt(key: Tuple[str, int], ctx: "_Context") -> None:
     _live_attempts[key] = ctx
     if key in _cancel_requested_keys:
-        # Consume the marker: it must survive until registration because
-        # DBOS runs step bodies through its own task/thread machinery — the
-        # attempt function can start (detached) AFTER the workflow side
-        # cancelled our waiter task and finished its cleanup.
+        # Consume the marker: it must survive until registration, since the
+        # attempt can start (detached) after the workflow side cancelled and cleaned up.
         ctx.cancelled.set()
         _cancel_requested_keys.discard(key)
 
@@ -520,10 +497,8 @@ def _root_heartbeat(ctx: _Context, *details: Any) -> None:
     ctx.last_heartbeat = details
     ctx.last_heartbeat_at = time_mod.monotonic()
     if ctx.cancelled.is_set():
-        # Raise BEFORE recording to the cross-attempt store: a cancelled
-        # attempt's final beat must not re-populate state the workflow side
-        # already cleaned up (and its details could never be read anyway —
-        # the activity ends cancelled).
+        # Raise BEFORE recording to the cross-attempt store: a cancelled attempt's
+        # final beat must not re-populate state the workflow side already cleaned up.
         raise exceptions.CancelledError("Activity cancelled")
     if ctx.attempt_key is not None:
         _heartbeat_store[ctx.attempt_key] = list(details)
@@ -649,11 +624,8 @@ def _make_info(meta: dict[str, Any]) -> Info:
     task_token = b""
     if seq is not None:
         heartbeat_details = tuple(_heartbeat_store.get((run_id, int(seq)), ()))
-        # An opaque structured token (workflow ids and activity ids may
-        # contain almost anything, so no string separator is safe). On the
-        # queued path it also carries the activity workflow id ("qwf"), so an
-        # AsyncActivityHandle delivers completion to that workflow's recv rather
-        # than the parent run's inbox (§6.1.2).
+        # An opaque structured token (no string separator is safe). On the queued
+        # path it carries the activity workflow id ("qwf") so completion routes there (§6.1.2).
         token: dict[str, Any] = {
             "run": run_id,
             "aid": str(meta.get("activity_id", "")),

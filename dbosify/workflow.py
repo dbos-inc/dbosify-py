@@ -1,11 +1,11 @@
 """Workflow author API, mirroring ``temporalio.workflow``.
 
-Phase 0 subset: the definition decorators (``defn``/``run``/``signal``/
-``query``/``update``/``init``) and the runtime functions the interpreter
-backs (``execute_activity``, ``start_activity``, ``sleep``,
-``wait_condition``, deterministic time/randomness, ``info``). Signatures
-mirror temporalio; parameters Phase 0 does not yet honor are accepted and
-ignored with a debug log, never an error.
+The definition decorators (``defn``/``run``/``signal``/``query``/``update``/
+``init``) and the runtime functions the interpreter backs
+(``execute_activity``, ``start_activity``, ``sleep``, ``wait_condition``,
+deterministic time/randomness, ``info``). Signatures mirror temporalio;
+parameters not yet honored are accepted and ignored with a debug log, never
+an error.
 
 Workflow code runs on the deterministic virtual event loop hosted by
 ``_internal/interpreter.py``; every function here resolves the interpreter
@@ -219,7 +219,7 @@ _CT = TypeVar("_CT", bound=type)
 _arg_unset = object()
 
 # The update currently being handled, surfaced by current_update_info(). Set by
-# the interpreter around an update validator/handler (see _internal/interpreter.py).
+# the interpreter around an update validator/handler.
 _current_update_info: "contextvars.ContextVar[UpdateInfo]" = contextvars.ContextVar(
     "__dbosify_current_update_info"
 )
@@ -292,7 +292,7 @@ def defn(
     versioning_behavior: VersioningBehavior = VersioningBehavior.UNSPECIFIED,
 ) -> Union[_CT, Callable[[_CT], _CT]]:
     """Decorator for workflow classes. ``sandboxed`` is accepted and ignored
-    (dbosify runs no sandbox — see the README deviations table).
+    (dbosify runs no sandbox).
 
     ``versioning_behavior`` is accepted and stored. ``PINNED`` is what
     dbosify enforces anyway (DBOS pins recovery/dequeue to the build ID =
@@ -642,19 +642,17 @@ class UpdateInfo:
 
 @dataclass(frozen=True)
 class Info:
-    """Information about the running workflow (Phase 0 subset of
-    temporalio's ``workflow.Info``).
+    """Information about the running workflow (subset of temporalio's
+    ``workflow.Info``).
     """
 
     attempt: int
-    # The previous run of this chain when this run was created by a
-    # continuation (continue-as-new, a workflow retry, or a cron
-    # continuation), else None.
+    # The previous run of this chain when this run was created by a continuation
+    # (continue-as-new, a workflow retry, or a cron continuation), else None.
     continued_run_id: Optional[str] = None
     cron_schedule: Optional[str] = None
-    # Whole-execution (run-chain) timeout: accepted but not enforced (pending,
-    # DEVIATIONS start-params). Surfaced for parity / so user code can read it; always
-    # None today (not threaded into the run meta).
+    # Whole-execution (run-chain) timeout: accepted but not enforced
+    # (DEVIATIONS start-params). Surfaced for parity; always None.
     execution_timeout: Optional[timedelta] = None
     # The run id of the first execution in this run chain (run 0's DBOS id =
     # the Temporal workflow id). Derived from our run-chain id scheme (§6.4).
@@ -669,7 +667,7 @@ class Info:
     # is itself the root). Threaded through child starts (§6.6).
     root: Optional[RootInfo] = None
     # Priority is accepted-and-inert (DBOS queues are FIFO); always the default
-    # instance, which is what temporalio returns for an unset priority.
+    # instance, as temporalio returns for an unset priority.
     priority: Priority = Priority.default
     retry_policy: Optional[RetryPolicy] = None
     run_id: str = ""
@@ -687,9 +685,8 @@ class Info:
     task_timeout: Optional[timedelta] = None
     typed_search_attributes: TypedSearchAttributes = TypedSearchAttributes.empty
     workflow_id: str = ""
-    # The run's initialization time. We have a single start timestamp per run
-    # (no separate "first task" vs "initialization" distinction), so this
-    # equals :py:attr:`start_time`.
+    # The run's initialization time. A single start timestamp per run (no
+    # "first task" vs "initialization" distinction), so equals start_time.
     workflow_start_time: datetime = datetime.fromtimestamp(0)
     workflow_type: str = ""
 
@@ -744,7 +741,8 @@ class Info:
     def is_target_worker_deployment_version_changed(self) -> bool:
         """Whether the target worker deployment version has changed
         (upgrade-on-continue-as-new). Always False in dbosify: workflows
-        are pinned to their build id and never auto-upgrade (DEVIATIONS worker-versioning)."""
+        are pinned to their build id and never auto-upgrade (DEVIATIONS worker-versioning).
+        """
         return False
 
 
@@ -986,9 +984,8 @@ class ChildWorkflowHandle:
             if isinstance(signal, str)
             else getattr(signal, _registry.SIGNAL_ATTR)
         )
-        # The outbound root resolves the chain: the child may have continued as
-        # new, and the signal must reach its *current* run (replay-safe: the
-        # send is checkpointed, so resolution happens once).
+        # The outbound root resolves the chain so the signal reaches the child's
+        # *current* run (replay-safe: the checkpointed send resolves once).
         input = SignalChildWorkflowInput(
             signal=str(name),
             args=_resolve_args(arg, args),
@@ -1051,11 +1048,7 @@ def all_handlers_finished() -> bool:
 
 
 # --- runtime handler accessors -----------------------------------------------
-# Register/inspect handlers imperatively at runtime, an alternative to the
-# @signal/@query/@update decorators. A set overrides any decorator handler of
-# the same name (or the dynamic catch-all). Setting None unsets. For signals,
-# setting a handler immediately delivers any past signals that were buffered
-# with no handler, as in temporalio.
+# Imperative alternative to the decorators: a set overrides any same-name/catch-all handler, None unsets, and a set signal handler drains buffered signals.
 
 
 def get_signal_handler(name: str) -> Optional[Callable[..., Any]]:
@@ -1196,9 +1189,8 @@ def memo_value(
 
     Raises ``KeyError`` if the key is absent and no ``default`` is given.
     """
-    # Check presence first, so a KeyError raised while converting the value to
-    # ``type_hint`` propagates instead of being misread as a missing key and
-    # silently swallowed into ``default``.
+    # Check presence first, so a KeyError raised while converting to
+    # ``type_hint`` propagates instead of being swallowed into ``default``.
     runtime = _runtime()
     if key not in runtime.runtime_memo():
         if default is _arg_unset:
@@ -1325,7 +1317,7 @@ async def sleep(
     duration: Union[float, timedelta], *, summary: Optional[str] = None
 ) -> None:
     """Sleep for the given duration on the deterministic loop (a durable
-    timer). ``summary`` is accepted and ignored in Phase 0.
+    timer). ``summary`` is accepted and ignored.
     """
     seconds = duration.total_seconds() if isinstance(duration, timedelta) else duration
     await asyncio.sleep(seconds)
@@ -1728,11 +1720,11 @@ async def start_child_workflow(
     """Start a child workflow; returns its handle once the start is durable
     (Temporal semantics: resolves on start, not completion).
 
-    Honors arg/args, id (default: ``{parent_id}_{seq}`` — README deviation #5),
-    task_queue, parent_close_policy, cancellation_type, and (matching top-level
-    starts) ``run_timeout`` and ``retry_policy``. ``cron_schedule`` and
-    ``id_reuse_policy`` are accepted-but-pending for children (see the verb
-    audit / DEVIATIONS start-params); the remaining parameters are accepted and ignored
+    Honors arg/args, id (default: ``{parent_id}_{seq}``), task_queue,
+    parent_close_policy, cancellation_type, and (matching top-level starts)
+    ``run_timeout`` and ``retry_policy``. ``cron_schedule`` and
+    ``id_reuse_policy`` are accepted-but-pending for children
+    (DEVIATIONS start-params); the remaining parameters are accepted and ignored
     (debug-logged).
     """
     for key, value in {
@@ -1752,11 +1744,8 @@ async def start_child_workflow(
     from ._internal import ids as _ids
     from ._internal.workflow_interceptor import StartChildWorkflowInput
 
-    # An explicitly-provided id is validated here (an empty/invalid id is a
-    # caller bug — matching client start_workflow); a None id stays auto (the
-    # interpreter derives ``{parent}_{seq}``, README deviation #5). The input's
-    # ``id`` is a non-optional str (temporalio parity), so auto is carried as ""
-    # and the outbound root maps "" back to None.
+    # Explicit id is validated here; a None id stays auto (interpreter derives
+    # ``{parent}_{seq}``, carried as "" since input.id is a non-optional str).
     if id is not None:
         _ids.validate_workflow_id(id)
     input = StartChildWorkflowInput(
@@ -1852,9 +1841,8 @@ async def execute_child_workflow(
     return await handle
 
 
-# Method variants: identical resolution/execution (the worker registered the
-# bound method under the same name). Mirroring temporalio, these lack
-# ``result_type`` — the return type is inferred from the method.
+# Method variants: identical resolution/execution. Mirroring temporalio, these
+# lack ``result_type`` — the return type is inferred from the method.
 def start_activity_method(
     activity: Any,
     arg: Any = _arg_unset,

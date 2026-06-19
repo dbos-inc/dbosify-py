@@ -563,7 +563,7 @@ async def test_activity_interceptor_fires_for_local_activity() -> None:
     assert ("execute_activity", "echo") in events
 
 
-# --- Interceptor x search attributes (the post-merge seam) ----------------
+# --- Interceptor x search attributes --------------------------------------
 
 
 INJECTED_SA = SearchAttributeKey.for_keyword("InjectedByInterceptor")
@@ -590,9 +590,9 @@ class _InjectingClientInterceptor(ClientInterceptor):
 
 async def test_client_interceptor_injects_search_attributes_and_memo() -> None:
     """A client interceptor that mutates StartWorkflowInput.search_attributes /
-    .memo is honored durably: the injected values flow through the relocated
-    _start_workflow_impl into the attributes column and back out via describe().
-    Guards the seam where interceptors meet search attributes."""
+    .memo is honored durably: the injected values flow into the attributes
+    column and back out via describe(). Guards the seam where interceptors meet
+    search attributes."""
     worker = Worker(default_config(), task_queue=TASK_QUEUE, workflows=[QuickGreeter])
     async with worker:
         dbos_client = DBOSClient(system_database_url=system_database_url())
@@ -613,13 +613,13 @@ async def test_client_interceptor_injects_search_attributes_and_memo() -> None:
             dbos_client.destroy()
 
 
-# --- Internal reads must not re-enter the interceptor chain (F1 regression) -
+# --- Internal reads must not re-enter the interceptor chain -
 
 
 async def test_query_reject_condition_does_not_invoke_describe_interceptor() -> None:
     """A reject-condition query reads workflow status internally; it must not
-    fire a describe_workflow interceptor (regression: the relocated _query_impl
-    once called the public describe(), which re-entered the chain)."""
+    fire a describe_workflow interceptor (its status read does not go through
+    the public describe())."""
     events: List[Event] = []
     worker = Worker(
         default_config(),
@@ -660,7 +660,7 @@ async def test_query_reject_condition_does_not_invoke_describe_interceptor() -> 
 
 async def test_schedule_update_does_not_invoke_describe_schedule_interceptor() -> None:
     """ScheduleHandle.update reads the schedule internally; it must not fire a
-    describe_schedule interceptor (same F1 regression on the schedule side)."""
+    describe_schedule interceptor (its read does not go through describe())."""
     events: List[Event] = []
     worker = Worker(default_config(), task_queue=TASK_QUEUE, workflows=[QuickGreeter])
     async with worker:
@@ -687,10 +687,7 @@ async def test_schedule_update_does_not_invoke_describe_schedule_interceptor() -
 
 
 # --- Workflow interceptors + header propagation -----------
-#
-# A context-propagation interceptor (the canonical tracing/baggage shape): a
-# value set once at the client surfaces in the workflow, its activities, its
-# children (and their activities), signal handlers, and across continue-as-new.
+# A context-propagation interceptor (canonical tracing/baggage shape): a value set once at the client surfaces everywhere downstream.
 
 HEADER_KEY = "x-trace"
 
@@ -870,7 +867,7 @@ async def test_header_propagates_to_workflow_activity_and_child() -> None:
 
 async def test_header_channel_inert_without_client_injection() -> None:
     """With the workflow interceptor present but no client injection, headers
-    are empty everywhere — the prior, header-free behavior is preserved."""
+    are empty everywhere."""
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,

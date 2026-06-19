@@ -1,6 +1,6 @@
-"""Unit tests for the memo/search-attribute codec (no Postgres) — the fixes
-from the PR review: temporalio-faithful type guessing, datetime validation,
-malformed-entry tolerance on decode, and the deprecated-form warning."""
+"""Unit tests for the memo/search-attribute codec (no Postgres): temporalio-
+faithful type guessing, datetime validation, malformed-entry tolerance on
+decode, and the deprecated-form warning."""
 
 import warnings
 from datetime import datetime, timezone
@@ -19,8 +19,7 @@ from dbosify.common import (
 
 def test_untyped_bool_guesses_int_like_temporalio() -> None:
     # bool is an int subclass and temporalio checks int before bool, so an
-    # untyped boolean value guesses to Int (the for_bool branch is dead). We
-    # must match that, not "improve" it.
+    # untyped boolean value guesses to Int. We must match that, not "improve" it.
     key = SearchAttributeKey._guess_from_untyped_values("flag", [True])
     assert key is not None
     assert key.indexed_value_type == SearchAttributeIndexedValueType.INT

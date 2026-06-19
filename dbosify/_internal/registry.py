@@ -38,14 +38,12 @@ QUERY_DESC_ATTR = "__temporal_query_description"
 INIT_ATTR = "__temporal_workflow_init"
 ACTIVITY_DEFN_ATTR = "__temporal_activity_definition"
 
-# Sentinel for "no handler marker present": the marker value is the handler
-# name, which is ``None`` for a *dynamic* handler — so absence can't be probed
-# with a plain ``getattr(..., None)`` default.
+# Sentinel for "no handler marker present": the marker value is the handler name,
+# which is ``None`` for a dynamic handler, so a getattr default can't detect it.
 _UNSET = object()
 
-# Marker name for the single dynamic handler in each category (signal/query/
-# update): a ``None`` key in the relevant dict. Mirrors temporalio, where a
-# dynamic handler's definition name is ``None``.
+# The single dynamic handler in each category (signal/query/update) is keyed by
+# ``None``, mirroring temporalio where a dynamic handler's definition name is None.
 
 
 @dataclass(frozen=True)
@@ -92,14 +90,12 @@ class WorkflowDefinition:
     updates: Dict[Optional[str], UpdateDefinition] = field(default_factory=dict)
     init_takes_args: bool = False
     failure_exception_types: Tuple[Type[BaseException], ...] = ()
-    # run() signature hints (from conversion.type_hints_from_func): arg_types
-    # rebuilds typed run arguments from payloads; ret_type lets a local client
-    # infer the result type when none is passed.
+    # run() signature hints: arg_types rebuilds typed run arguments from payloads;
+    # ret_type lets a local client infer the result type when none is passed.
     arg_types: Optional[List[type]] = None
     ret_type: Optional[type] = None
     # @workflow.defn(versioning_behavior=...): stored for parity. PINNED is what
-    # DBOS enforces anyway (recovery/dequeue scoped to application_version);
-    # AUTO_UPGRADE has no DBOS analog (DEVIATIONS worker-versioning).
+    # DBOS enforces; AUTO_UPGRADE has no analog (DEVIATIONS worker-versioning).
     versioning_behavior: Optional[int] = None
 
 
@@ -112,9 +108,8 @@ class ActivityDefinition:
     # activity's typed arguments; ret_type rebuilds its result for the caller.
     arg_types: Optional[List[type]] = None
     ret_type: Optional[type] = None
-    # A *dynamic* activity (catch-all): invoked as ``fn(Sequence[RawValue])``
-    # for any activity type with no exact registration (§6.1.2). ``name`` keeps
-    # the function name for debugging but is never used to route to it.
+    # A *dynamic* activity (catch-all): invoked as ``fn(Sequence[RawValue])`` for
+    # any activity type with no exact registration (§6.1.2). ``name`` is not routed.
     dynamic: bool = False
 
 
@@ -123,10 +118,8 @@ _activities: Dict[str, ActivityDefinition] = {}
 # The single dynamic activity registered with this process, if any.
 _dynamic_activity: Optional[ActivityDefinition] = None
 
-# Temporal type name -> the registered per-type DBOS workflow (`wf:{type}`),
-# populated by dispatcher.register_worker. Lives here (not in dispatcher) so
-# the interpreter can resolve child-workflow dispatch functions without an
-# import cycle.
+# Temporal type name -> the registered per-type DBOS workflow (`wf:{type}`).
+# Lives here so the interpreter can resolve child dispatchers without a cycle.
 _dbos_workflows: Dict[str, Callable[..., Any]] = {}
 
 
@@ -144,10 +137,8 @@ def dbos_workflow_for(name: str) -> Callable[..., Any]:
     return fn
 
 
-# The process-global ``__temporal_activity`` dispatcher (the cross-queue
-# activity path, §6.1.2), registered by ``dispatcher.register_worker``. Stored
-# here (not in activity_workflow) so the interpreter can resolve it for the
-# enqueue without an import cycle, mirroring ``_dbos_workflows`` above.
+# The process-global ``__temporal_activity`` dispatcher (the cross-queue activity
+# path, §6.1.2). Lives here so the interpreter can resolve it without a cycle.
 _activity_dispatcher: Optional[Callable[..., Any]] = None
 
 
@@ -166,8 +157,7 @@ def activity_dispatcher_fn() -> Callable[..., Any]:
 
 
 # Worker-level failure exception types (Worker(workflow_failure_exception_types=...)),
-# merged across workers in this process; checked by the interpreter alongside
-# each definition's own list.
+# merged across workers; checked by the interpreter with each definition's list.
 worker_failure_exception_types: Tuple[Type[BaseException], ...] = ()
 
 
@@ -179,9 +169,8 @@ def add_worker_failure_exception_types(
     worker_failure_exception_types = tuple(merged)
 
 
-# Worker-level activity interceptors (Worker(interceptors=...)). The activity
-# attempt step (activities.py) folds these around each attempt (DESIGN §6.8).
-# Set (not merged): one Worker per process owns the interceptor list.
+# Worker-level activity interceptors (Worker(interceptors=...)); the activity
+# attempt step folds these around each attempt (DESIGN §6.8). One Worker owns them.
 worker_interceptors: Tuple[Any, ...] = ()
 
 
@@ -190,10 +179,8 @@ def set_worker_interceptors(interceptors: Sequence[Any]) -> None:
     worker_interceptors = tuple(interceptors)
 
 
-# The task queue this process's Worker dequeues from (one Worker per process).
-# A workflow always runs on the worker that dequeued it, so this is its task
-# queue — surfaced as workflow.info()/activity.info().task_queue. None when no
-# Worker registered a queue (the in-process Phase-0 dispatcher harness).
+# The task queue this process's Worker dequeues from; a workflow runs on the
+# worker that dequeued it, surfaced as info().task_queue. None when no Worker did.
 worker_task_queue: Optional[str] = None
 
 
@@ -202,9 +189,8 @@ def set_worker_task_queue(task_queue: Optional[str]) -> None:
     worker_task_queue = task_queue
 
 
-# The Temporal namespace this process serves (one per process — it maps to the
-# DBOS system schema, which is process-global). Surfaced as
-# workflow.info()/activity.info().namespace. None when no Worker is registered.
+# The Temporal namespace this process serves (one per process; maps to the DBOS
+# system schema). Surfaced as info().namespace. None when no Worker is registered.
 worker_namespace: Optional[str] = None
 
 
@@ -213,14 +199,8 @@ def set_worker_namespace(namespace: Optional[str]) -> None:
     worker_namespace = namespace
 
 
-# This process's worker deployment NAME, backing
-# workflow.Info.get_current_deployment_version()/get_current_build_id(). Set by
-# the Worker (deployment_config.version.deployment_name, else the DBOS app name);
-# None when no Worker is active (the in-process dispatcher harness) → the
-# accessors return None. The build_id half is NOT stored here: it is read live
-# from the DBOS application_version at access time (the version DBOS actually
-# pins recovery/dequeue to, including a code-hash for auto-versioning), so the
-# surfaced version always equals the enforced one (DEVIATIONS worker-versioning).
+# This process's worker deployment NAME (None when no Worker is active). The build_id
+# half is read live from the DBOS application_version (DEVIATIONS worker-versioning).
 worker_deployment_name: Optional[str] = None
 
 
@@ -265,9 +245,8 @@ def lookup_workflow(name: str) -> WorkflowDefinition:
 
 def register_activity(defn: ActivityDefinition) -> None:
     if defn.dynamic:
-        # A dynamic activity is a fallback only, reachable for any unmatched
-        # activity type — never registered under a name (mirroring temporalio,
-        # where its definition name is None).
+        # A dynamic activity is a fallback for any unmatched type, never
+        # registered under a name (mirroring temporalio, where its name is None).
         global _dynamic_activity
         _dynamic_activity = defn
     else:

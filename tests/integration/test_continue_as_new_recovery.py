@@ -48,9 +48,8 @@ def test_sigkill_mid_chain(tmp_path: Path) -> None:
 
     # The unbound handle resolves the chain's final run.
     assert result == {"result": "chain-done", "status": "COMPLETED"}
-    # Every run executed exactly once across both processes: replayed runs
-    # took their activity from its checkpoint, and the replayed
-    # continue-as-new enqueue re-attached rather than starting a twin.
+    # Every run executed exactly once: replayed runs took their activity from
+    # its checkpoint, and the replayed CAN enqueue re-attached (no twin).
     assert sorted(effects.read_text().splitlines()) == [
         "run0",
         "run1",

@@ -1,6 +1,6 @@
-"""Phase 3 activity round-out: heartbeat-delivered cancellation (sync
-activities), WAIT_CANCELLATION_COMPLETED, heartbeat details across retry
-attempts, and async activity completion.
+"""Activity round-out: heartbeat-delivered cancellation (sync activities),
+WAIT_CANCELLATION_COMPLETED, heartbeat details across retry attempts, and
+async activity completion.
 """
 
 import asyncio
@@ -77,9 +77,8 @@ def stalls_after_one_heartbeat() -> Sequence[Any]:
     info = activity.info()
     if info.attempt == 1:
         activity.heartbeat("p1")
-        # Stop heartbeating: the watchdog must fail this attempt with
-        # TimeoutType.HEARTBEAT. The wait returns once the watchdog marks
-        # the attempt cancelled, letting the thread exit promptly.
+        # Stop heartbeating: the watchdog fails this attempt with
+        # TimeoutType.HEARTBEAT, then the wait returns so the thread exits.
         activity.wait_for_cancelled_sync(30)
         raise CancelledError("unwound")
     return list(info.heartbeat_details)
@@ -150,9 +149,8 @@ class OrphanAtCloseWorkflow:
 
     @workflow.run
     async def run(self, path: str) -> str:
-        # Start but never await: the workflow closes (on the test's signal,
-        # sent only once the activity has provably started) with the
-        # threaded, heartbeating attempt still running.
+        # Start but never await: the workflow closes (on the test's signal, sent
+        # once the activity has started) with the heartbeating attempt running.
         workflow.start_activity(
             heartbeating_with_marker,
             path,
@@ -377,12 +375,8 @@ async def _env() -> AsyncIterator[Client]:
             dbos_client.destroy()
 
 
-# These effects are written cross-process by (sometimes abandoned) activity threads,
-# so the line can lag the triggering action by the cancel-signal/heartbeat round trip.
-# This is a patience bound, not an expected latency: on a healthy run the line is
-# already present and we return immediately; the generous ceiling only absorbs a
-# saturated CI machine (a 10s bound flaked here by ~36ms). The test still requires the
-# line to appear — it just waits longer before giving up.
+# Effects are written cross-process by (sometimes abandoned) activity threads, so the
+# line can lag by a round trip; the generous timeout is a patience bound, not a latency.
 async def _wait_for_file_line(path: Path, line: str, timeout: float = 30.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
@@ -798,9 +792,8 @@ async def test_close_unwinds_orphaned_activities(tmp_path: Path) -> None:
             id="orphan-close",
             task_queue=TASK_QUEUE,
         )
-        # Only close the workflow once the activity is provably running
-        # (on a slow runner the attempt might otherwise be torn down before
-        # its function ever starts — correct, but not the path under test).
+        # Only close the workflow once the activity is provably running (else a
+        # slow runner may tear down the attempt before its function starts).
         await _wait_for_file_line(effects, "started")
         await handle.signal(OrphanAtCloseWorkflow.finish)
         assert await handle.result() == "closed"

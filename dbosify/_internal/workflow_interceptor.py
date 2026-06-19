@@ -1,8 +1,8 @@
 """Workflow-side interceptors, mirroring the workflow portion of
 ``temporalio.worker`` (``temporalio/worker/_interceptor.py``).
 
-This is the Phase-4 surface: workflow inbound/outbound interception. The
-classes are re-exported from :py:mod:`dbosify.worker` so user code
+Workflow inbound/outbound interception. The classes are re-exported from
+:py:mod:`dbosify.worker` so user code
 extends ``dbosify.worker.WorkflowInboundInterceptor`` /
 ``WorkflowOutboundInterceptor`` exactly as it would the ``temporalio.worker``
 ones. A worker interceptor advertises a workflow interceptor by overriding
@@ -23,8 +23,7 @@ The ``*Input`` dataclasses are copied field-for-field from the SDK (DESIGN
 inert. Annotations use our own types or ``Any`` (the parity test checks
 parameter names/kind/default/order, not annotations).
 
-Unlike the always-empty activity/client ``headers`` of Phase 3, these
-``headers`` carry a real value end-to-end: the run's headers reach
+These ``headers`` carry a real value end-to-end: the run's headers reach
 ``ExecuteWorkflowInput``; an inbound message's headers reach the matching
 ``Handle*Input``; and headers set on an outbound ``*Input`` propagate to the
 activity attempt / child run / signalled workflow (header-based context

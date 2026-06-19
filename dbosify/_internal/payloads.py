@@ -2,7 +2,7 @@
 
 The failure envelope is the stable, bidirectional serialization of the
 Temporal exception tree (DESIGN.md §6.3): exception -> plain dict -> equal
-exception. It is used for activity results, workflow results, and (later)
+exception. It is used for activity results, workflow results, and
 child-workflow errors, so reconstruction is exact across processes — pickle
 of exception objects loses ``__cause__`` chains, envelopes don't.
 
@@ -11,8 +11,8 @@ Arbitrary (non-FailureError) exceptions convert to ``ApplicationError`` with
 failure converter.
 
 The input envelope wraps a run's start arguments with per-run metadata when
-there is any (cron chains, workflow retries); plain starts keep passing the
-bare args list, so all pre-envelope checkpoints stay readable. Meta keys:
+there is any (cron chains, workflow retries); plain starts pass the bare args
+list. Meta keys:
 
   ``cron``            cron expression — this run is part of a cron chain
   ``attempt``         workflow-retry attempt, 1-based (absent = 1)
@@ -51,21 +51,14 @@ class RunMeta:
     run_timeout: Optional[float] = None
     last_completion: Optional[Dict[str, Any]] = None
     last_failure: Optional[FailureEnvelope] = None
-    # The encoded DBOS-attributes dict (memo + search attributes, see
-    # _internal/attributes.py). Carried into the run for in-workflow info()/
-    # memo() and forward across chain hops; the durable searchable copy lives in
-    # the DBOS attributes column.
+    # The encoded DBOS-attributes dict (memo + search attributes), carried for
+    # in-workflow info()/memo() and forward across chain hops.
     attributes: Optional[Dict[str, Any]] = None
-    # The run's interceptor headers in wire form (str -> payload dict). Set from
-    # the client start (or a child/continue-as-new), surfaced to workflow
-    # interceptors as ExecuteWorkflowInput.headers. Carried
-    # across cron/retry hops (the same run re-running); continue-as-new sets its
-    # own (an interceptor re-injects them).
+    # The run's interceptor headers in wire form (str -> payload dict), surfaced as
+    # ExecuteWorkflowInput.headers and carried across cron/retry hops.
     headers: Optional[Dict[str, Any]] = None
-    # The root workflow of this run's tree ({"workflow_id", "run_id"}), set when
-    # this run was started as a child of another workflow; None for a top-level
-    # workflow (surfaced as workflow.info().root, §6.6). Carries across chain hops
-    # (a child that continues-as-new keeps the same root).
+    # The root workflow of this run's tree ({"workflow_id", "run_id"}); None for a
+    # top-level workflow (workflow.info().root, §6.6). Carries across chain hops.
     root: Optional[Dict[str, str]] = None
 
     def is_empty(self) -> bool:
@@ -99,7 +92,7 @@ class RunMeta:
 
 def wrap_input(args: Sequence[Any], meta: Optional[RunMeta] = None) -> Any:
     """The dispatcher payload for a run: a bare args list when there is no
-    metadata (the original format), else the input envelope."""
+    metadata, else the input envelope."""
     if meta is None or meta.is_empty():
         return list(args)
     return {
@@ -236,11 +229,8 @@ class SerializedContinueAsNew(Exception):
 def serialize_failure(
     exc: BaseException, converter: Optional[Any] = None
 ) -> FailureEnvelope:
-    # Encode embedded user values (details, heartbeat details) through the
-    # converter so failure envelopes are JSON-safe. Sync (no codec — like
-    # query results); serialize_failure runs in deep sync call sites.
-    # ``converter`` overrides the process converter (an AsyncActivityHandle
-    # per-handle data converter when failing an activity).
+    # Encode embedded user values (details, heartbeat details) so envelopes are
+    # JSON-safe. Sync (no codec); ``converter`` overrides the process converter.
     from . import conversion
 
     env: FailureEnvelope

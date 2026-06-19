@@ -109,10 +109,8 @@ async def test_explicit_build_id() -> None:
     assert result["build_id"] == "bld-xyz"
     assert result["build_id_method"] == "bld-xyz"
     assert result["target_changed"] is False
-    # The build_id IS the DBOS application_version — the version DBOS scopes
-    # recovery and queue dequeue to. That equality is what makes the reported
-    # deployment version the *actual* pinned routing version (PINNED is real,
-    # not cosmetic). See DEVIATIONS worker-versioning.
+    # The build_id IS the DBOS application_version scoping recovery/dequeue, so
+    # the reported version is the actual pinned routing one (DEVIATIONS worker-versioning).
     probe = DBOSClient(system_database_url=system_database_url())
     try:
         status = probe.retrieve_workflow("dv-build-id").get_status()
@@ -167,9 +165,8 @@ async def test_auto_upgrade_behavior_accepted_and_degrades_to_pinned() -> None:
 
 
 async def test_continue_as_new_successor_inherits_build_id() -> None:
-    # A continue-as-new run is a fresh workflow enqueued from inside the worker,
-    # so DBOS stamps it with the worker's application_version (= build_id): the
-    # successor run is pinned to the same build ID as its predecessor.
+    # A CAN run is a fresh workflow enqueued from inside the worker, so DBOS
+    # stamps it with the worker's application_version (= build_id).
     async with _env(build_id="can-build") as client:
         result = await client.execute_workflow(
             CANOnceWorkflow.run, 0, id="dv-can", task_queue=TASK_QUEUE
@@ -185,9 +182,8 @@ async def test_continue_as_new_successor_inherits_build_id() -> None:
 
 
 async def test_auto_versioning_reports_computed_version_not_empty() -> None:
-    # application_version=None opts into DBOS code-hash auto-versioning. The
-    # reported build_id must be the live computed version DBOS pins on (read at
-    # access time), not the empty construction-time value.
+    # application_version=None opts into DBOS code-hash auto-versioning; the
+    # reported build_id is the live computed version DBOS pins on.
     config = default_config()
     config["application_version"] = None
     worker = Worker(config, task_queue=TASK_QUEUE, workflows=_WORKFLOWS)

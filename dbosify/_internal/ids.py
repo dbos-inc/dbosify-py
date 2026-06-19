@@ -13,11 +13,8 @@ run id. Scheme (resolved decision §10.3):
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 RUN_SEPARATOR = "--r"
-# Cross-queue activity workflow ids are ``{run}--a{seq}`` (§6.1.2). Reserving
-# this separator (like ``--r``) keeps an activity workflow id from ever
-# colliding with a user-chosen or auto-generated workflow/child id, which would
-# otherwise make the idempotent ``SetWorkflowID`` enqueue silently re-attach to
-# an unrelated workflow.
+# Cross-queue activity workflow ids are ``{run}--a{seq}`` (§6.1.2). Reserving this
+# separator keeps an activity workflow id from colliding with any user/child id.
 ACTIVITY_SEPARATOR = "--a"
 
 # Chain resolution probes (see resolve_latest_run): chains up to this many
@@ -82,9 +79,8 @@ def run_index_of(workflow_id: str, dbos_id: str) -> Optional[int]:
     return None
 
 
-# A batched exact-id status lookup: dbos ids -> status object per id found.
-# Backed by ``list_workflows(workflow_ids=[...])`` — primary-key lookups, so
-# every probe is index-backed.
+# A batched exact-id status lookup: dbos ids -> status object per id found. Backed
+# by ``list_workflows(workflow_ids=[...])`` — primary-key, index-backed probes.
 ChainLookup = Callable[[Sequence[str]], Awaitable[Dict[str, Any]]]
 
 
@@ -120,9 +116,8 @@ async def resolve_latest_run(
         return None
     lo = max(found)
     lo_status = found[lo]
-    # Exclusive upper bound: the smallest probed index above lo that was
-    # missing. None means lo was the ladder top: keep doubling (absurdly
-    # long chain) until the bracket closes.
+    # Exclusive upper bound: the smallest probed index above lo that was missing.
+    # None means lo was the ladder top: keep doubling until the bracket closes.
     hi = next((c for c in ladder if c > lo and c not in found), None)
     while hi is None:
         extension = [lo << k for k in range(1, 5)]

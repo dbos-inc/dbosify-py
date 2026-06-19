@@ -1,5 +1,5 @@
 """Subprocess worker for cross-queue async-completion tests
-(raise_complete_async on the queued path, Phase 4, §6.1.2).
+(raise_complete_async on the queued path, §6.1.2).
 
 The activity records its ``info().task_token`` (which carries the activity
 workflow id) and parks via ``raise_complete_async()``; the ``__temporal_activity``
