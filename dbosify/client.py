@@ -607,15 +607,18 @@ class WithStartWorkflowOperation:
         )
         self._workflow = workflow
         self._handle: Optional["WorkflowHandle"] = None
+        self._start_exception: Optional[Exception] = None
         self._used = False
 
     async def workflow_handle(self) -> "WorkflowHandle":
         """The handle for the started (or attached-to) workflow. Available
         once the operation has been used, even if the update failed."""
         if self._handle is None:
+            if self._start_exception is not None:
+                # The workflow start itself raised (e.g. a FAIL / REJECT_DUPLICATE
+                # conflict); re-raise it, as temporalio surfaces it on the handle.
+                raise self._start_exception
             if self._used:
-                # Used, but the workflow start itself raised (e.g. a FAIL /
-                # REJECT_DUPLICATE conflict), so no run was started/attached.
                 raise RuntimeError(
                     "WithStartWorkflowOperation was used but the workflow start "
                     "did not complete; no handle is available"
@@ -2296,12 +2299,18 @@ class WorkflowHandle:
             # fresh run, or to the attached run under USE_EXISTING).
             start_args = op._start_kwargs["args"]
             start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
-            op._handle = await self._client.start_workflow(
-                op._workflow,
-                args=start_args,
-                **start_kwargs,
-                _with_start_update=(envelope, inbox.INBOX_TOPIC, update_id),
-            )
+            try:
+                op._handle = await self._client.start_workflow(
+                    op._workflow,
+                    args=start_args,
+                    **start_kwargs,
+                    _with_start_update=(envelope, inbox.INBOX_TOPIC, update_id),
+                )
+            except Exception as exc:
+                # Record so workflow_handle() re-raises the real start failure
+                # (e.g. WorkflowAlreadyStartedError) rather than a generic error.
+                op._start_exception = exc
+                raise
             target = await op._handle._target()
         else:
             target = await self._target()
