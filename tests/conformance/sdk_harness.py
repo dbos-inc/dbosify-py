@@ -16,7 +16,8 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Sequence, TypeVar
 
 from dbosify import activity, workflow
 from dbosify.client import Client
-from dbosify.worker import Worker
+from dbosify.converter import DataConverter
+from dbosify.worker import Interceptor, Worker
 from tests.dbconfig import default_config
 
 T = TypeVar("T")
@@ -29,17 +30,25 @@ async def new_worker(
     activities: Sequence[Callable[..., Any]] = (),
     task_queue: str | None = None,
     workflow_failure_exception_types: Sequence[type[BaseException]] = (),
+    data_converter: DataConverter = DataConverter.default,
+    interceptors: Sequence[Interceptor] = (),
     **_ignored: Any,
 ) -> AsyncIterator[Worker]:
     """temporalio's ``new_worker(client, *workflows, activities=...)`` over our
     ``Worker(DBOSConfig, ...)``. The Worker owns the DBOS lifecycle; the passed
-    ``client`` already targets the same database."""
+    ``client`` already targets the same database.
+
+    ``data_converter``/``interceptors`` are forwarded to the Worker. The
+    converter is process-global (DESIGN §6.9), so configuring it on the Worker
+    also applies to the ``client`` for the duration of the test."""
     worker = Worker(
         default_config(),
         task_queue=task_queue or f"sdk-tq-{uuid.uuid4()}",
         workflows=list(workflows),
         activities=list(activities),
         workflow_failure_exception_types=list(workflow_failure_exception_types),
+        data_converter=data_converter,
+        interceptors=list(interceptors),
     )
     async with worker:
         yield worker

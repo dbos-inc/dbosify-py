@@ -285,9 +285,7 @@ async def test_update_with_start_two_param(client: Client) -> None:
         )
         assert await uh.result() == UpdateResult(result="update-arg1-update-arg2")
         wf = await op.workflow_handle()
-        assert await wf.result() == WorkflowResult(
-            result="workflow-arg1-workflow-arg2"
-        )
+        assert await wf.result() == WorkflowResult(result="workflow-arg1-workflow-arg2")
 
 
 async def test_update_with_start_sets_first_execution_run_id(client: Client) -> None:
