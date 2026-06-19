@@ -23,74 +23,55 @@ roadmap.
   indexed search attributes). Namespaces are supported as per-namespace Postgres schemas,
   one namespace per process (see `docs/DEVIATIONS.md` no-server).
 
-## Conformance
+## Usage
 
-The conformance suite (`tests/conformance/`) runs the
-[temporalio/samples-python](https://github.com/temporalio/samples-python)
-`hello/` corpus against DBOSify. Migration = the mechanical import
-rewrite (`temporalio` → `dbosify`) plus adapting connection setup
-(`Client.connect` takes a `dbos.DBOSClient`; `Worker` takes a
-`dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
-`message_passing/` corpus passes 5/5.
+Define workflows and activities exactly as in `temporalio`; only the import root
+changes. A `Worker` owns the process's DBOS runtime and takes either a Postgres URL
+or a `dbos.DBOSConfig`:
 
-Current pass rate: **18 of 19 runnable samples** (the rest are blocked on
-roadmap phases, noted below; 3 samples aren't runnable in any automated
-harness).
+```python
+import asyncio
+from datetime import timedelta
 
-| Sample | Status |
-|---|---|
-| hello_activity | ✅ |
-| hello_activity_async | ✅ |
-| hello_activity_choice | ✅ |
-| hello_activity_heartbeat | ✅ |
-| hello_activity_method | ✅ |
-| hello_activity_retry | ✅ |
-| hello_exception | ✅ |
-| hello_local_activity | ✅ |
-| hello_parallel_activity | ✅ |
-| hello_signal | ✅ |
-| hello_update | ✅ |
-| hello_child_workflow | ✅ |
-| hello_cancellation | ✅ (sync activity observes cancellation via heartbeat; cleanup runs in the unwind) |
-| hello_async_activity_completion | ✅ (`raise_complete_async` + task-token completion) |
-| hello_continue_as_new | ✅ (10 chained runs) |
-| hello_cron | ✅ (cron chain fires and hops; the sample never exits, so the harness verifies through the database) |
-| hello_search_attributes | ✅ (memo + search attributes on DBOS workflow attributes; set at start, `upsert_*` from inside, read via `describe()`). The sample upserts 2s in and describes 3s later, so its worker opts into near-immediate queue dispatch in the harness — scoped to this one sample (see `tests/conformance/runner.py`). |
-| hello_query | ✅ (queries a completed workflow; answered by rehydrate-by-replay — `Replayer` machinery) |
-| hello_activity_multiprocess | ⬜ multiprocess activity executors unsupported |
-| hello_change_log_level | — never exits by design (also true on Temporal) |
-| hello_mtls | — needs mTLS infrastructure |
-| hello_patch | ✅ `workflow.patched()` / `deprecate_patch()` implemented (DESIGN §6.8); the sample is a manual multi-deploy walkthrough, so replay semantics are covered by `tests/integration/test_patched_recovery.py` instead |
+from dbosify import activity, workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 
-`message_passing/` (multi-file, worker + starter as separate processes):
+DB_URL = "postgresql+psycopg://postgres:dbos@localhost:5432/dbosify"
 
-| Sample | Status |
-|---|---|
-| introduction | ✅ (queries, updates + validators, start_update staging, signals, async update handlers running activities) |
-| waiting_for_handlers | ✅ (`all_handlers_finished`) |
-| waiting_for_handlers_and_compensation | ✅ (`workflow.wait`, compensation patterns) |
-| update_with_start/lazy_initialization | ✅ (`WithStartWorkflowOperation`, `execute_update_with_start_workflow`) |
-| safe_message_handlers | ✅ (continue-as-new + handler-heavy traffic) — the `message_passing/` corpus is complete |
 
-`schedules/` (a long-running worker plus per-operation client scripts, run
-unmodified):
+@activity.defn
+async def compose_greeting(name: str) -> str:
+    return f"Hello, {name}!"
 
-| Sample | Status |
-|---|---|
-| start_schedule | ✅ (`create_schedule` with an interval `ScheduleSpec`) |
-| describe_schedule | ✅ (`ScheduleHandle.describe` → `state.note`) |
-| list_schedule | ✅ (`list_schedules` async iterator) |
-| trigger_schedule | ✅ (`trigger` fires an action immediately) |
-| update_schedule | ✅ (`update` callback; delete-then-recreate) |
-| pause_schedule | ✅ (`pause` with note) |
-| backfill_schedule | ✅ (`backfill` over a past window) |
-| delete_schedule | ✅ (`delete`) |
 
-`activity_worker/` (cross-queue / distributed activity dispatch, §6.1.2):
+@workflow.defn
+class GreetingWorkflow:
+    @workflow.run
+    async def run(self, name: str) -> str:
+        return await workflow.execute_activity(
+            compose_greeting, name, start_to_close_timeout=timedelta(seconds=10)
+        )
 
-| Sample | Status |
-|---|---|
-| activity_worker | ✅ capability-substituted — the samples-python sample is a Go workflow calling a Python activity over a server (unrunnable here: no server, no Go worker). The conformance test proves the capability it demonstrates: an activities-only worker reachable from a workflow on a different task queue, with both workers as separate processes. SIGKILL recovery of either worker is covered (integration). |
+
+async def main() -> None:
+    worker = Worker(
+        DB_URL,
+        task_queue="greetings",
+        workflows=[GreetingWorkflow],
+        activities=[compose_greeting],
+    )
+    async with worker:
+        async with await Client.connect(DB_URL) as client:
+            result = await client.execute_workflow(
+                GreetingWorkflow.run, "World", id="greeting-1", task_queue="greetings"
+            )
+            print(result)  # Hello, World!
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
 
 ## Known deviations from Temporal
 
