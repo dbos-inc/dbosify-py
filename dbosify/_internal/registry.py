@@ -248,8 +248,12 @@ def register_activity(defn: ActivityDefinition) -> None:
         # A dynamic activity is a fallback for any unmatched type, never
         # registered under a name (mirroring temporalio, where its name is None).
         global _dynamic_activity
+        if _dynamic_activity is not None:
+            raise TypeError("More than one dynamic activity")
         _dynamic_activity = defn
     else:
+        if defn.name in _activities:
+            raise ValueError(f"More than one activity named {defn.name}")
         _activities[defn.name] = defn
 
 

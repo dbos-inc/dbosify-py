@@ -138,6 +138,42 @@ def test_dynamic_activity_wrong_signature_rejected() -> None:
             return str(x)
 
 
+def test_duplicate_named_activity_rejected() -> None:
+    # Mirrors temporalio: registering two activities under one name raises.
+    @activity.defn(name="dup")
+    async def first() -> None: ...
+
+    @activity.defn(name="dup")
+    async def second() -> None: ...
+
+    registry._activities.clear()
+    try:
+        registry.register_activity(registry.activity_definition_of(first))
+        with pytest.raises(ValueError, match="More than one activity named dup"):
+            registry.register_activity(registry.activity_definition_of(second))
+    finally:
+        registry._activities.clear()
+
+
+def test_duplicate_dynamic_activity_rejected() -> None:
+    # Mirrors temporalio: a second dynamic (catch-all) activity raises.
+    @activity.defn(dynamic=True)
+    async def dyn1(args: Sequence[RawValue]) -> str:
+        return "1"
+
+    @activity.defn(dynamic=True)
+    async def dyn2(args: Sequence[RawValue]) -> str:
+        return "2"
+
+    registry._dynamic_activity = None
+    try:
+        registry.register_activity(registry.activity_definition_of(dyn1))
+        with pytest.raises(TypeError, match="More than one dynamic activity"):
+            registry.register_activity(registry.activity_definition_of(dyn2))
+    finally:
+        registry._dynamic_activity = None
+
+
 def test_dynamic_activity_name_mutually_exclusive() -> None:
     with pytest.raises(RuntimeError, match="name and dynamic"):
         activity.defn(name="x", dynamic=True)
