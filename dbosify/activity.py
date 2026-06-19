@@ -147,6 +147,11 @@ def defn(
                     "not callable (define __call__ for a callable-class activity)"
                 )
             introspect = call
+        # Activities are invoked positionally (args[]); keyword-only params can
+        # never be supplied, so reject them at decoration time (temporalio parity).
+        for param in inspect.signature(introspect).parameters.values():
+            if param.kind is inspect.Parameter.KEYWORD_ONLY:
+                raise TypeError("Activity cannot have keyword-only arguments")
         arg_types, ret_type = type_hints_from_func(introspect)
         if dynamic:
             _registry.validate_dynamic_activity_sig(arg_types)
