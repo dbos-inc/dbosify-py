@@ -88,8 +88,7 @@ def payload_converter() -> PayloadConverter:
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 logger = logging.getLogger("dbosify.activity")
-"""Logger that can be used within activities. (Phase 1: a plain logger;
-the context-injecting adapter mirroring temporalio's lands later.)"""
+"""Logger that can be used within activities."""
 
 
 @overload

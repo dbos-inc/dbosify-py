@@ -78,7 +78,7 @@ if __name__ == "__main__":
 **[DEVIATIONS.md](docs/DEVIATIONS.md) is the canonical, detailed record of
 *fundamental* deviations** — those inherent to the serverless architecture
 or deliberate design decisions. The table below is the summary; rows marked
-temporary are phase-gaps tracked by the conformance suite, not fundamentals.
+temporary are gaps tracked by the conformance suite, not fundamentals.
 
 | # | Deviation |
 |---|---|
