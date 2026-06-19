@@ -69,7 +69,7 @@ class FailureError(TemporalError):
         """Underlying failure, if any.
 
         In temporalio this is a protobuf ``Failure``; here it is a
-        ``FailureView`` over the temporal-dbos failure envelope, exposing
+        ``FailureView`` over the dbosify failure envelope, exposing
         the commonly-used fields (``message``, ``stack_trace``, ``cause``).
         """
         return self._failure
@@ -246,7 +246,7 @@ class TimeoutError(FailureError):
 
 
 class ServerError(FailureError):
-    """Error originating in the server (in temporal-dbos: the backend)."""
+    """Error originating in the server (in dbosify: the backend)."""
 
     def __init__(self, message: str, *, non_retryable: bool = False) -> None:
         """Initialize a server error."""

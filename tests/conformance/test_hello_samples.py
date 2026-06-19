@@ -1,5 +1,5 @@
 """Conformance: run temporalio/samples-python ``hello/`` samples against
-temporal-dbos with the mechanical import rewrite plus the connection-setup
+dbosify with the mechanical import rewrite plus the connection-setup
 adapter (see runner.py). The pass/xfail expectations below are the
 conformance table published in the README — xfail reasons name the roadmap
 phase that unblocks each sample.
@@ -248,7 +248,7 @@ def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
             RUNNER,
             str(rewritten_samples / f"{sample_name}.py"),
             env={
-                "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
+                "DBOSIFY_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
                 # Lets the verifier collect an all-threads stack dump from
                 # the live sample (SIGABRT) when verification fails.
                 "PYTHONFAULTHANDLER": "1",
@@ -267,10 +267,10 @@ def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
         return
     env = {
         **__import__("os").environ,
-        "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
     }
     if expectation.fast_queue:
-        env["TDB_CONFORMANCE_FAST_QUEUE"] = "1"
+        env["DBOSIFY_CONFORMANCE_FAST_QUEUE"] = "1"
     result = subprocess.run(
         [sys.executable, str(RUNNER), str(rewritten_samples / f"{sample_name}.py")],
         capture_output=True,

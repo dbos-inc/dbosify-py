@@ -12,10 +12,10 @@ from typing import Any, Dict, List, Optional
 import pytest
 from dbos import DBOS
 
-from temporal_dbos import activity, workflow
-from temporal_dbos._internal import dispatcher
-from temporal_dbos.common import Priority, RetryPolicy
-from temporal_dbos.exceptions import ActivityError, ApplicationError, RetryState
+from dbosify import activity, workflow
+from dbosify._internal import dispatcher
+from dbosify.common import Priority, RetryPolicy
+from dbosify.exceptions import ActivityError, ApplicationError, RetryState
 
 # Per-test mutable state activities reach into (reset by fixtures/tests).
 attempt_counts: Dict[str, int] = {}
@@ -241,14 +241,14 @@ class DeterminismProbe:
         ]
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_activities_and_sleep() -> None:
     dispatcher.register_worker(workflows=[GreetingWorkflow], activities=[compose])
     handle = dispatcher.start_workflow(GreetingWorkflow, ["world"], workflow_id="greet")
     assert dispatcher.workflow_result(handle) == "hello-world-1|hello-world-2"
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_workflow_and_activity_info_parity_fields() -> None:
     """The Phase-4 parity-cleanup fields carry real run data: the run-chain
     base id, init time, no-parent, and the activity's scheduled timeouts/retry
@@ -280,7 +280,7 @@ def test_workflow_and_activity_info_parity_fields() -> None:
     assert act["task_queue"] == "default"
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_child_workflow_info_parent() -> None:
     """A child run's info().parent carries the cross-chain parent's ids."""
     dispatcher.register_worker(workflows=[ParentStartsChild, ChildReportsParent])
@@ -291,7 +291,7 @@ def test_child_workflow_info_parent() -> None:
     assert res["parent_namespace"] == "default"
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_signal_and_wait_condition() -> None:
     dispatcher.register_worker(workflows=[ApprovalWorkflow])
     handle = dispatcher.start_workflow(ApprovalWorkflow, [], workflow_id="approval")
@@ -299,7 +299,7 @@ def test_signal_and_wait_condition() -> None:
     assert dispatcher.workflow_result(handle) == "approved by alice"
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_updates_queries_and_validator() -> None:
     dispatcher.register_worker(workflows=[CounterWorkflow])
     handle = dispatcher.start_workflow(CounterWorkflow, [], workflow_id="counter")
@@ -320,7 +320,7 @@ def test_updates_queries_and_validator() -> None:
     assert dispatcher.workflow_result(handle) == 8
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_gather_with_retry_exhaustion() -> None:
     """§4.3 test 3: gather of three activities; one fails through its retry
     policy and surfaces as ActivityError(cause=ApplicationError)."""
@@ -339,7 +339,7 @@ def test_gather_with_retry_exhaustion() -> None:
     assert attempt_counts["k1"] == 3
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_buggy_workflow_stays_running_until_fixed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -373,7 +373,7 @@ def test_buggy_workflow_stays_running_until_fixed(
     assert dispatcher.workflow_result(handle) == "fixed"
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_failure_exception_types_fail_workflow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -394,7 +394,7 @@ def test_failure_exception_types_fail_workflow(
     assert dispatcher.workflow_status("fails") == "ERROR"
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_deterministic_helpers_run() -> None:
     dispatcher.register_worker(workflows=[DeterminismProbe])
     handle = dispatcher.start_workflow("DeterminismProbe", [], workflow_id="probe")
@@ -402,7 +402,7 @@ def test_deterministic_helpers_run() -> None:
     assert len(values) == 3 and all(isinstance(v, str) for v in values)
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_workflow_wait_and_as_completed() -> None:
     """workflow.wait returns deterministic input-order *lists* (not sets),
     and as_completed yields awaitables in completion order."""

@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from temporal_dbos._internal import conversion, schedules
-from temporal_dbos._schedule import (
+from dbosify._internal import conversion, schedules
+from dbosify._schedule import (
     Schedule,
     ScheduleActionStartWorkflow,
     ScheduleCalendarSpec,
@@ -24,7 +24,7 @@ from temporal_dbos._schedule import (
     require_supported_overlap,
     serialize_schedule_context,
 )
-from temporal_dbos.common import (
+from dbosify.common import (
     Priority,
     RetryPolicy,
     SearchAttributeKey,

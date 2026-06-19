@@ -2,8 +2,8 @@
 ``temporalio.worker`` (``temporalio/worker/_interceptor.py``).
 
 This is the Phase-4 surface: workflow inbound/outbound interception. The
-classes are re-exported from :py:mod:`temporal_dbos.worker` so user code
-extends ``temporal_dbos.worker.WorkflowInboundInterceptor`` /
+classes are re-exported from :py:mod:`dbosify.worker` so user code
+extends ``dbosify.worker.WorkflowInboundInterceptor`` /
 ``WorkflowOutboundInterceptor`` exactly as it would the ``temporalio.worker``
 ones. A worker interceptor advertises a workflow interceptor by overriding
 ``Interceptor.workflow_interceptor_class`` (in ``activity_interceptor.py``,
@@ -17,7 +17,7 @@ outbound so ``start_activity`` / ``start_child_workflow`` / signals /
 ``continue_as_new`` route through it.
 
 The ``*Input`` dataclasses are copied field-for-field from the SDK (DESIGN
-§6.8) so signature parity holds; fields temporal_dbos does not act on (e.g.
+§6.8) so signature parity holds; fields dbosify does not act on (e.g.
 ``versioning_intent``, ``initial_versioning_behavior``, ``priority``,
 ``disable_eager_execution``, ``arg_types``/``ret_type``) are carried but
 inert. Annotations use our own types or ``Any`` (the parity test checks
@@ -76,9 +76,9 @@ __all__ = [
 
 @dataclass(frozen=True)
 class WorkflowInterceptorClassInput:
-    """Input for :py:meth:`temporal_dbos.worker.Interceptor.workflow_interceptor_class`.
+    """Input for :py:meth:`dbosify.worker.Interceptor.workflow_interceptor_class`.
 
-    ``unsafe_extern_functions`` is carried for parity; temporal_dbos has no
+    ``unsafe_extern_functions`` is carried for parity; dbosify has no
     workflow sandbox (DEVIATIONS D3), so there is nothing to expose extern
     functions *into* — the mapping is inert.
     """
@@ -292,7 +292,7 @@ class WorkflowInboundInterceptor:
     async def handle_query(self, input: HandleQueryInput) -> Any:
         """Called to handle a query.
 
-        Queries are synchronous in temporal_dbos (DEVIATIONS #11): the chain is
+        Queries are synchronous in dbosify (DEVIATIONS #11): the chain is
         driven to completion without suspension, so an override must not
         ``await`` anything that would park the event loop.
         """
@@ -323,16 +323,16 @@ class WorkflowOutboundInterceptor:
         self.next = next
 
     def continue_as_new(self, input: ContinueAsNewInput) -> NoReturn:
-        """Called for every :py:func:`temporal_dbos.workflow.continue_as_new` call."""
+        """Called for every :py:func:`dbosify.workflow.continue_as_new` call."""
         self.next.continue_as_new(input)
 
     def info(self) -> "Info":
-        """Called for every :py:func:`temporal_dbos.workflow.info` call."""
+        """Called for every :py:func:`dbosify.workflow.info` call."""
         return self.next.info()
 
     async def signal_child_workflow(self, input: SignalChildWorkflowInput) -> None:
         """Called for every
-        :py:meth:`temporal_dbos.workflow.ChildWorkflowHandle.signal` call.
+        :py:meth:`dbosify.workflow.ChildWorkflowHandle.signal` call.
         """
         return await self.next.signal_child_workflow(input)
 
@@ -340,26 +340,26 @@ class WorkflowOutboundInterceptor:
         self, input: SignalExternalWorkflowInput
     ) -> None:
         """Called for every
-        :py:meth:`temporal_dbos.workflow.ExternalWorkflowHandle.signal` call.
+        :py:meth:`dbosify.workflow.ExternalWorkflowHandle.signal` call.
         """
         return await self.next.signal_external_workflow(input)
 
     def start_activity(self, input: StartActivityInput) -> "ActivityHandle":
-        """Called for every :py:func:`temporal_dbos.workflow.start_activity` and
-        :py:func:`temporal_dbos.workflow.execute_activity` call.
+        """Called for every :py:func:`dbosify.workflow.start_activity` and
+        :py:func:`dbosify.workflow.execute_activity` call.
         """
         return self.next.start_activity(input)
 
     async def start_child_workflow(
         self, input: StartChildWorkflowInput
     ) -> "ChildWorkflowHandle":
-        """Called for every :py:func:`temporal_dbos.workflow.start_child_workflow`
-        and :py:func:`temporal_dbos.workflow.execute_child_workflow` call.
+        """Called for every :py:func:`dbosify.workflow.start_child_workflow`
+        and :py:func:`dbosify.workflow.execute_child_workflow` call.
         """
         return await self.next.start_child_workflow(input)
 
     def start_local_activity(self, input: StartLocalActivityInput) -> "ActivityHandle":
-        """Called for every :py:func:`temporal_dbos.workflow.start_local_activity`
-        and :py:func:`temporal_dbos.workflow.execute_local_activity` call.
+        """Called for every :py:func:`dbosify.workflow.start_local_activity`
+        and :py:func:`dbosify.workflow.execute_local_activity` call.
         """
         return self.next.start_local_activity(input)

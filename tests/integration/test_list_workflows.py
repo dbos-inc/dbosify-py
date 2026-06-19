@@ -16,9 +16,9 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
-from temporal_dbos._internal.visibility import VisibilityQueryError
-from temporal_dbos.client import (
+from dbosify import workflow
+from dbosify._internal.visibility import VisibilityQueryError
+from dbosify.client import (
     Client,
     Schedule,
     ScheduleActionStartWorkflow,
@@ -30,17 +30,17 @@ from temporal_dbos.client import (
     WorkflowExecutionStatus,
     WorkflowFailureError,
 )
-from temporal_dbos.common import (
+from dbosify.common import (
     SearchAttributeKey,
     SearchAttributePair,
     TypedSearchAttributes,
 )
-from temporal_dbos.exceptions import ApplicationError
-from temporal_dbos.worker import Worker
+from dbosify.exceptions import ApplicationError
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 from tests.harness import retry_until_success_async
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "list-wf-tq"
 KW = SearchAttributeKey.for_keyword("CustomKeyword")

@@ -24,8 +24,8 @@ REPO_ROOT = Path(__file__).parents[2]
 def _env(vmid: str, effects: Path, **extra: str) -> "dict[str, str]":
     return {
         "PYTHONPATH": str(REPO_ROOT),
-        "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
-        "TDB_TEST_EFFECTS": str(effects),
+        "DBOSIFY_TEST_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_TEST_EFFECTS": str(effects),
         "DBOS__VMID": vmid,
         **extra,
     }
@@ -36,13 +36,15 @@ def _env(vmid: str, effects: Path, **extra: str) -> "dict[str, str]":
 def test_queued_activity_retries_until_success(tmp_path: Path) -> None:
     effects = tmp_path / "effects"
     activity_worker = PythonProcess(
-        WORKER, "activity", env=_env("tdb-act", effects, TDB_TEST_SUCCEED_AT="3")
+        WORKER,
+        "activity",
+        env=_env("dbosify-act", effects, DBOSIFY_TEST_SUCCEED_AT="3"),
     )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
         workflow_worker = PythonProcess(
-            WORKER, "workflow", "start", "xq-retry-ok", env=_env("tdb-wf", effects)
+            WORKER, "workflow", "start", "xq-retry-ok", env=_env("dbosify-wf", effects)
         )
         workflow_worker.start()
         try:
@@ -63,13 +65,15 @@ def test_queued_activity_retries_until_success(tmp_path: Path) -> None:
 def test_queued_activity_non_retryable_fails_fast(tmp_path: Path) -> None:
     effects = tmp_path / "effects"
     activity_worker = PythonProcess(
-        WORKER, "activity", env=_env("tdb-act", effects, TDB_TEST_NON_RETRYABLE="1")
+        WORKER,
+        "activity",
+        env=_env("dbosify-act", effects, DBOSIFY_TEST_NON_RETRYABLE="1"),
     )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
         workflow_worker = PythonProcess(
-            WORKER, "workflow", "start", "xq-retry-nr", env=_env("tdb-wf", effects)
+            WORKER, "workflow", "start", "xq-retry-nr", env=_env("dbosify-wf", effects)
         )
         workflow_worker.start()
         try:
@@ -92,11 +96,13 @@ def test_sigkill_activity_worker_mid_backoff_resumes(tmp_path: Path) -> None:
     succeed_at = "5"
 
     activity_worker = PythonProcess(
-        WORKER, "activity", env=_env("tdb-act", effects, TDB_TEST_SUCCEED_AT=succeed_at)
+        WORKER,
+        "activity",
+        env=_env("dbosify-act", effects, DBOSIFY_TEST_SUCCEED_AT=succeed_at),
     )
     activity_worker.start()
     workflow_worker = PythonProcess(
-        WORKER, "workflow", "start", "xq-retry-recover", env=_env("tdb-wf", effects)
+        WORKER, "workflow", "start", "xq-retry-recover", env=_env("dbosify-wf", effects)
     )
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
@@ -112,7 +118,7 @@ def test_sigkill_activity_worker_mid_backoff_resumes(tmp_path: Path) -> None:
         revived = PythonProcess(
             WORKER,
             "activity",
-            env=_env("tdb-act", effects, TDB_TEST_SUCCEED_AT=succeed_at),
+            env=_env("dbosify-act", effects, DBOSIFY_TEST_SUCCEED_AT=succeed_at),
         )
         revived.start()
         try:

@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).parents[2]
 def test_activity_worker_cross_queue() -> None:
     base_env = {
         "PYTHONPATH": str(REPO_ROOT),
-        "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_TEST_SYSTEM_DATABASE_URL": system_database_url(),
         # Cooperating workers register different function sets but share the
         # Worker's pinned default DBOS app version, so the activity worker
         # dequeues the workflow worker's __temporal_activity enqueue.
@@ -43,14 +43,14 @@ def test_activity_worker_cross_queue() -> None:
     # workflows (here there are no crashes, but it keeps the two cleanly
     # separated on the shared database).
     activity_worker = PythonProcess(
-        WORKERS, "activity", env={**base_env, "DBOS__VMID": "tdb-activity"}
+        WORKERS, "activity", env={**base_env, "DBOS__VMID": "dbosify-activity"}
     )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
 
         workflow_worker = PythonProcess(
-            WORKERS, "workflow", env={**base_env, "DBOS__VMID": "tdb-workflow"}
+            WORKERS, "workflow", env={**base_env, "DBOS__VMID": "dbosify-workflow"}
         )
         workflow_worker.start()
         try:

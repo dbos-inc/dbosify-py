@@ -14,19 +14,19 @@ from typing import AsyncIterator, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowFailureError,
     WorkflowHandle,
 )
-from temporal_dbos.common import WorkflowIDConflictPolicy
-from temporal_dbos.exceptions import CancelledError, TerminatedError
-from temporal_dbos.worker import Worker
+from dbosify.common import WorkflowIDConflictPolicy
+from dbosify.exceptions import CancelledError, TerminatedError
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "phase2-cancel-tq"
 

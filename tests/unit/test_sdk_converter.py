@@ -1,7 +1,7 @@
 """Converter unit tests adapted from temporalio's ``tests/test_converter.py``.
 
 These are pure unit tests (no Postgres / Worker / Client). They verify that our
-``temporal_dbos.converter`` is internally correct and round-trips values,
+``dbosify.converter`` is internally correct and round-trips values,
 exceptions, and type hints. Assertions are adapted to our actual behavior where
 our lightweight (non-protobuf) ``Payload``/``Failure`` representation differs
 from temporalio's; such adaptations are flagged with ``# Adapted:`` comments.
@@ -36,8 +36,8 @@ import pytest
 import typing_extensions
 from typing_extensions import TypedDict
 
-from temporal_dbos.common import RawValue
-from temporal_dbos.converter import (
+from dbosify.common import RawValue
+from dbosify.converter import (
     AdvancedJSONEncoder,
     CompositePayloadConverter,
     DataConverter,
@@ -48,7 +48,7 @@ from temporal_dbos.converter import (
     Payload,
     value_to_type,
 )
-from temporal_dbos.exceptions import ApplicationError, FailureError
+from dbosify.exceptions import ApplicationError, FailureError
 
 # StrEnum is available in 3.11+
 if sys.version_info >= (3, 11):
@@ -466,10 +466,10 @@ async def test_exception_format() -> None:
             type(failure_error), failure_error, failure_error.__traceback__
         )
     )
-    # Adapted: our exception type lives in temporal_dbos.exceptions, not
+    # Adapted: our exception type lives in dbosify.exceptions, not
     # temporalio.exceptions.
-    assert "temporal_dbos.exceptions.ApplicationError: ValueError: error1" in output
-    assert "temporal_dbos.exceptions.ApplicationError: RuntimeError: error" in output
+    assert "dbosify.exceptions.ApplicationError: ValueError: error1" in output
+    assert "dbosify.exceptions.ApplicationError: RuntimeError: error" in output
     assert output.count("\nStack:\n") == 2
 
     # This shows how it might look for those with debugging on

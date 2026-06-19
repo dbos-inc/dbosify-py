@@ -22,8 +22,8 @@ import pytest
 import temporalio.client
 import temporalio.workflow
 
-from temporal_dbos import workflow
-from temporal_dbos.client import Client
+from dbosify import workflow
+from dbosify.client import Client
 from tests.unit._param_audit import (
     Bucket,
     assert_buckets_disjoint,

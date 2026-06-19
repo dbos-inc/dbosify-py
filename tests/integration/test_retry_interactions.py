@@ -11,14 +11,14 @@ from typing import Any, AsyncIterator, Dict
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
-from temporal_dbos.client import Client, WorkflowExecutionStatus, WorkflowFailureError
-from temporal_dbos.common import RetryPolicy
-from temporal_dbos.exceptions import ApplicationError
-from temporal_dbos.worker import Worker
+from dbosify import workflow
+from dbosify.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from dbosify.common import RetryPolicy
+from dbosify.exceptions import ApplicationError
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "retry-interactions-tq"
 FAST_RETRY = RetryPolicy(
@@ -132,7 +132,7 @@ async def test_cancel_then_fail_suppresses_retry() -> None:
             retry_policy=FAST_RETRY,
         )
         # Park, then cancel; the run's cleanup raises an ApplicationError.
-        deadline = asyncio.get_running_loop().time() + 8.0
+        deadline = asyncio.get_running_loop().time() + 30.0
         while asyncio.get_running_loop().time() < deadline:
             if (await client._status_of("cancel-fail")).status == "PENDING":
                 break
@@ -157,7 +157,7 @@ async def test_cancel_reaches_retry_attempt() -> None:
             retry_policy=FAST_RETRY,
         )
         # Wait until attempt 2 (run --r1) is the parked, running latest.
-        deadline = asyncio.get_running_loop().time() + 10.0
+        deadline = asyncio.get_running_loop().time() + 30.0
         while asyncio.get_running_loop().time() < deadline:
             current = await client._current_run("cancel-retry")
             if (

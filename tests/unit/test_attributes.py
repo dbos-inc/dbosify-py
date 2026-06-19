@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from temporal_dbos._internal import attributes as A
-from temporal_dbos.common import (
+from dbosify._internal import attributes as A
+from dbosify.common import (
     SearchAttributeIndexedValueType,
     SearchAttributeKey,
     SearchAttributePair,

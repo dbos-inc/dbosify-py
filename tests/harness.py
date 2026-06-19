@@ -24,8 +24,8 @@ REPO_ROOT = Path(__file__).parents[1]
 
 def build_id_env(build_id: str) -> Dict[str, str]:
     """Subprocess env for a versioned worker script: PYTHONPATH + the build id
-    the script reads via ``TDB_BUILD_ID``."""
-    return {"PYTHONPATH": str(REPO_ROOT), "TDB_BUILD_ID": build_id}
+    the script reads via ``DBOSIFY_BUILD_ID``."""
+    return {"PYTHONPATH": str(REPO_ROOT), "DBOSIFY_BUILD_ID": build_id}
 
 
 async def retry_until_success_async(

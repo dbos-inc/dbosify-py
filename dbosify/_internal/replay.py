@@ -53,12 +53,12 @@ if TYPE_CHECKING:
     from ..client import WorkflowHistory
     from ..converter import DataConverter
 
-logger = logging.getLogger("temporal_dbos.replay")
+logger = logging.getLogger("dbosify.replay")
 
 # Failure-envelope ``type`` marker the dispatcher stamps on a divergence so the
 # engine can tell "the replay diverged" apart from "the workflow faithfully
 # re-failed" (a genuine recorded failure that replays identically is a PASS).
-NONDETERMINISM_MARKER = "__tdb_nondeterminism__"
+NONDETERMINISM_MARKER = "__dbosify_nondeterminism__"
 
 # How long a rehydrated (query-on-closed) scratch run keeps serving queries
 # before completing on its own, if the client never sends a stop signal.
@@ -247,7 +247,7 @@ class Replayer:
 
     Unlike temporalio's server-backed replayer, this re-executes a run's DBOS
     step checkpoints, so it operates within **this process's launched DBOS
-    runtime**: construct a :class:`~temporal_dbos.worker.Worker` for the
+    runtime**: construct a :class:`~dbosify.worker.Worker` for the
     workflow types under test (which launches DBOS, registers their
     dispatchers, and installs the data converter / interceptors / failure
     types), then replay histories fetched via ``WorkflowHandle.fetch_history()``.
@@ -259,7 +259,7 @@ class Replayer:
     ``workflow_failure_exception_types`` are accepted for API parity but the
     running Worker's values are authoritative (overriding them here would
     clobber the live Worker, since one Worker owns the process; DEVIATIONS D27).
-    Parameters with no temporal-dbos analog (``namespace``, ``build_id``,
+    Parameters with no dbosify analog (``namespace``, ``build_id``,
     ``identity``, ``workflow_runner``/``unsandboxed_workflow_runner``,
     ``debug_mode``, ``runtime``, ``plugins``, ``workflow_task_executor``, ...)
     are accepted and ignored with a debug log.

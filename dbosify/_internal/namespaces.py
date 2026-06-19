@@ -21,11 +21,11 @@ from typing import Optional
 # Default namespace, matching Temporal.
 DEFAULT_NAMESPACE = "default"
 
-# Every namespace's schema is ``temporal_<namespace>`` (no namespace is
-# privileged — ``default`` maps to ``temporal_default``, not the bare ``dbos``
+# Every namespace's schema is ``dbosify_<namespace>`` (no namespace is
+# privileged — ``default`` maps to ``dbosify_default``, not the bare ``dbos``
 # schema). The prefix keeps namespace schemas clear of DBOS's own ``dbos``
 # schema and of reserved words (e.g. ``default``).
-_SCHEMA_PREFIX = "temporal_"
+_SCHEMA_PREFIX = "dbosify_"
 
 # Postgres identifiers are capped at 63 bytes; reserve room for the prefix.
 _MAX_NAMESPACE_LEN = 63 - len(_SCHEMA_PREFIX)
@@ -58,8 +58,8 @@ def namespace_from_schema(schema: Optional[str]) -> str:
     :func:`namespace_schema`. Used by the low-level ``Client(dbos_client)``
     path, where the DBOSClient's schema is the single source of truth.
 
-    Raises ``ValueError`` if ``schema`` isn't a temporal namespace schema
-    (``temporal_<namespace>``) — e.g. a bare ``dbos`` schema (or ``None``, as on
+    Raises ``ValueError`` if ``schema`` isn't a Temporal namespace schema
+    (``dbosify_<namespace>``) — e.g. a bare ``dbos`` schema (or ``None``, as on
     SQLite) has no namespace.
     """
     if schema is not None and schema.startswith(_SCHEMA_PREFIX):

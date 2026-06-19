@@ -11,9 +11,9 @@ from typing import List
 import pytest
 from dbos import DBOS
 
-from temporal_dbos import workflow
-from temporal_dbos._internal import dispatcher
-from temporal_dbos._internal.interpreter import PATCH_STEP_NAME
+from dbosify import workflow
+from dbosify._internal import dispatcher
+from dbosify._internal.interpreter import PATCH_STEP_NAME
 
 
 def _marker_ids(workflow_id: str) -> List[str]:
@@ -79,7 +79,7 @@ class QueryPatchWorkflow:
         return "done"
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_first_execution_takes_new_path_and_records_marker() -> None:
     dispatcher.register_worker(workflows=[BranchWorkflow])
     handle = dispatcher.start_workflow(BranchWorkflow, [], workflow_id="patch-branch")
@@ -88,7 +88,7 @@ def test_first_execution_takes_new_path_and_records_marker() -> None:
     assert _marker_ids("patch-branch") == ["v2"]
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_same_id_memoized_writes_one_marker() -> None:
     dispatcher.register_worker(workflows=[DoublePatchWorkflow])
     handle = dispatcher.start_workflow(
@@ -98,7 +98,7 @@ def test_same_id_memoized_writes_one_marker() -> None:
     assert _marker_ids("patch-double") == ["v2"]
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_distinct_ids_each_record_a_marker() -> None:
     dispatcher.register_worker(workflows=[MultiPatchWorkflow])
     handle = dispatcher.start_workflow(
@@ -108,7 +108,7 @@ def test_distinct_ids_each_record_a_marker() -> None:
     assert _marker_ids("patch-multi") == ["a", "b"]
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_deprecate_patch_returns_none_and_records_marker() -> None:
     dispatcher.register_worker(workflows=[DeprecateWorkflow])
     handle = dispatcher.start_workflow(
@@ -120,7 +120,7 @@ def test_deprecate_patch_returns_none_and_records_marker() -> None:
     assert _marker_ids("patch-deprecate") == ["v2"]
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_patched_rejected_in_query() -> None:
     dispatcher.register_worker(workflows=[QueryPatchWorkflow])
     handle = dispatcher.start_workflow(

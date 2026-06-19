@@ -18,9 +18,9 @@ from dataclasses import dataclass
 
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow  # noqa: F401  (workflow used below)
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import activity, workflow  # noqa: F401  (workflow used below)
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 TASK_QUEUE = "bad-signal-recovery-tq"

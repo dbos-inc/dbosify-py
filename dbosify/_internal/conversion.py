@@ -3,7 +3,7 @@
 User values are converted to/from small tagged payload dicts at the Temporal
 boundaries — where function signatures supply the type hints that rebuild the
 original Python types, and where the (async)
-:py:class:`~temporal_dbos.converter.PayloadCodec` can run. The DBOS serializer
+:py:class:`~dbosify.converter.PayloadCodec` can run. The DBOS serializer
 sees only those JSON-safe dicts, never raw user values.
 
 This module owns the process's active ``DataConverter`` (set by ``Worker`` /

@@ -18,15 +18,15 @@ from typing import Any, NoReturn, Optional, Sequence, cast
 
 import pytest
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowFailureError,
     WorkflowHandle,
 )
-from temporal_dbos.common import RawValue, RetryPolicy, WorkflowIDConflictPolicy
-from temporal_dbos.exceptions import (
+from dbosify.common import RawValue, RetryPolicy, WorkflowIDConflictPolicy
+from dbosify.exceptions import (
     ActivityError,
     ApplicationError,
     CancelledError,
@@ -39,7 +39,7 @@ from tests.conformance.sdk_harness import (
     wid,
 )
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 
 # --- optional param ----------------------------------------------------------

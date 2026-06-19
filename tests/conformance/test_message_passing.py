@@ -90,7 +90,7 @@ def test_message_passing_sample(sample_name: str, rewritten_root: Path) -> None:
     sample = SAMPLES[sample_name]
     env = {
         "PYTHONPATH": f"{rewritten_root}{os.pathsep}{Path(__file__).parents[2]}",
-        "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
     }
 
     worker = PythonProcess(RUNNER, f"{sample.package}.worker", env=env)

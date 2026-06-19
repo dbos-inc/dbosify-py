@@ -5,9 +5,9 @@ from typing import Any, List
 
 import pytest
 
-from temporal_dbos import activity
-from temporal_dbos.common import Priority
-from temporal_dbos.testing import ActivityEnvironment
+from dbosify import activity
+from dbosify.common import Priority
+from dbosify.testing import ActivityEnvironment
 
 
 @activity.defn

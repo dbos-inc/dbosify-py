@@ -19,10 +19,10 @@ from datetime import timedelta
 
 from dbos import DBOS, DBOSClient
 
-from temporal_dbos import activity, exceptions, workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
-from temporal_dbos.workflow import ActivityCancellationType
+from dbosify import activity, exceptions, workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
+from dbosify.workflow import ActivityCancellationType
 from tests.dbconfig import default_config, system_database_url
 
 ACTIVITY_TASK_QUEUE = "xq-cancel-activity-tq"
@@ -31,7 +31,7 @@ WORKFLOW_TASK_QUEUE = "xq-cancel-workflow-tq"
 
 @activity.defn(name="cancellable-activity")
 async def cancellable_activity() -> str:
-    path = os.environ["TDB_TEST_EFFECTS"]
+    path = os.environ["DBOSIFY_TEST_EFFECTS"]
     with open(path, "a") as f:
         f.write("started\n")
     print("ACTIVITY_STARTED", flush=True)
@@ -108,8 +108,8 @@ async def run_workflow_worker(workflow_id: str) -> None:
             handle = await client.start_workflow(
                 CancelCrossQueueWorkflow.run,
                 args=[
-                    os.environ.get("TDB_TEST_CANCEL_TYPE", "try"),
-                    os.environ.get("TDB_TEST_CANCEL_WHEN", "delayed"),
+                    os.environ.get("DBOSIFY_TEST_CANCEL_TYPE", "try"),
+                    os.environ.get("DBOSIFY_TEST_CANCEL_WHEN", "delayed"),
                 ],
                 id=workflow_id,
                 task_queue=WORKFLOW_TASK_QUEUE,

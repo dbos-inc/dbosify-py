@@ -202,7 +202,7 @@ __all__ = [
     "WorkflowUpdateStage",
 ]
 
-logger = logging.getLogger("temporal_dbos.client")
+logger = logging.getLogger("dbosify.client")
 
 _arg_unset = object()
 
@@ -930,7 +930,7 @@ def _execution_from_status(
 def _ignore_rpc_options(
     where: str, rpc_metadata: Mapping[str, Any], rpc_timeout: Optional[timedelta]
 ) -> None:
-    """RPC transport options have no temporal-dbos equivalent; accept and
+    """RPC transport options have no dbosify equivalent; accept and
     debug-log them (DESIGN convention for tuning parameters)."""
     if rpc_metadata:
         logger.debug("%s: ignoring rpc_metadata", where)
@@ -1081,7 +1081,7 @@ class WorkflowExecutionAsyncIterator:
 
 
 class Client:
-    """Client for accessing temporal-dbos.
+    """Client for accessing dbosify.
 
     Use :py:meth:`connect` — ``Client.connect(system_database_url,
     namespace=...)`` builds the underlying ``dbos.DBOSClient`` pointed at the
@@ -1582,7 +1582,7 @@ class Client:
         rpc_timeout: Optional[timedelta] = None,
     ) -> WorkflowExecutionAsyncIterator:
         """List workflows matching a visibility ``query`` (a Temporal-style
-        filter string; see :mod:`temporal_dbos._internal.visibility` for the
+        filter string; see :mod:`dbosify._internal.visibility` for the
         supported subset). Newest-first. As in temporalio, no request is made
         until the first iteration, so a bad query raises on first ``__anext__``.
 
@@ -1610,7 +1610,7 @@ class Client:
         Counting is **aggregate-only**: it runs entirely through DBOS's
         server-side ``get_workflow_aggregates`` (``COUNT`` + ``GROUP BY``).
         Queries it cannot express there are rejected with a
-        :class:`~temporal_dbos._internal.visibility.VisibilityQueryError` rather
+        :class:`~dbosify._internal.visibility.VisibilityQueryError` rather
         than silently scanning rows — namely filters on exact ``WorkflowId``, a
         search attribute, ``WorkflowType !=``, or an ERROR-family
         ``ExecutionStatus`` (Failed/Canceled/TimedOut/ContinuedAsNew, which DBOS
@@ -1833,7 +1833,7 @@ class Client:
         rpc_timeout: Optional[timedelta] = None,
     ) -> ScheduleAsyncIterator:
         """List schedules. The visibility ``query`` filter is not supported yet
-        (debug-logged); all temporal-dbos schedules are returned."""
+        (debug-logged); all dbosify schedules are returned."""
         if query is not None:
             logger.debug("list_schedules: ignoring unsupported query filter")
         _ignore_rpc_options("list_schedules", rpc_metadata, rpc_timeout)
@@ -2534,11 +2534,11 @@ class WorkflowHandle:
         )
 
     async def fetch_history_events(self, **kwargs: Any) -> Any:
-        """Not supported: temporal-dbos has no Temporal event history. Use
+        """Not supported: dbosify has no Temporal event history. Use
         :py:meth:`fetch_history`, which returns a DBOS-step-derived
         :class:`WorkflowHistory`."""
         raise NotImplementedError(
-            "temporal-dbos has no Temporal event history; use "
+            "dbosify has no Temporal event history; use "
             "WorkflowHandle.fetch_history() for a DBOS-step-derived history"
         )
 

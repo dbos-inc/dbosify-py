@@ -8,7 +8,7 @@ case.
 
 from dbos import DBOSConfig
 
-from temporal_dbos.worker import DEFAULT_APP_VERSION, _with_default_app_version
+from dbosify.worker import DEFAULT_APP_VERSION, _with_default_app_version
 
 
 def test_pins_default_when_version_unset() -> None:

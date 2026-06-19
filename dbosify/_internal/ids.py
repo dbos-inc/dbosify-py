@@ -36,7 +36,7 @@ def validate_workflow_id(workflow_id: str) -> None:
         if separator in workflow_id:
             raise ValueError(
                 f"Workflow ids may not contain {separator!r} "
-                f"(reserved for temporal-dbos internal ids): {workflow_id!r}"
+                f"(reserved for dbosify internal ids): {workflow_id!r}"
             )
 
 

@@ -8,7 +8,7 @@ Modes:
   recv-start    launch DBOS, start the recv-ordering workflow, await result
   recv-resume   launch DBOS (recovery), await result
 
-The chaos workflow reproduces the exact concurrency pattern the temporal-dbos
+The chaos workflow reproduces the exact concurrency pattern the dbosify
 interpreter is built on: many concurrently-executing async DBOS steps raced
 with DBOS.asyncio_wait(FIRST_COMPLETED) in rounds, with new steps launched as
 earlier ones complete. It validates that function_id assignment and the

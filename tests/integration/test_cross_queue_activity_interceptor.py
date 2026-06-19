@@ -21,7 +21,7 @@ REPO_ROOT = Path(__file__).parents[2]
 def _env(vmid: str) -> "dict[str, str]":
     return {
         "PYTHONPATH": str(REPO_ROOT),
-        "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_TEST_SYSTEM_DATABASE_URL": system_database_url(),
         "DBOS__VMID": vmid,
     }
 
@@ -29,9 +29,11 @@ def _env(vmid: str) -> "dict[str, str]":
 @pytest.mark.timeout(120)
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_activity_interceptor_runs_on_activity_worker() -> None:
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act"))
+    activity_worker = PythonProcess(WORKER, "activity", env=_env("dbosify-act"))
     activity_worker.start()
-    workflow_worker = PythonProcess(WORKER, "workflow", "xq-ic-wf", env=_env("tdb-wf"))
+    workflow_worker = PythonProcess(
+        WORKER, "workflow", "xq-ic-wf", env=_env("dbosify-wf")
+    )
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
         workflow_worker.start()

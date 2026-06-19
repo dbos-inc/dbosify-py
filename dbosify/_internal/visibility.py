@@ -6,8 +6,8 @@ the ``temporalio`` SDK ships no parser (``list_workflows`` passes the string
 straight into the gRPC request). DBOS, on the other side, takes structured
 keyword filters, not a query string. So we hand-roll a small parser for the
 documented subset and translate it into DBOS ``list_workflows`` filters, reusing
-our own status mapping (:mod:`temporal_dbos._internal.status`) and the stored
-search-attribute shape (:mod:`temporal_dbos._internal.attributes`).
+our own status mapping (:mod:`dbosify._internal.status`) and the stored
+search-attribute shape (:mod:`dbosify._internal.attributes`).
 
 Supported grammar — a flat ``AND`` conjunction, case-insensitive keywords::
 

@@ -1,7 +1,7 @@
 # Conformance tests
 
 Runs [temporalio/samples-python](https://github.com/temporalio/samples-python)
-samples against temporal-dbos. The resulting pass-rate table (mirrored in the
+samples against DBOSify. The resulting pass-rate table (mirrored in the
 top-level README) is the product's headline number (DESIGN.md §9).
 
 How it works:
@@ -9,7 +9,7 @@ How it works:
 1. `samples.py` clones samples-python at a **pinned commit** into a cache
    under the system temp directory (network needed on first run).
 2. The **mechanical migration step** rewrites the import root
-   (`temporalio` → `temporal_dbos`) into a temp build directory.
+   (`temporalio` → `dbosify`) into a temp build directory.
 3. `runner.py` executes one sample per subprocess with the
    **connection-setup adapter** installed — the documented migration delta:
    `Client.connect("host:port")` becomes a Client over a `DBOSClient`, and

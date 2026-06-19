@@ -118,7 +118,7 @@ SAMPLES = {
     ),
     "worker_specific_task_queues": Sample(
         package="worker_specific_task_queues",
-        skip="runs two Workers in one process; temporal-dbos is one Worker per "
+        skip="runs two Workers in one process; dbosify is one Worker per "
         "process (DESIGN §5)",
     ),
     # ---- skip: not runnable in this harness ---------------------------------
@@ -364,7 +364,7 @@ def test_feature_sample(
     sample = SAMPLES[sample_name]
     env = {
         "PYTHONPATH": f"{rewritten_root}{os.pathsep}{Path(__file__).parents[2]}",
-        "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
     }
     starter_args = [str(samples_root / f) for f in sample.starter_arg_files]
 

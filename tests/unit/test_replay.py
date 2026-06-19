@@ -6,11 +6,11 @@ from typing import Any, Dict, List
 
 import pytest
 
-from temporal_dbos import workflow
-from temporal_dbos._internal import replay
-from temporal_dbos.client import WorkflowHistory
-from temporal_dbos.exceptions import TemporalError
-from temporal_dbos.worker import (
+from dbosify import workflow
+from dbosify._internal import replay
+from dbosify.client import WorkflowHistory
+from dbosify.exceptions import TemporalError
+from dbosify.worker import (
     Replayer,
     WorkflowReplayResult,
     WorkflowReplayResults,
@@ -83,7 +83,7 @@ def test_replay_result_types() -> None:
 
 async def test_replay_one_rejects_non_replayable_states() -> None:
     # The status gate returns before any fork, so this needs no DBOS runtime.
-    from temporal_dbos.client import WorkflowExecutionStatus
+    from dbosify.client import WorkflowExecutionStatus
 
     for status in (
         WorkflowExecutionStatus.TERMINATED,
@@ -99,7 +99,7 @@ async def test_replay_one_rejects_non_replayable_states() -> None:
 
 
 async def test_fetch_history_events_not_supported() -> None:
-    from temporal_dbos.client import WorkflowHandle
+    from dbosify.client import WorkflowHandle
 
     handle = WorkflowHandle(None, "wf-id")  # type: ignore[arg-type]
     with pytest.raises(NotImplementedError):

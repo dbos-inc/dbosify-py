@@ -14,18 +14,18 @@ from typing import Any, AsyncIterator, Dict, List, Sequence
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
-from temporal_dbos.client import Client
-from temporal_dbos.common import (
+from dbosify import workflow
+from dbosify.client import Client
+from dbosify.common import (
     SearchAttributeKey,
     SearchAttributePair,
     TypedSearchAttributes,
 )
-from temporal_dbos.converter import DataConverter, Payload, PayloadCodec
-from temporal_dbos.worker import Worker
+from dbosify.converter import DataConverter, Payload, PayloadCodec
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "search-attr-tq"
 

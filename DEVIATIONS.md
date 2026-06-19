@@ -25,10 +25,10 @@ Postgres security: there is no Temporal-style mTLS endpoint or
 namespace-level access control.
 
 **Namespaces map to DBOS system schemas.** Each Temporal namespace gets its
-own Postgres schema (`temporal_<namespace>`) holding the DBOS system tables, so
+own Postgres schema (`dbosify_<namespace>`) holding the DBOS system tables, so
 workflows in different namespaces are isolated: the same workflow id can exist
 independently in two namespaces, and `list`/`describe` in one never sees the
-other. No namespace is privileged — `default` maps to `temporal_default`, not
+other. No namespace is privileged — `default` maps to `dbosify_default`, not
 the bare `dbos` schema. A `Worker` derives its `dbos_system_schema` from its
 `namespace` (it owns the runtime). `Client.connect(system_database_url,
 namespace=...)` builds the `DBOSClient` pointed at that namespace's schema, so
@@ -67,7 +67,7 @@ raw status queries) those runs read as ERROR — a healthy long-lived entity
 workflow that continues-as-new periodically looks like a stream of errored
 workflows there. Operating through both layers on the same execution
 requires care — the Temporal-faithful verbs and statuses are the
-`temporal_dbos` client APIs.
+`dbosify` client APIs.
 
 ## Identity and runs
 
@@ -251,7 +251,7 @@ won't match).
 
 Temporal's default for a synchronous (threaded) activity is to *raise* the
 cancellation into the worker thread (`no_thread_cancel_exception=False`, via an
-async thread exception). temporal-dbos never does this: a sync activity runs on
+async thread exception). DBOSify never does this: a sync activity runs on
 `asyncio.to_thread` and observes cancellation cooperatively — at its next
 `activity.heartbeat()` (which raises `CancelledError`), or by polling
 `activity.is_cancelled()` / `activity.wait_for_cancelled_sync()`. It therefore
@@ -473,7 +473,7 @@ temporalio; these edges differ:
   `memo`/`static_summary`/`static_details`/`priority`, are accepted and not
   stored; the action's `execution_timeout`/`task_timeout` are accepted but not
   applied (only `run_timeout` maps to a DBOS per-run timeout, as in
-  `start_workflow` — see D-note #14). `list_schedules` returns all temporal-dbos
+  `start_workflow` — see D-note #14). `list_schedules` returns all DBOSify
   schedules (the visibility `query` filter is ignored).
 
 ### D23. Cross-queue activities run on a different worker, with caveats
@@ -605,7 +605,7 @@ the SDK so signatures match. Scope and edges:
   and `data_converter_override`.
 - **Worker interceptors come only from `Worker(interceptors=)`.** temporalio also
   pulls in client interceptors that subclass the worker `Interceptor`; a
-  temporal_dbos Worker takes a `DBOSConfig`, not a client, so there is no client
+  DBOSify Worker takes a `DBOSConfig`, not a client, so there is no client
   to harvest interceptors from (a corollary of D2 / one-worker-per-process).
 - **`OutboundInterceptor` exposes only the verbs we route.** Workflow lifecycle
   (`start_workflow`, `signal`/`query`/`cancel`/`terminate`/`describe_workflow`,
@@ -679,7 +679,7 @@ Edges:
 
 - **Handler `description=` is stored but not surfaced.** temporalio exposes it
   through a `__temporal_workflow_metadata` query (backing `temporal workflow
-  metadata`); temporal-dbos has no such metadata query, so the description is
+  metadata`); DBOSify has no such metadata query, so the description is
   accepted and kept on the definition but never read. Inert metadata, not a
   behavior change.
 - **A dynamic activity's durable step is named `act:__dynamic__`** (one shared
@@ -691,7 +691,7 @@ Edges:
   runs and new runs are unaffected.
 
 **Dynamic workflows (`@workflow.defn(dynamic=True)`) are not supported** and
-raise `NotImplementedError`. temporal-dbos registers one DBOS workflow per
+raise `NotImplementedError`. DBOSify registers one DBOS workflow per
 Temporal type (`wf:{type}`, resolved decision DESIGN §10.1) so that native
 name-based listing/filtering works; a catch-all workflow has no such per-type
 registration for an unknown incoming type to dispatch to, so it conflicts with
@@ -713,7 +713,7 @@ set of patch ids already recorded in this run's step list (rebuilt at run start)
 memoized per id, and claims **no** checkpoint position — so an old in-flight run
 that never had the call keeps its function-id sequence and replays the older path
 deterministically. Only when the newer path is taken is a marker durably written,
-as a `@DBOS.step(name="__tdb_patch")` whose output is the patch id, routed through
+as a `@DBOS.step(name="__dbosify_patch")` whose output is the patch id, routed through
 the command queue so it lands at a deterministic position (replay reads it back).
 The set is keyed by id (set membership, like temporalio's `NotifyHasPatch`), not
 by position, so it is robust to code that shifts checkpoints.
@@ -850,7 +850,7 @@ written for it. Two consequences:
 once at run start (DESIGN §4.2). `workflow.random_seed()` returns that seed and
 `workflow.new_random()` returns a `Random` seeded from it. Temporal can update a
 workflow's seed mid-run (a `RandomSeedUpdated` history event), which is what
-`register_random_seed_callback` exists to react to; temporal-dbos never changes
+`register_random_seed_callback` exists to react to; DBOSify never changes
 the seed within a run, so the seed is stable for the run's lifetime and any
 callback registered via `register_random_seed_callback` (including the one
 `new_random` installs) is stored but **never invoked**. Code that relies only on
@@ -861,7 +861,7 @@ callback firing does not apply here.
 ### D32. Activity cancellation details are not tracked
 
 `activity.cancellation_details()` always returns `None` and
-`activity.ActivityCancellationDetails` is accepted only for parity. temporal-dbos
+`activity.ActivityCancellationDetails` is accepted only for parity. DBOSify
 delivers activity cancellation cooperatively (D26) — observed via
 `activity.is_cancelled()` / `wait_for_cancelled()` / `heartbeat()` — and does not
 record *why* an activity was cancelled (not-found / paused / reset / timed-out /
@@ -876,8 +876,8 @@ Temporal's metrics surface is **not implemented** in this first version:
 `MetricGauge[Float]` recording tree, and the **entire `temporalio.runtime`
 module** (`Runtime`, `TelemetryConfig`, `PrometheusConfig`,
 `OpenTelemetryConfig`, `LoggingConfig`, `MetricBuffer`, …) have no
-`temporal_dbos` equivalent. Code that calls `metric_meter()` raises
-`AttributeError`, and `import temporal_dbos.runtime` fails — the one place this
+`dbosify` equivalent. Code that calls `metric_meter()` raises
+`AttributeError`, and `import dbosify.runtime` fails — the one place this
 package does **not** mirror `temporalio`'s module layout (DESIGN §2).
 
 Why it's deferred rather than stubbed: in Temporal the metric *recording* API
@@ -890,7 +890,7 @@ A faithful version is real work: our own meter wired to a real exporter
 ship an inert no-op meter that silently drops business metrics (a worse failure
 mode than a clear `AttributeError`), v1 omits the surface entirely. Mitigation:
 instrument with `prometheus_client` / OpenTelemetry directly from workflow and
-activity code for now; a `temporal_dbos.runtime` + non-`noop` meter is a
+activity code for now; a `dbosify.runtime` + non-`noop` meter is a
 candidate for a later version.
 
 

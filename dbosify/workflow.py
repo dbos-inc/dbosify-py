@@ -156,7 +156,7 @@ def _maybe_runtime() -> Optional["_Runtime"]:
         loop: Optional[asyncio.AbstractEventLoop] = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    runtime = getattr(loop, "tdb_runtime", None)
+    runtime = getattr(loop, "dbosify_runtime", None)
     return runtime if isinstance(runtime, _Runtime) else None
 
 
@@ -211,7 +211,7 @@ class LoggerAdapter(logging.LoggerAdapter):  # type: ignore[type-arg]
         return self.logger
 
 
-logger = LoggerAdapter(logging.getLogger("temporal_dbos.workflow"), None)
+logger = LoggerAdapter(logging.getLogger("dbosify.workflow"), None)
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 _CT = TypeVar("_CT", bound=type)
@@ -221,7 +221,7 @@ _arg_unset = object()
 # The update currently being handled, surfaced by current_update_info(). Set by
 # the interpreter around an update validator/handler (see _internal/interpreter.py).
 _current_update_info: "contextvars.ContextVar[UpdateInfo]" = contextvars.ContextVar(
-    "__temporal_dbos_current_update_info"
+    "__dbosify_current_update_info"
 )
 
 
@@ -292,10 +292,10 @@ def defn(
     versioning_behavior: VersioningBehavior = VersioningBehavior.UNSPECIFIED,
 ) -> Union[_CT, Callable[[_CT], _CT]]:
     """Decorator for workflow classes. ``sandboxed`` is accepted and ignored
-    (temporal-dbos runs no sandbox — see the README deviations table).
+    (dbosify runs no sandbox — see the README deviations table).
 
     ``versioning_behavior`` is accepted and stored. ``PINNED`` is what
-    temporal-dbos enforces anyway (DBOS pins recovery/dequeue to the build ID =
+    dbosify enforces anyway (DBOS pins recovery/dequeue to the build ID =
     ``application_version``); ``AUTO_UPGRADE`` has no DBOS analog and degrades to
     pinned (DEVIATIONS D29).
 
@@ -307,7 +307,7 @@ def defn(
     """
     if dynamic:
         raise NotImplementedError(
-            "temporal-dbos does not support dynamic workflows "
+            "dbosify does not support dynamic workflows "
             "(@workflow.defn(dynamic=True)): a catch-all workflow type has no "
             "per-type DBOS registration to dispatch to (DESIGN §10.1, "
             "DEVIATIONS D25). Register each workflow type explicitly. Dynamic "
@@ -411,7 +411,7 @@ def query(
 
     def decorator(fn: _F) -> _F:
         if inspect.iscoroutinefunction(fn):
-            raise ValueError("Query handlers must be synchronous in temporal-dbos v0")
+            raise ValueError("Query handlers must be synchronous in dbosify v0")
         marker = None if dynamic else (name if name is not None else fn.__name__)
         setattr(fn, _registry.QUERY_ATTR, marker)
         setattr(fn, _registry.QUERY_DESC_ATTR, description)
@@ -707,7 +707,7 @@ class Info:
     def is_continue_as_new_suggested(self) -> bool:
         """Whether this run's checkpoint count has passed the
         continue-as-new suggestion threshold
-        (``TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD``, default 10000)."""
+        (``DBOSIFY_CAN_SUGGESTION_THRESHOLD``, default 10000)."""
         return _runtime().runtime_can_suggested()
 
     def get_current_build_id(self) -> str:
@@ -743,7 +743,7 @@ class Info:
 
     def is_target_worker_deployment_version_changed(self) -> bool:
         """Whether the target worker deployment version has changed
-        (upgrade-on-continue-as-new). Always False in temporal-dbos: workflows
+        (upgrade-on-continue-as-new). Always False in dbosify: workflows
         are pinned to their build id and never auto-upgrade (DEVIATIONS D29)."""
         return False
 
@@ -1003,7 +1003,7 @@ def _runtime() -> _Runtime:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    runtime = getattr(loop, "tdb_runtime", None)
+    runtime = getattr(loop, "dbosify_runtime", None)
     if runtime is None:
         raise RuntimeError("Not in workflow event loop")
     assert isinstance(runtime, _Runtime)
@@ -1256,7 +1256,7 @@ def random_seed() -> int:
 def register_random_seed_callback(callback: Callable[[int], None]) -> None:
     """Register a callback invoked when the workflow's random seed changes,
     mirroring ``temporalio.workflow.register_random_seed_callback``. In
-    temporal-dbos the seed is fixed for a run's lifetime (it never changes
+    dbosify the seed is fixed for a run's lifetime (it never changes
     mid-run), so the callback is stored but never invoked (DEVIATIONS D31)."""
     _runtime().runtime_register_random_seed_callback(callback)
 
@@ -1601,18 +1601,18 @@ class ContinueAsNewError(BaseException):
 
     def __init__(self, *args: object) -> None:
         super().__init__(*args)
-        self._tdb_args: Sequence[Any] = ()
-        self._tdb_workflow: Optional[str] = None
-        self._tdb_task_queue: Optional[str] = None
-        self._tdb_run_timeout: Optional[timedelta] = None
-        self._tdb_retry_policy: Optional[RetryPolicy] = None
-        self._tdb_memo: Optional[Mapping[str, Any]] = None
-        self._tdb_search_attributes: Optional[
+        self._dbosify_args: Sequence[Any] = ()
+        self._dbosify_workflow: Optional[str] = None
+        self._dbosify_task_queue: Optional[str] = None
+        self._dbosify_run_timeout: Optional[timedelta] = None
+        self._dbosify_retry_policy: Optional[RetryPolicy] = None
+        self._dbosify_memo: Optional[Mapping[str, Any]] = None
+        self._dbosify_search_attributes: Optional[
             Union[TypedSearchAttributes, SearchAttributes]
         ] = None
         # Interceptor headers for the new run, in wire form (set by the outbound
         # chain root); the chain's carried headers are dropped unless re-injected.
-        self._tdb_headers: Optional[Dict[str, Any]] = None
+        self._dbosify_headers: Optional[Dict[str, Any]] = None
 
 
 class NondeterminismError(exceptions.TemporalError):
@@ -2014,7 +2014,7 @@ def start_local_activity(
     activity_id: Optional[str] = None,
     summary: Optional[str] = None,
 ) -> ActivityHandle:
-    """Start a local activity. In temporal-dbos, in-process step execution
+    """Start a local activity. In dbosify, in-process step execution
     *is* the local path (DESIGN §6.1.2), so this shares machinery with
     ``start_activity``.
     """

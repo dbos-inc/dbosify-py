@@ -16,8 +16,8 @@ from typing import Any
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos._internal import inbox
-from temporal_dbos.client import Client, WorkflowUpdateStage
+from dbosify._internal import inbox
+from dbosify.client import Client, WorkflowUpdateStage
 from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess
 

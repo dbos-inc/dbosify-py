@@ -1,4 +1,4 @@
-# temporal-dbos: Design Document
+# DBOSify: Design Document
 
 A Python package that re-implements the Temporal Python SDK (`temporalio`) API on top of
 DBOS Transact, so that applications written against Temporal run on DBOS + Postgres with no
@@ -66,17 +66,17 @@ that is the core engineering work: the deterministic interpreter of §4.
 
 Two levels of drop-in were planned; only the first ships:
 
-1. **`temporal_dbos` package** mirroring `temporalio`'s module layout exactly:
-   `temporal_dbos.workflow`, `.activity`, `.client`, `.worker`, `.common`, `.exceptions`,
+1. **`dbosify` package** mirroring `temporalio`'s module layout exactly:
+   `dbosify.workflow`, `.activity`, `.client`, `.worker`, `.common`, `.exceptions`,
    `.converter`, `.testing`. Migration = change the import root. This is the primary —
    and only — supported migration path. (`temporalio.contrib.pydantic` is **not** mirrored
    — see §6.9; configure a custom `DataConverter` for pydantic support.)
-2. **Alias shim** for zero-change runs (`temporal_dbos.install()` + a
-   `python -m temporal_dbos run app.py` runner serving `temporalio.*` imports from
-   `temporal_dbos.*`): **out of scope** (cut from Phase 4 — see §9). The import-root swap
+2. **Alias shim** for zero-change runs (`dbosify.install()` + a
+   `python -m dbosify run app.py` runner serving `temporalio.*` imports from
+   `dbosify.*`): **out of scope** (cut from Phase 4 — see §9). The import-root swap
    in (1) is the only supported migration path.
 
-PyPI name `temporal-dbos`; import name `temporal_dbos`. Depends on `dbos` (PyPI pin;
+PyPI name `dbosify`; import name `dbosify`. Depends on `dbos` (PyPI pin;
 `/home/peter/dbos-transact-py` stays a read-only reference tree). Do **not** depend on
 `temporalio` at runtime; it may appear as a dev-dependency for signature-parity tests
 only (see §9).
@@ -84,7 +84,7 @@ only (see §9).
 Proposed layout:
 
 ```
-temporal_dbos/
+dbosify/
     __init__.py
     workflow.py            # @defn/@run/@signal/@query/@update, execute_activity, sleep, ...
     activity.py            # @defn, heartbeat, info, raise_complete_async, ...
@@ -96,7 +96,7 @@ temporal_dbos/
     types.py               # mirrored from temporalio.types as needed
     testing/
         __init__.py        # WorkflowEnvironment, ActivityEnvironment
-    # runner.py            # python -m temporal_dbos run — CUT (out of scope, §9)
+    # runner.py            # python -m dbosify run — CUT (out of scope, §9)
     # _shim.py             # temporalio alias meta-path finder — CUT (out of scope, §9)
     _internal/
         registry.py        # workflow-type/activity-type name -> definition
@@ -201,8 +201,8 @@ Event sources:
 
 1. **Inbox** — one totally-ordered durable message stream per execution. Anything external
    (signal, update request, query request, cooperative-cancel request) is delivered via
-   `DBOS.send(dbos_workflow_id, envelope, topic="__tdb_inbox__")` and consumed with
-   `DBOS.recv("__tdb_inbox__", timeout)`. `recv` is a checkpointed step in DBOS: first
+   `DBOS.send(dbos_workflow_id, envelope, topic="__dbosify_inbox__")` and consumed with
+   `DBOS.recv("__dbosify_inbox__", timeout)`. `recv` is a checkpointed step in DBOS: first
    execution records which message arrived; replay returns the same message. Order is
    thereby fixed at first execution.
 2. **Activity / child-workflow completions** — activities run as DBOS steps or child
@@ -281,7 +281,7 @@ Virtual-loop details:
   cheap and exactly Temporal's behavior). The DBOS workflow stays PENDING → maps to RUNNING.
   Honor `@workflow.defn(failure_exception_types=[...])` and
   `Worker(workflow_failure_exception_types=[...])` to convert listed types into workflow
-  failures instead. Provide an env-var escape hatch (`TEMPORAL_DBOS_FAIL_FAST=1`) that lets
+  failures instead. Provide an env-var escape hatch (`DBOSIFY_FAIL_FAST=1`) that lets
   dev/test runs fail immediately.
 
 ### 4.3 Phase 0 exit criteria (all under real Postgres)
@@ -392,7 +392,7 @@ ABANDON). `activity.info()` synthesized (task_token encodes the DBOS workflow id
 Heartbeat details must be visible to the next retry attempt via `info().heartbeat_details`.
 
 `activity.raise_complete_async()` + `client.get_async_activity_handle(task_token=...)`:
-the queued activity workflow parks on `DBOS.recv("__tdb_async_complete__", timeout=schedule_to_close)`;
+the queued activity workflow parks on `DBOS.recv("__dbosify_async_complete__", timeout=schedule_to_close)`;
 `AsyncActivityHandle.complete/fail/heartbeat/report_cancellation` → `DBOSClient.send` to the
 decoded workflow id. Phase 3.
 
@@ -404,7 +404,7 @@ as described in §4 (`asyncio.TimeoutError` on timeout, matching temporalio).
 #### 6.1.4 Worker
 See §5. Also: `Worker(activities=...)`-only workers (no workflows) are common — they must
 register the `__temporal_activity` dispatcher + queue and the activity registry only.
-`Replayer` (`temporal_dbos.worker.Replayer`) re-executes a run's DBOS step checkpoints
+`Replayer` (`dbosify.worker.Replayer`) re-executes a run's DBOS step checkpoints
 under the currently-registered code to detect non-determinism: it forks the source run one
 step past its last checkpoint (copying every recorded step) and re-runs it, mapping DBOS's
 `DBOSUnexpectedStepError` (plus an interpreter guard for "new step past the horizon" and
@@ -428,12 +428,12 @@ step past its last checkpoint (copying every recorded step) and re-runs it, mapp
   (`_internal/payloads.py`) so reconstruction is exact, including `.type`, `details`,
   `non_retryable`.
 - `handle.signal/query/execute_update/start_update` → inbox envelopes (§4). Update result
-  via `DBOS.get_event(dbos_id, f"__tdb_upd_{update_id}")`; rejection/failure encoded in the
+  via `DBOS.get_event(dbos_id, f"__dbosify_upd_{update_id}")`; rejection/failure encoded in the
   event payload → `WorkflowUpdateFailedError`. Update IDs: default `uuid4`; dedup via send
   `idempotency_key=update_id` + interpreter-side seen-set (rebuilt on replay).
   `WorkflowUpdateStage.ACCEPTED` vs `COMPLETED`: acceptance event
-  (`__tdb_upd_{id}_accepted`) set after the validator passes; the validator's verdict is
-  itself a checkpointed step (`__tdb_upd_validate`), so validators run exactly once and
+  (`__dbosify_upd_{id}_accepted`) set after the validator passes; the validator's verdict is
+  itself a checkpointed step (`__dbosify_upd_validate`), so validators run exactly once and
   replay reads the recorded verdict — Temporal's semantics (acceptance lives in history;
   validators are skipped on replay). Query reply via a per-request
   event key. **DEVIATION:** a RUNNING workflow is queried directly; a *closed* workflow is
@@ -469,10 +469,10 @@ step past its last checkpoint (copying every recorded step) and re-runs it, mapp
   **recommended** approach; same for activities `act:{type}`). Reject unsupported query
   constructs with a clear error listing what is supported. Phase 3.
 - Memo & search attributes: carried in the input envelope; `upsert_memo`/
-  `upsert_search_attributes` checkpoint into workflow events (`__tdb_memo`, `__tdb_sa`);
+  `upsert_search_attributes` checkpoint into workflow events (`__dbosify_memo`, `__dbosify_sa`);
   readable via describe; **DEVIATION:** not indexed/queryable in v1.
 
-### 6.3 Exceptions (`temporal_dbos.exceptions`)
+### 6.3 Exceptions (`dbosify.exceptions`)
 
 Re-create the full tree with exact constructors (copy from
 `/home/peter/competitors/temporal-sdk-python/temporalio/exceptions.py`):
@@ -516,7 +516,7 @@ Scheme (`_internal/ids.py`):
 - **Conflict policies** (vs a RUNNING run): `USE_EXISTING` → DBOS's natural idempotent
   start. `FAIL` (Temporal default behavior) → check current run status; if running, raise
   `WorkflowAlreadyStartedError`. There is an inherent TOCTOU window — accepted for v1
-  (document); a `__tdb_chain` claim row via a tiny step can close it later.
+  (document); a `__dbosify_chain` claim row via a tiny step can close it later.
   `TERMINATE_EXISTING` → native cancel then start next run. **Reuse policies** (vs closed
   runs): `ALLOW_DUPLICATE` → next n. `ALLOW_DUPLICATE_FAILED_ONLY` / `REJECT_DUPLICATE` →
   check last run's terminal status first. Phase 3 for the exotic ones; `USE_EXISTING`+
@@ -549,7 +549,7 @@ Scheme (`_internal/ids.py`):
   semantics): signals/queries/updates resolve the chain's current run per call, which is
   what keeps them routing correctly across continue-as-new; `result()` anchors on
   `result_run_id` (the started run) and follows forward. `is_continue_as_new_suggested()` is a threshold on the checkpoint
-  cursor (`TEMPORAL_DBOS_CAN_SUGGESTION_THRESHOLD`, default 10000, mirroring Temporal's
+  cursor (`DBOSIFY_CAN_SUGGESTION_THRESHOLD`, default 10000, mirroring Temporal's
   ~10k-events scale). `workflow.info().continued_run_id` is the run's DBOS parent link
   when it points within the same chain (DBOS threads `parent_workflow_id` for in-workflow
   starts, which a CAN enqueue is; real parents point at a different chain base and
@@ -675,7 +675,7 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   implementation. The decision (`not is_replaying() or id in recorded-markers`) is computed
   synchronously at the call site, memoized per id, and — crucially — claims **no**
   function_id; only when the newer path is taken is a marker durably written (a
-  `@DBOS.step(name="__tdb_patch")` whose output is the id, queued through the command queue
+  `@DBOS.step(name="__dbosify_patch")` whose output is the id, queued through the command queue
   so it lands at a deterministic checkpoint position). First execution records the marker and
   takes the newer path; replay of a pre-patch history finds no marker, returns `False`, and —
   because the False decision consumed no position — replays the older path with its original
@@ -724,7 +724,7 @@ The realized envelope is a small payload dict (`{encoding, json|b64, meta?}`,
 `_internal/conversion.py`) — readable on disk — rather than the `{type_name, payloads}`
 sketch above; type hints come from signatures, codecs run at the async boundaries.
 
-### 6.10 Testing module (`temporal_dbos.testing`)
+### 6.10 Testing module (`dbosify.testing`)
 
 - `ActivityEnvironment`: pure in-memory (no DB) — trivial port; do it in Phase 1 (cheap
   goodwill, used by many test suites).
@@ -831,7 +831,7 @@ SIGKILL-recovery tests; written answer to the `next_event`-vs-`asyncio_wait` que
 `handle.result/describe`, `Worker` + `async with`, exceptions module complete,
 `ActivityEnvironment`. (Default JSON data conversion moved to Phase 3 — see below.)
 **Exit:** Temporal's hello-world quad and the `samples-python` `hello/` directory run
-against `temporal_dbos` with the import swap plus connection-setup adaptation (§5 revised);
+against `dbosify` with the import swap plus connection-setup adaptation (§5 revised);
 samples needing later-phase features are xfail-tagged with their blocking phase in the
 conformance suite. Achieved: 11/19 runnable hello samples pass (table in README).
 
@@ -899,11 +899,11 @@ failure mode this audit exists to catch.
 **Cut from Phase 4 (out of scope):** the time-skipping `WorkflowEnvironment`
 (`start_time_skipping` raises `NotImplementedError`, `supports_time_skipping` is `False`;
 tests use the real-time `start_local` env) and the `temporalio` alias shim +
-`python -m temporal_dbos run` runner — the import-root swap (§2.1) is the only supported
+`python -m dbosify run` runner — the import-root swap (§2.1) is the only supported
 migration path.
 
 Conformance harness (`tests/conformance/`) runs from Phase 1: clone `samples-python`,
-rewrite imports mechanically (`temporalio` → `temporal_dbos`), run each sample's worker +
+rewrite imports mechanically (`temporalio` → `dbosify`), run each sample's worker +
 starter against ephemeral Postgres, assert outputs. The pass-rate table *is* the product
 spec and the headline number.
 

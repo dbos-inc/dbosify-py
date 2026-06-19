@@ -1,10 +1,10 @@
-# temporal-dbos
+# DBOSify
 
 A drop-in replacement for the [Temporal Python SDK](https://github.com/temporalio/sdk-python)
 (`temporalio`), backed by [DBOS Transact](https://github.com/dbos-inc/dbos-transact-py)
 and Postgres instead of a Temporal server.
 
-Code written against `temporalio` runs on `temporal_dbos` with an import-root swap: same
+Code written against `temporalio` runs on `dbosify` with an import-root swap: same
 decorators, same call signatures, same exception types, same durability guarantees —
 workflows survive process crashes and resume correctly — with no Temporal server to
 operate. All you need is Postgres.
@@ -27,8 +27,8 @@ roadmap.
 
 The conformance suite (`tests/conformance/`) runs the
 [temporalio/samples-python](https://github.com/temporalio/samples-python)
-`hello/` corpus against temporal-dbos. Migration = the mechanical import
-rewrite (`temporalio` → `temporal_dbos`) plus adapting connection setup
+`hello/` corpus against DBOSify. Migration = the mechanical import
+rewrite (`temporalio` → `dbosify`) plus adapting connection setup
 (`Client.connect` takes a `dbos.DBOSClient`; `Worker` takes a
 `dbos.DBOSConfig`). Workflow and activity code runs unmodified. The
 `message_passing/` corpus passes 5/5.
@@ -122,7 +122,7 @@ temporary are phase-gaps tracked by the conformance suite, not fundamentals.
 | 19 | `workflow.patched()` / `deprecate_patch()` are supported (durable checkpoint markers; a False verdict claims no position so pre-patch runs replay the old path). Use `patched()` for in-code branching across deploys. See [DEVIATIONS.md](DEVIATIONS.md) D28. |
 | 20 | Worker **deployment versioning** maps onto DBOS versioning: a build ID *is* the DBOS `application_version` (set via `Worker(build_id=)`/`Worker(deployment_config=)`, readable via `workflow.info().get_current_deployment_version()`/`get_current_build_id()`). Because DBOS scopes recovery and queue dequeue to `application_version`, **PINNED is enforced** — a workflow is recovered/continued only on workers of its build ID and never auto-migrates. What's unsupported is **AUTO_UPGRADE** (moving a running workflow to a newer version) and cluster ramping/routing; those requests (`VersioningBehavior.AUTO_UPGRADE`, `AutoUpgradeVersioningOverride`, `versioning_intent`) degrade to pinned, and `is_target_worker_deployment_version_changed()` is always `False`. See [DEVIATIONS.md](DEVIATIONS.md) D29. |
 | 21 | `workflow.set_current_details()`/`get_current_details()` back free-form UI/CLI details as in-memory workflow state, reconstructed on replay; settable on the deterministic loop (run/handlers), not surfaced to `describe()` in v1. Activity context helpers — `activity.is_worker_shutdown()`/`wait_for_worker_shutdown[_sync]()`, `shield_thread_cancel_exception()` (no-op, cooperative cancel), and `activity.client()` (lazily built from the Worker's `DBOSConfig`) — are supported. See [DEVIATIONS.md](DEVIATIONS.md) D30. |
-| 22 | **Metrics are not implemented in v1.** `workflow.metric_meter()`/`activity.metric_meter()`, the `common.MetricMeter`/`MetricCounter`/`MetricHistogram`/`MetricGauge` tree, and the entire `temporalio.runtime` telemetry module (`Runtime`, `TelemetryConfig`, `PrometheusConfig`, `OpenTelemetryConfig`, …) have no `temporal_dbos` equivalent — calling `metric_meter()` raises `AttributeError` and `import temporal_dbos.runtime` fails. Instrument with `prometheus_client`/OpenTelemetry directly for now. See [DEVIATIONS.md](DEVIATIONS.md) D33. |
+| 22 | **Metrics are not implemented in v1.** `workflow.metric_meter()`/`activity.metric_meter()`, the `common.MetricMeter`/`MetricCounter`/`MetricHistogram`/`MetricGauge` tree, and the entire `temporalio.runtime` telemetry module (`Runtime`, `TelemetryConfig`, `PrometheusConfig`, `OpenTelemetryConfig`, …) have no `dbosify` equivalent — calling `metric_meter()` raises `AttributeError` and `import dbosify.runtime` fails. Instrument with `prometheus_client`/OpenTelemetry directly for now. See [DEVIATIONS.md](DEVIATIONS.md) D33. |
 
 ## Development
 
@@ -135,6 +135,6 @@ uv run black . && uv run isort .  # format
 ```
 
 Integration tests need a running Postgres server (CI provides one; locally, point tests
-at your own). Configure with `TDB_TEST_SYSTEM_DATABASE_URL` or `PGHOST`/`PGPORT`/
+at your own). Configure with `DBOSIFY_TEST_SYSTEM_DATABASE_URL` or `PGHOST`/`PGPORT`/
 `PGUSER`/`PGPASSWORD`. Tests drop and re-create their own databases on that server —
 don't point them at a server whose databases you care about.

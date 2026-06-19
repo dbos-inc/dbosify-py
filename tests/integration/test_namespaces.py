@@ -6,13 +6,13 @@ a non-namespace schema is unit-tested in tests/unit/test_namespaces.py."""
 import pytest
 from dbos import DBOSConfig
 
-from temporal_dbos import worker as _worker_mod
-from temporal_dbos import workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import worker as _worker_mod
+from dbosify import workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "ns-tq"
 
@@ -28,7 +28,7 @@ def _config_for(namespace: str) -> DBOSConfig:
     # No dbos_system_schema: the Worker derives it from `namespace` (the Worker
     # also installs the serializer). A conflicting explicit schema is an error.
     return {
-        "name": f"tdb_ns_{namespace}",
+        "name": f"dbosify_ns_{namespace}",
         "system_database_url": system_database_url(),
         "run_admin_server": False,
         "notification_listener_polling_interval_sec": 0.01,

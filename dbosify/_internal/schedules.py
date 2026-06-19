@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 from dbos._croniter import croniter  # type: ignore[attr-defined]
 
-logger = logging.getLogger("temporal_dbos.schedules")
+logger = logging.getLogger("dbosify.schedules")
 
 __all__ = [
     "next_fire_delay",

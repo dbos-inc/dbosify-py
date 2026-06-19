@@ -12,8 +12,8 @@ import pytest
 import temporalio.worker
 from dbos import DBOSConfig
 
-from temporal_dbos import workflow
-from temporal_dbos.worker import _REJECTED_OPTIONS, Worker
+from dbosify import workflow
+from dbosify.worker import _REJECTED_OPTIONS, Worker
 from tests.unit._param_audit import (
     Bucket,
     assert_buckets_disjoint,

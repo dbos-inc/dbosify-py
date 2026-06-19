@@ -12,7 +12,7 @@ from typing import Any, List, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos._internal import conversion, inbox
+from dbosify._internal import conversion, inbox
 from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess
 

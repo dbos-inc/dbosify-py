@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Release automation script for temporal-dbos.
+Release automation script for dbosify.
 
 This script automates the release process:
 1. Validates the repository state (clean, on main, up-to-date)
@@ -142,7 +142,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Create a new release for temporal-dbos",
+        description="Create a new release for dbosify",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

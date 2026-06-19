@@ -1,5 +1,5 @@
 """Phase 1 public-API tests: the hello-world quad and friends, written the
-way a temporal-dbos app is: a Worker built from a DBOSConfig (owning the
+way a dbosify app is: a Worker built from a DBOSConfig (owning the
 process's DBOS lifecycle), a Client wrapping a DBOSClient.
 """
 
@@ -12,8 +12,8 @@ from typing import Any, AsyncIterator, List, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify.client import (
     Client,
     WithStartWorkflowOperation,
     WorkflowExecutionStatus,
@@ -22,15 +22,15 @@ from temporal_dbos.client import (
     WorkflowUpdateFailedError,
     WorkflowUpdateStage,
 )
-from temporal_dbos.common import QueryRejectCondition, WorkflowIDConflictPolicy
-from temporal_dbos.exceptions import (
+from dbosify.common import QueryRejectCondition, WorkflowIDConflictPolicy
+from dbosify.exceptions import (
     ApplicationError,
     WorkflowAlreadyStartedError,
 )
-from temporal_dbos.worker import Worker
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "phase1-tq"
 

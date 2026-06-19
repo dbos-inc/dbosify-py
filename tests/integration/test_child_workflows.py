@@ -13,20 +13,20 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client, WorkflowExecutionStatus, WorkflowFailureError
-from temporal_dbos.common import RetryPolicy
-from temporal_dbos.exceptions import (
+from dbosify import activity, workflow
+from dbosify.client import Client, WorkflowExecutionStatus, WorkflowFailureError
+from dbosify.common import RetryPolicy
+from dbosify.exceptions import (
     ApplicationError,
     CancelledError,
     ChildWorkflowError,
     TerminatedError,
     WorkflowAlreadyStartedError,
 )
-from temporal_dbos.worker import Worker
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "phase2-child-tq"
 

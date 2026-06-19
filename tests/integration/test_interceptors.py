@@ -13,28 +13,28 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos._internal import conversion
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify._internal import conversion
+from dbosify.client import (
     Client,
 )
-from temporal_dbos.client import Interceptor as ClientInterceptor
-from temporal_dbos.client import (
+from dbosify.client import Interceptor as ClientInterceptor
+from dbosify.client import (
     OutboundInterceptor,
     Schedule,
     ScheduleActionStartWorkflow,
     ScheduleIntervalSpec,
     ScheduleSpec,
 )
-from temporal_dbos.common import (
+from dbosify.common import (
     QueryRejectCondition,
     RetryPolicy,
     SearchAttributeKey,
     SearchAttributePair,
     TypedSearchAttributes,
 )
-from temporal_dbos.exceptions import ApplicationError
-from temporal_dbos.worker import (
+from dbosify.exceptions import ApplicationError
+from dbosify.worker import (
     ActivityInboundInterceptor,
     ActivityOutboundInterceptor,
     ContinueAsNewInput,
@@ -42,8 +42,8 @@ from temporal_dbos.worker import (
     ExecuteWorkflowInput,
     HandleSignalInput,
 )
-from temporal_dbos.worker import Interceptor as WorkerInterceptor
-from temporal_dbos.worker import (
+from dbosify.worker import Interceptor as WorkerInterceptor
+from dbosify.worker import (
     StartActivityInput,
     StartChildWorkflowInput,
     Worker,
@@ -54,7 +54,7 @@ from temporal_dbos.worker import (
 from tests.dbconfig import default_config, system_database_url
 from tests.harness import retry_until_success_async
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "interceptors-tq"
 
@@ -949,7 +949,7 @@ async def test_header_survives_payload_codec() -> None:
     through the full channel (client -> workflow -> activity -> child)."""
     from typing import Sequence
 
-    from temporal_dbos.converter import DataConverter, Payload, PayloadCodec
+    from dbosify.converter import DataConverter, Payload, PayloadCodec
 
     class _XorCodec(PayloadCodec):
         async def encode(self, payloads: Sequence[Payload]) -> List[Payload]:

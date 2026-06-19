@@ -24,9 +24,9 @@ from datetime import timedelta
 
 from dbos import DBOS, DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import activity, workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 ACTIVITY_TASK_QUEUE = "xq-recovery-activity-tq"
@@ -39,7 +39,7 @@ async def slow_say_hello(name: str) -> str:
     print("ACTIVITY_RUNNING", flush=True)
     # One line per real execution: the kill-the-activity-worker test re-runs
     # the activity (at-least-once), the kill-the-workflow-worker test must not.
-    with open(os.environ["TDB_TEST_EFFECTS"], "a") as f:
+    with open(os.environ["DBOSIFY_TEST_EFFECTS"], "a") as f:
         f.write("ran\n")
     await asyncio.sleep(ACTIVITY_SLEEP_SECONDS)
     print("ACTIVITY_DONE", flush=True)

@@ -1,10 +1,10 @@
-"""Unit tests for ``temporal_dbos.common`` value types."""
+"""Unit tests for ``dbosify.common`` value types."""
 
 import dataclasses
 
 import pytest
 
-from temporal_dbos.common import Priority
+from dbosify.common import Priority
 
 
 def test_priority_default_is_all_unset() -> None:

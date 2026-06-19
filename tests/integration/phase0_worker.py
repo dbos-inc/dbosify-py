@@ -22,9 +22,9 @@ from typing import Any, List, Optional
 
 from dbos import DBOS
 
-from temporal_dbos import activity, workflow
-from temporal_dbos._internal import dispatcher
-from temporal_dbos.exceptions import ApplicationError
+from dbosify import activity, workflow
+from dbosify._internal import dispatcher
+from dbosify.exceptions import ApplicationError
 from tests.dbconfig import default_config
 
 ACTIVITY_TIMEOUT = timedelta(seconds=10)

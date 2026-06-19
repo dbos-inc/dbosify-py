@@ -30,7 +30,7 @@ from . import activities as activities_mod
 from . import inbox, registry
 from .payloads import deserialize_retry_policy, serialize_failure
 
-logger = logging.getLogger("temporal_dbos.activity_workflow")
+logger = logging.getLogger("dbosify.activity_workflow")
 
 ACTIVITY_DISPATCH_NAME = "__temporal_activity"
 
@@ -46,7 +46,7 @@ def _activity_started_at() -> Any:
     global _started_at_step
     if _started_at_step is None:
 
-        @DBOS.step(name="__tdb_activity_started_at")
+        @DBOS.step(name="__dbosify_activity_started_at")
         async def started_at() -> float:
             return time_mod.time()
 
@@ -60,7 +60,7 @@ def _activity_created_at(workflow_id: str) -> Any:
     global _created_at_step
     if _created_at_step is None:
 
-        @DBOS.step(name="__tdb_activity_created_at")
+        @DBOS.step(name="__dbosify_activity_created_at")
         async def created_at(workflow_id: str) -> Optional[float]:
             status = await DBOS.get_workflow_status_async(workflow_id)
             if status is None or status.created_at is None:

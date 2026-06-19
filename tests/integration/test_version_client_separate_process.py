@@ -14,7 +14,7 @@ from typing import Optional, Tuple
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos.client import Client
+from dbosify.client import Client
 from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess, build_id_env
 from tests.integration.version_client_worker import TASK_QUEUE, VersionEcho

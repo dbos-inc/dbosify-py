@@ -30,8 +30,8 @@ REPO_ROOT = Path(__file__).parents[2]
 def _env(vmid: str, effects: Path) -> "dict[str, str]":
     return {
         "PYTHONPATH": str(REPO_ROOT),
-        "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
-        "TDB_TEST_EFFECTS": str(effects),
+        "DBOSIFY_TEST_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_TEST_EFFECTS": str(effects),
         "DBOS__VMID": vmid,
     }
 
@@ -42,10 +42,12 @@ def test_sigkill_activity_worker_mid_activity_recovers(tmp_path: Path) -> None:
     effects = tmp_path / "effects"
     wf_id = "xq-kill-activity-wf"
 
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act", effects))
+    activity_worker = PythonProcess(
+        WORKER, "activity", env=_env("dbosify-act", effects)
+    )
     activity_worker.start()
     workflow_worker = PythonProcess(
-        WORKER, "workflow", "start", wf_id, env=_env("tdb-wf", effects)
+        WORKER, "workflow", "start", wf_id, env=_env("dbosify-wf", effects)
     )
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
@@ -57,7 +59,7 @@ def test_sigkill_activity_worker_mid_activity_recovers(tmp_path: Path) -> None:
 
         # A fresh activity worker (same vmid) recovers the orphaned activity
         # workflow and re-runs it to completion.
-        revived = PythonProcess(WORKER, "activity", env=_env("tdb-act", effects))
+        revived = PythonProcess(WORKER, "activity", env=_env("dbosify-act", effects))
         revived.start()
         try:
             revived.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
@@ -77,13 +79,15 @@ def test_sigkill_workflow_worker_reattaches_to_activity(tmp_path: Path) -> None:
     effects = tmp_path / "effects"
     wf_id = "xq-kill-workflow-wf"
 
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act", effects))
+    activity_worker = PythonProcess(
+        WORKER, "activity", env=_env("dbosify-act", effects)
+    )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
 
         first = PythonProcess(
-            WORKER, "workflow", "start", wf_id, env=_env("tdb-wf", effects)
+            WORKER, "workflow", "start", wf_id, env=_env("dbosify-wf", effects)
         )
         first.start()
         try:
@@ -100,7 +104,7 @@ def test_sigkill_workflow_worker_reattaches_to_activity(tmp_path: Path) -> None:
 
         # A new workflow worker re-attaches to the same activity and resolves.
         second = PythonProcess(
-            WORKER, "workflow", "resume", wf_id, env=_env("tdb-wf", effects)
+            WORKER, "workflow", "resume", wf_id, env=_env("dbosify-wf", effects)
         )
         second.start()
         try:

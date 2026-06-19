@@ -12,8 +12,8 @@ from typing import AsyncIterator, Optional
 import pytest
 from dbos import DBOSClient, DBOSConfig
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify.client import (
     Client,
     Schedule,
     ScheduleActionStartWorkflow,
@@ -27,16 +27,16 @@ from temporal_dbos.client import (
     ScheduleUpdateInput,
     WorkflowExecutionStatus,
 )
-from temporal_dbos.common import (
+from dbosify.common import (
     SearchAttributeKey,
     SearchAttributePair,
     TypedSearchAttributes,
 )
-from temporal_dbos.worker import Worker
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 from tests.harness import retry_until_success_async
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "sched-tq"
 ACTION_WF_NAME = "wf:ScheduledGreeter"
@@ -449,7 +449,7 @@ async def test_schedule_persists_across_worker_restart() -> None:
     async with _env() as client:
         await client.create_schedule("sched-persist", _interval_schedule())
 
-    from temporal_dbos import worker as _worker_mod
+    from dbosify import worker as _worker_mod
 
     _worker_mod._reset_for_tests()
 

@@ -75,11 +75,11 @@ def dbos_client(dbos: DBOS) -> Generator[DBOSClient, Any, None]:
 
 
 @pytest.fixture()
-def tdb_env(cleanup_test_databases: None) -> Generator[None, Any, None]:
+def dbosify_env(cleanup_test_databases: None) -> Generator[None, Any, None]:
     """A clean slate for public-API (Client/Worker) tests: fresh database;
     the Worker owns the DBOS lifecycle itself.
     """
-    from temporal_dbos import worker
+    from dbosify import worker
 
     worker._reset_for_tests()
     yield
@@ -87,15 +87,15 @@ def tdb_env(cleanup_test_databases: None) -> Generator[None, Any, None]:
 
 
 @pytest.fixture()
-def tdb(dbos: DBOS) -> DBOS:
-    """A launched DBOS plus clean temporal-dbos registries.
+def dbosify(dbos: DBOS) -> DBOS:
+    """A launched DBOS plus clean dbosify registries.
 
-    The temporal-dbos registries are module-global (per-process, like real
+    The dbosify registries are module-global (per-process, like real
     worker processes), while the `dbos` fixture destroys and re-creates the
     DBOS registry per test — so cached per-type dispatchers would point at a
     destroyed registry. Reset ours to match.
     """
-    from temporal_dbos._internal import dispatcher
+    from dbosify._internal import dispatcher
 
     dispatcher._reset_for_tests()
     return dbos

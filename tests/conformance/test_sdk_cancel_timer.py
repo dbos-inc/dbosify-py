@@ -6,9 +6,9 @@ from typing import Any, NoReturn, Optional, cast
 
 import pytest
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client, WorkflowFailureError
-from temporal_dbos.exceptions import (
+from dbosify import activity, workflow
+from dbosify.client import Client, WorkflowFailureError
+from dbosify.exceptions import (
     ActivityError,
     ApplicationError,
     CancelledError,
@@ -16,7 +16,7 @@ from temporal_dbos.exceptions import (
 )
 from tests.conformance.sdk_harness import assert_eq_eventually, new_worker, wid
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 
 # ---------------------------------------------------------------------------
@@ -702,7 +702,7 @@ async def test_workflow_timeout_support(client: Client, approach: str) -> None:
 
 @pytest.mark.skip(
     reason="workflow.uncancel / task.uncancel shield-loop counter is not implemented "
-    "(temporal_dbos.workflow has no uncancel); the test also relies on "
+    "(dbosify.workflow has no uncancel); the test also relies on "
     "LogCapturer + history-event server-only assertions."
 )
 async def test_workflow_uncancel_shield_activity() -> None:
@@ -711,7 +711,7 @@ async def test_workflow_uncancel_shield_activity() -> None:
 
 @pytest.mark.skip(
     reason="workflow.uncancel / task.uncancel shield-loop counter is not implemented "
-    "(temporal_dbos.workflow has no uncancel); the test also relies on "
+    "(dbosify.workflow has no uncancel); the test also relies on "
     "LogCapturer + history-event server-only assertions."
 )
 async def test_workflow_uncancel_shield_child_workflow() -> None:
@@ -720,7 +720,7 @@ async def test_workflow_uncancel_shield_child_workflow() -> None:
 
 @pytest.mark.skip(
     reason="workflow.uncancel / task.uncancel shield-loop counter is not implemented "
-    "(temporal_dbos.workflow has no uncancel); the test also relies on "
+    "(dbosify.workflow has no uncancel); the test also relies on "
     "LogCapturer server-only assertions."
 )
 async def test_workflow_uncancel_shield_signal_external() -> None:

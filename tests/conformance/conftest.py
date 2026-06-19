@@ -11,7 +11,7 @@ import pytest
 import sqlalchemy as sa
 from dbos import DBOSClient
 
-from temporal_dbos.client import Client
+from dbosify.client import Client
 from tests.dbconfig import system_database_url
 
 
@@ -38,7 +38,7 @@ def _ensure_database_exists() -> None:
 
 
 @pytest.fixture()
-def client(tdb_env: None) -> Iterator[Client]:
+def client(dbosify_env: None) -> Iterator[Client]:
     _ensure_database_exists()
     dbos_client = DBOSClient(system_database_url=system_database_url())
     try:

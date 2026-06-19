@@ -10,8 +10,8 @@ empty string. The crash-and-reconstruct proof lives in
 
 import pytest
 
-from temporal_dbos import workflow
-from temporal_dbos._internal import dispatcher
+from dbosify import workflow
+from dbosify._internal import dispatcher
 
 
 @workflow.defn
@@ -37,7 +37,7 @@ class DetailsWorkflow:
         return workflow.get_current_details()
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_details_set_in_run_returned() -> None:
     dispatcher.register_worker(workflows=[DetailsWorkflow])
     handle = dispatcher.start_workflow(DetailsWorkflow, [], workflow_id="details-run")
@@ -46,7 +46,7 @@ def test_details_set_in_run_returned() -> None:
     assert dispatcher.workflow_result(handle) == "initial"
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_details_updated_by_signal_handler() -> None:
     dispatcher.register_worker(workflows=[DetailsWorkflow])
     handle = dispatcher.start_workflow(DetailsWorkflow, [], workflow_id="details-sig")

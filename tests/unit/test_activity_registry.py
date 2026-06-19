@@ -4,8 +4,8 @@ heartbeat-store hygiene around cancellation.
 
 import pytest
 
-from temporal_dbos import activity
-from temporal_dbos.exceptions import CancelledError
+from dbosify import activity
+from dbosify.exceptions import CancelledError
 
 KEY = ("unit-run", 7)
 

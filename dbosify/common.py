@@ -80,7 +80,7 @@ class Priority:
     """Priority metadata controlling relative task-processing order, mirroring
     ``temporalio.common.Priority``.
 
-    temporal-dbos does not implement priority-based dispatch (DBOS queues are
+    dbosify does not implement priority-based dispatch (DBOS queues are
     FIFO), so this type exists for signature parity and for the default that
     ``workflow.info().priority`` / ``activity.info().priority`` return —
     temporalio specifies an unset priority surfaces as the default instance,
@@ -561,7 +561,7 @@ def _warn_on_deprecated_search_attributes(
 #
 # Temporal's Worker Deployment Versioning lets a workflow be pinned to (or
 # auto-upgraded across) worker build versions for safe rolling deploys. In
-# temporal-dbos a "deployment version" maps onto DBOS's own versioning:
+# dbosify a "deployment version" maps onto DBOS's own versioning:
 # ``deployment_name`` is the DBOS application name and ``build_id`` is the DBOS
 # ``application_version``. DBOS scopes both workflow recovery and queue dequeue
 # to ``application_version``, so a workflow is recovered/continued only on
@@ -575,7 +575,7 @@ class VersioningBehavior(IntEnum):
     """Specifies when a workflow might move from a worker of one Build Id to
     another, mirroring ``temporalio.common.VersioningBehavior``.
 
-    ``PINNED`` is temporal-dbos's enforced behavior (DBOS pins recovery/dequeue
+    ``PINNED`` is dbosify's enforced behavior (DBOS pins recovery/dequeue
     to ``application_version`` = the build ID). ``AUTO_UPGRADE`` has no DBOS
     analog and degrades to pinned. See DEVIATIONS D29.
     """
@@ -594,7 +594,7 @@ class WorkerDeploymentVersion:
     """Represents the version of a specific worker deployment, mirroring
     ``temporalio.common.WorkerDeploymentVersion``.
 
-    In temporal-dbos ``deployment_name`` is the DBOS application name and
+    In dbosify ``deployment_name`` is the DBOS application name and
     ``build_id`` is the DBOS ``application_version``.
     """
 
@@ -624,7 +624,7 @@ class VersioningOverride(ABC):
     """Represents the override of a worker's versioning behavior for a workflow
     execution, mirroring ``temporalio.common.VersioningOverride``.
 
-    ``PinnedVersioningOverride`` matches temporal-dbos's enforced default;
+    ``PinnedVersioningOverride`` matches dbosify's enforced default;
     ``AutoUpgradeVersioningOverride`` has no DBOS analog (DEVIATIONS D29).
     """
 

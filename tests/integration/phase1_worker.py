@@ -13,9 +13,9 @@ from typing import List
 
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import activity, workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 TASK_QUEUE = "phase1-recovery-tq"

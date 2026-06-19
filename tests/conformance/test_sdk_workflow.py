@@ -5,7 +5,7 @@ Those tests are the most rigorous behavioral conformance corpus available — fa
 more focused than the samples. Each defines a workflow/activity and asserts
 exact behavior via ``new_worker(client, ...)`` + ``client.execute_workflow``.
 We vendor the self-contained, pure-behavioral ones here, import-swapped to
-``temporal_dbos`` and run through this module's harness (a ``client`` fixture
+``dbosify`` and run through this module's harness (a ``client`` fixture
 over our Worker/DBOSClient and a ``new_worker`` adapter that maps temporalio's
 ``Worker(client, ...)`` onto our ``Worker(DBOSConfig, ...)``). Tests that depend
 on server-only surfaces (Temporal history events, the time-skipping clock,
@@ -37,8 +37,8 @@ import pytest
 import sqlalchemy as sa
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowFailureError,
@@ -47,8 +47,8 @@ from temporal_dbos.client import (
     WorkflowUpdateFailedError,
     WorkflowUpdateStage,
 )
-from temporal_dbos.common import RawValue, RetryPolicy
-from temporal_dbos.exceptions import (
+from dbosify.common import RawValue, RetryPolicy
+from dbosify.exceptions import (
     ActivityError,
     ApplicationError,
     CancelledError,
@@ -56,11 +56,11 @@ from temporal_dbos.exceptions import (
     TimeoutError,
     WorkflowAlreadyStartedError,
 )
-from temporal_dbos.worker import Worker
+from dbosify.worker import Worker
 from tests.conformance.sdk_harness import warm_schema
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 T = TypeVar("T")
 
@@ -91,7 +91,7 @@ def _ensure_database_exists() -> None:
 
 
 @pytest.fixture()
-def client(tdb_env: None) -> Iterator[Client]:
+def client(dbosify_env: None) -> Iterator[Client]:
     _ensure_database_exists()
     dbos_client = DBOSClient(system_database_url=system_database_url())
     try:
