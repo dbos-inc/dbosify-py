@@ -57,6 +57,7 @@ from temporal_dbos.exceptions import (
     WorkflowAlreadyStartedError,
 )
 from temporal_dbos.worker import Worker
+from tests.conformance.sdk_harness import warm_schema
 from tests.dbconfig import default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("tdb_env")
@@ -648,16 +649,13 @@ class TrapCancelWorkflow:
             return "cancelled"
 
 
-@pytest.mark.skip(
-    reason="Infrastructure ordering, not workflow semantics: our Worker owns DBOS "
-    "schema creation (DESIGN §5), so a client start/cancel issued before ANY Worker "
-    "has launched against a fresh database hits the unmigrated `temporal_default` "
-    "schema. temporalio's server is always up. The behavior under test (cancel "
-    "delivered before the first workflow task runs) is covered by simple_cancel and "
-    "cancel_child_unstarted, where a Worker has already migrated the schema."
-)
 async def test_workflow_cancel_before_run(client: Client) -> None:
     # Start the workflow _and_ send cancel before the worker even exists.
+    # warm_schema pre-migrates the namespace schema (our Worker owns schema
+    # creation, DESIGN §5; production always has it) so client start/cancel can
+    # run before the workflow's own worker launches — modelling Temporal's
+    # always-up server.
+    await warm_schema(client)
     task_queue = str(uuid.uuid4())
     handle = await client.start_workflow(
         TrapCancelWorkflow.run, id=_wid(), task_queue=task_queue

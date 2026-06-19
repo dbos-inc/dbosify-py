@@ -76,3 +76,23 @@ class HelloWorkflow:
     @workflow.run
     async def run(self, name: str) -> str:
         return f"Hello, {name}!"
+
+
+@workflow.defn
+class _SchemaWarmupWorkflow:
+    @workflow.run
+    async def run(self) -> None:
+        pass
+
+
+async def warm_schema(client: Client) -> None:
+    """Migrate the namespace schema before a client-before-worker test issues
+    start/describe/update calls. Our Worker owns schema creation (DESIGN §5), so
+    on a freshly-dropped test database the schema does not exist until a Worker
+    launches; production always has it pre-migrated. Launching and immediately
+    stopping a throwaway worker creates the schema (it persists), faithfully
+    modelling the production precondition."""
+    async with new_worker(
+        client, _SchemaWarmupWorkflow, task_queue=f"warmup-{uuid.uuid4()}"
+    ):
+        pass

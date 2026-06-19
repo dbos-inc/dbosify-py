@@ -1295,10 +1295,21 @@ class Interpreter(_Runtime):
     # ------------------------------------------------------------------
 
     def _instantiate(self) -> None:
-        if self._defn.init_takes_args:
-            self._instance = self._defn.cls(*self._args)
-        else:
-            self._instance = self._defn.cls()
+        # Construct the workflow instance with the virtual loop installed as the
+        # running loop. A loop-bound object the user creates in __init__ — most
+        # notably ``asyncio.Future()`` — captures ``get_event_loop()`` eagerly;
+        # without this it would bind to the dispatcher's real loop, and a signal
+        # or update handler awaiting it later (on the vloop) would raise
+        # "got Future attached to a different loop". Mirrors _drain's loop swap.
+        previous_loop = asyncio._get_running_loop()
+        asyncio._set_running_loop(self._vloop)
+        try:
+            if self._defn.init_takes_args:
+                self._instance = self._defn.cls(*self._args)
+            else:
+                self._instance = self._defn.cls()
+        finally:
+            asyncio._set_running_loop(previous_loop)
         coro = self._run_primary()
         self._primary_task = asyncio.Task(coro, loop=self._vloop)
         self._tasks.add(self._primary_task)

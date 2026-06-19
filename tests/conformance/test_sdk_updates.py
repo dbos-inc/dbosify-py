@@ -36,7 +36,12 @@ from temporal_dbos.client import (
 )
 from temporal_dbos.exceptions import ApplicationError, CancelledError
 from temporal_dbos.worker import Worker
-from tests.conformance.sdk_harness import assert_eq_eventually, new_worker, wid
+from tests.conformance.sdk_harness import (
+    assert_eq_eventually,
+    new_worker,
+    warm_schema,
+    wid,
+)
 
 pytestmark = pytest.mark.usefixtures("tdb_env")
 
@@ -119,19 +124,23 @@ class UpImmediatelyCompleteUpdateAndWorkflow:
 
 
 @pytest.mark.skip(
-    reason="Delivering an update before/around worker start (no-cache replay, "
-    "backgrounded send via the admission pattern) trips an asyncio loop-affinity "
-    "error in the update-handler path: the workflow task repeatedly fails with "
-    "RuntimeError 'Task <_run_update_handler> got Future <Future pending> "
-    "attached to a different loop' (interpreter.py:2973), so the update never "
-    "completes. Candidate interpreter bug (a Future created off our virtual loop "
-    "is awaited from the handler task), not merely a missing feature."
+    reason="First-WFT message-delivery ordering: an update queued before any "
+    "worker runs is not drained in the workflow's first task when run() completes "
+    "immediately — our execute loop closes the completed workflow before the "
+    "already-queued update is recv'd from the inbox, so the backgrounded update "
+    "times out (Temporal delivers all messages in a workflow task before the "
+    "completion command). The schema-ordering prerequisite is handled by "
+    "warm_schema; this delivery-ordering gap is the remaining blocker. DISTINCT "
+    "from the now-fixed loop-affinity bug — see "
+    "test_update_completion_is_honored_when_after_workflow_return_2, which "
+    "exercised that bug worker-first and now passes."
 )
 async def test_workflow_update_before_worker_start(client: Client) -> None:
     # Start a workflow and an update against it *before* any worker is running,
     # then bring up a worker to process both in the first task. Both must
     # succeed, and a query must observe the update's mutation. Done with the
     # cache off to also confirm replay behavior.
+    await warm_schema(client)  # client ops precede the worker; ensure schema exists
     task_queue = f"tq-{wid()}"
     handle = await client.start_workflow(
         UpImmediatelyCompleteUpdateAndWorkflow.run,
@@ -278,17 +287,17 @@ class UpUpdateCompletionIsHonoredWhenAfterWorkflowReturn1Workflow:
 
 
 @pytest.mark.skip(
-    reason="Update delivered before worker start via the admission pattern "
-    "(backgrounded send, then worker brought up) trips an asyncio loop-affinity "
-    "error in the update-handler path: the workflow task repeatedly fails with "
-    "RuntimeError 'Task <_run_update_handler> got Future <Future pending> "
-    "attached to a different loop' (interpreter.py:2973), so the update never "
-    "completes. Candidate interpreter bug on our virtual loop, not merely a "
-    "missing feature."
+    reason="First-WFT message-delivery ordering (same as "
+    "test_workflow_update_before_worker_start): the update is queued before the "
+    "worker, and run() returns before our loop drains it from the inbox, so the "
+    "backgrounded update times out. DISTINCT from the now-fixed loop-affinity bug "
+    "(the worker-first variant _2 passes). warm_schema handles the schema "
+    "prerequisite; the delivery-ordering gap is the remaining blocker."
 )
 async def test_update_completion_is_honored_when_after_workflow_return_1(
     client: Client,
 ) -> None:
+    await warm_schema(client)  # client ops precede the worker; ensure schema exists
     update_id = "my-update"
     task_queue = f"tq-{wid()}"
     wf_handle = await client.start_workflow(
@@ -339,15 +348,6 @@ class UpUpdateCompletionIsHonoredWhenAfterWorkflowReturnWorkflow2:
         return await self.update_result
 
 
-@pytest.mark.skip(
-    reason="Same asyncio loop-affinity error in the update-handler path: the "
-    "workflow task repeatedly fails with RuntimeError 'Task "
-    "<_run_update_handler> got Future <Future pending> attached to a different "
-    "loop' (interpreter.py:2973), so the update never completes. The workflow's "
-    "update awaits a Future set from the main run coroutine; on our virtual loop "
-    "the cross-coroutine Future await trips loop affinity. Candidate interpreter "
-    "bug, not merely a missing feature."
-)
 async def test_update_completion_is_honored_when_after_workflow_return_2(
     client: Client,
 ) -> None:
@@ -422,13 +422,13 @@ class UpWorkflowWithNonWorkflowInitInit:
 
 
 @pytest.mark.skip(
-    reason="Delivering an update to be seen in the first workflow task (via the "
-    "admission pattern, with and without @workflow.init) trips an asyncio "
-    "loop-affinity error in the early-update path: every parametrization fails "
-    "with RuntimeError 'Task <_run_update_handler> got Future <Future pending> "
-    "attached to a different loop' (interpreter.py:2973), so the update never "
-    "completes. Candidate interpreter bug on our virtual loop, not merely a "
-    "missing feature."
+    reason="First-WFT message-delivery ordering (same as "
+    "test_workflow_update_before_worker_start): the update is queued before the "
+    "worker so it lands in the first task, but our loop doesn't drain it before "
+    "the run resolves, so the backgrounded update times out. DISTINCT from the "
+    "now-fixed loop-affinity bug (worker-first update variant _2 passes). "
+    "warm_schema handles the schema prerequisite; delivery ordering is the "
+    "remaining blocker."
 )
 @pytest.mark.parametrize(
     ["client_cls", "worker_cls"],
@@ -446,6 +446,7 @@ async def test_update_in_first_wft_sees_workflow_init(
     sees ``__init__``'s side effects iff ``@workflow.init`` is in effect."""
     # Ensure the update is in the first task: before the worker runs, start the
     # workflow, send the update, and wait until it is admitted.
+    await warm_schema(client)  # client ops precede the worker; ensure schema exists
     task_queue = f"tq-{wid()}"
     update_id = "update-id"
     wf_handle = await client.start_workflow(
