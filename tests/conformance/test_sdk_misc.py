@@ -385,14 +385,15 @@ class MiIDConflictWorkflow:
 
 
 @pytest.mark.skip(
-    reason="Partial/uncertain WorkflowIDConflictPolicy gap: at least one conflict-policy "
-    "branch does not match temporalio. USE_EXISTING does not return a usable existing "
-    "run id (new_handle.result_run_id comes back None, so the later assertion fails as "
-    "'assert None == \"workflow-...\"'), and the TERMINATE_EXISTING branch leaves a "
-    "workflow that never resolves, so the test hangs past the 90s pytest-timeout. The "
-    "FAIL/default branches (raising WorkflowAlreadyStartedError) appear correct; the "
-    "USE_EXISTING run-id propagation and TERMINATE_EXISTING semantics are the unresolved "
-    "gap."
+    reason="WorkflowIDConflictPolicy: FAIL and USE_EXISTING now match temporalio "
+    "(USE_EXISTING run-id propagation was FIXED — the attach handle carries "
+    "result_run_id/first_execution_run_id; regression in "
+    "test_client_worker.test_signal_with_start_attaches_to_running). The remaining "
+    "gap is TERMINATE_EXISTING: we cooperatively cancel the existing run "
+    "(cancel_workflow_async) rather than hard-terminating it, so its status ends "
+    "CANCELED not TERMINATED and a cancel-ignoring run never resolves — the test "
+    "hangs at that assertion. Needs a hard-terminate primitive (DBOS native "
+    "terminate has the D27 partial-checkpoint caveat)."
 )
 async def test_workflow_id_conflict(client: Client) -> None:
     async with new_worker(client, MiIDConflictWorkflow) as worker:
