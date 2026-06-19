@@ -2,7 +2,7 @@
 
 import pytest
 
-from temporal_dbos.worker import _rate_limiter
+from dbosify.worker import _rate_limiter
 
 
 def test_none_when_unset() -> None:

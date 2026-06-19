@@ -149,13 +149,13 @@ class WorkflowEnvironment:
     async def start_local(
         cls, *, system_database_url: Optional[str] = None
     ) -> "WorkflowEnvironment":
-        """Start a local test environment: a fresh ``temporal_dbos_env_*``
+        """Start a local test environment: a fresh ``dbosify_env_*``
         database on the given Postgres server (or the one resolved from
         ``DBOS_SYSTEM_DATABASE_URL``/``PG*``; the URL's own database name is
         ignored — databases are created via the server's ``postgres`` db).
         """
         base = sqlalchemy.make_url(system_database_url or _server_url_from_env())
-        database = f"temporal_dbos_env_{secrets.token_hex(4)}"
+        database = f"dbosify_env_{secrets.token_hex(4)}"
         maintenance_url = base.set(database="postgres").render_as_string(
             hide_password=False
         )
@@ -185,7 +185,7 @@ class WorkflowEnvironment:
         env._maintenance_url = maintenance_url
         env._database = database
         env._dbos_config = {
-            "name": "temporal_dbos_env",
+            "name": "dbosify_env",
             "system_database_url": env_url,
             "run_admin_server": False,
             # Tests want fast signal/event delivery.
@@ -208,7 +208,7 @@ class WorkflowEnvironment:
     @property
     def dbos_config(self) -> DBOSConfig:
         """The DBOSConfig to construct this environment's Worker from
-        (temporal-dbos extension; Workers take a config, not a client)."""
+        (dbosify extension; Workers take a config, not a client)."""
         if self._dbos_config is None:
             raise RuntimeError(
                 "dbos_config is only available on environments created by "

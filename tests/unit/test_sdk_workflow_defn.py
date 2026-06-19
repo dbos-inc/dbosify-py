@@ -8,7 +8,7 @@ exception TYPE plus a substring of OUR message (discovered by running the
 decorators). Each adapted-with-changed-assertion or skipped case is annotated.
 
 Our introspection analog of ``temporalio.workflow._Definition.from_class`` is
-``temporal_dbos._internal.registry.workflow_definition_of(cls)``.
+``dbosify._internal.registry.workflow_definition_of(cls)``.
 """
 
 import typing
@@ -16,9 +16,9 @@ from typing import Sequence
 
 import pytest
 
-import temporal_dbos._internal.registry as registry
-from temporal_dbos import workflow
-from temporal_dbos.common import RawValue, VersioningBehavior
+import dbosify._internal.registry as registry
+from dbosify import workflow
+from dbosify.common import RawValue, VersioningBehavior
 
 
 class GoodDefnBase:

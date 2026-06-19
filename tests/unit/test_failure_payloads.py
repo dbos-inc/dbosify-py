@@ -1,12 +1,12 @@
-"""Unit tests for failure serialization (temporal_dbos._internal.payloads).
+"""Unit tests for failure serialization (dbosify._internal.payloads).
 
 No database needed. These pin the structural failure envelope — in particular
 that an ``ApplicationError``'s severity ``category`` survives the round-trip
 (it drives client-side logging/metrics behavior in Temporal).
 """
 
-from temporal_dbos._internal.payloads import deserialize_failure, serialize_failure
-from temporal_dbos.exceptions import ApplicationError, ApplicationErrorCategory
+from dbosify._internal.payloads import deserialize_failure, serialize_failure
+from dbosify.exceptions import ApplicationError, ApplicationErrorCategory
 
 
 def test_application_error_category_roundtrips() -> None:

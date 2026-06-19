@@ -3,7 +3,7 @@
 Phase 1 surface: the ``defn`` decorator plus the runtime context functions
 (``info``, ``heartbeat``, ``is_cancelled``, ``wait_for_cancelled_sync``,
 ``in_activity``). The context is set by the worker's attempt step for real
-runs and by ``temporal_dbos.testing.ActivityEnvironment`` for unit tests.
+runs and by ``dbosify.testing.ActivityEnvironment`` for unit tests.
 
 ``heartbeat`` raises CancelledError when cancellation of the activity has
 been requested (how sync activities observe cancellation, as in Temporal)
@@ -87,7 +87,7 @@ def payload_converter() -> PayloadConverter:
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
-logger = logging.getLogger("temporal_dbos.activity")
+logger = logging.getLogger("dbosify.activity")
 """Logger that can be used within activities. (Phase 1: a plain logger;
 the context-injecting adapter mirroring temporalio's lands later.)"""
 
@@ -119,7 +119,7 @@ def defn(
     ``Sequence[RawValue]`` and cannot also set ``name`` (§6.1.2).
 
     ``no_thread_cancel_exception`` defaults to ``True`` (temporalio's default is
-    ``False``): temporal-dbos delivers cancellation to sync activities
+    ``False``): dbosify delivers cancellation to sync activities
     *cooperatively* and never raises into their worker thread, so it always
     behaves as ``True``. Setting it ``False`` — asking for Temporal's
     raise-into-the-thread behavior — raises ``NotImplementedError`` rather than
@@ -131,7 +131,7 @@ def defn(
         raise NotImplementedError(
             "no_thread_cancel_exception=False (Temporal's default: raise the "
             "cancellation into a sync activity's worker thread) is not "
-            "supported — temporal-dbos delivers activity cancellation "
+            "supported — dbosify delivers activity cancellation "
             "cooperatively. Leave it True (the default here) and observe "
             "cancellation via activity.is_cancelled() / activity.heartbeat() / "
             "activity.wait_for_cancelled_sync() (DEVIATIONS D37)."
@@ -216,7 +216,7 @@ class Info:
 class ActivityCancellationDetails:
     """The reasons for an activity's cancellation, mirroring
     ``temporalio.activity.ActivityCancellationDetails``. Accepted for parity;
-    temporal-dbos never populates it (DEVIATIONS D32), so
+    dbosify never populates it (DEVIATIONS D32), so
     :py:func:`cancellation_details` always returns ``None``."""
 
     not_found: bool = False
@@ -473,7 +473,7 @@ class _CompleteAsyncError(BaseException):
 
 
 _current_context: ContextVar[Optional[_Context]] = ContextVar(
-    "temporal_dbos_activity", default=None
+    "dbosify_activity", default=None
 )
 
 
@@ -502,7 +502,7 @@ def heartbeat(*details: Any) -> None:
     """Send a heartbeat for the current activity. Details are recorded for
     the next retry attempt's ``info().heartbeat_details`` (in this worker
     process). If cancellation of this activity has been requested, raises
-    :py:class:`temporal_dbos.exceptions.CancelledError` — heartbeating is
+    :py:class:`dbosify.exceptions.CancelledError` — heartbeating is
     how (especially sync) activities observe cancellation, as in Temporal.
     """
     ctx = _context()
@@ -564,7 +564,7 @@ def wait_for_cancelled_sync(
 def cancellation_details() -> Optional["ActivityCancellationDetails"]:
     """The reasons for this activity's cancellation, mirroring
     ``temporalio.activity.cancellation_details``. **DEVIATION (D32):**
-    temporal-dbos delivers cancellation cooperatively (D26) and does not track
+    dbosify delivers cancellation cooperatively (D26) and does not track
     *why* an activity was cancelled, so this always returns ``None``."""
     return None
 
@@ -609,7 +609,7 @@ def shield_thread_cancel_exception() -> Iterator[None]:
     cancellation exceptions, mirroring
     ``temporalio.activity.shield_thread_cancel_exception``.
 
-    In temporal-dbos this is always a no-op: cancellation is delivered
+    In dbosify this is always a no-op: cancellation is delivered
     cooperatively (via ``is_cancelled()``/``heartbeat()``) and never raised into
     a sync activity's worker thread (DEVIATIONS D26), so there is nothing to
     shield against — matching temporalio's own no-op behavior for async and
@@ -624,7 +624,7 @@ def client() -> "Client":
 
     On real worker runs this is the process worker's client (built lazily from
     the Worker's DBOS configuration). In tests it is the client passed to
-    :py:class:`temporal_dbos.testing.ActivityEnvironment`.
+    :py:class:`dbosify.testing.ActivityEnvironment`.
 
     Raises:
         RuntimeError: When no client is available.

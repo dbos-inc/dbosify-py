@@ -18,10 +18,10 @@ from datetime import timedelta
 
 from dbos import DBOS, DBOSClient
 
-from temporal_dbos import activity, exceptions, workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
-from temporal_dbos.workflow import ActivityCancellationType
+from dbosify import activity, exceptions, workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
+from dbosify.workflow import ActivityCancellationType
 from tests.dbconfig import default_config, system_database_url
 
 ACTIVITY_TASK_QUEUE = "xq-async-activity-tq"
@@ -32,7 +32,7 @@ WORKFLOW_TASK_QUEUE = "xq-async-workflow-tq"
 async def async_say_hello(name: str) -> str:
     # Hand the task token to an external completer (when one is expected), then
     # complete async — the workflow parks until externally completed/cancelled.
-    token_path = os.environ.get("TDB_TEST_TOKEN")
+    token_path = os.environ.get("DBOSIFY_TEST_TOKEN")
     if token_path:
         with open(token_path, "wb") as f:
             f.write(activity.info().task_token)
@@ -101,7 +101,7 @@ async def run_activity_worker() -> None:
 async def run_workflow_worker(workflow_id: str) -> None:
     run_ref = (
         CancelParkedWorkflow.run
-        if os.environ.get("TDB_TEST_WF") == "cancel"
+        if os.environ.get("DBOSIFY_TEST_WF") == "cancel"
         else AsyncCrossQueueWorkflow.run
     )
     async with Worker(

@@ -7,9 +7,9 @@ tests/integration/test_interceptors.py.
 import asyncio
 from typing import Any, Dict, List, Sequence
 
-from temporal_dbos._internal import conversion
-from temporal_dbos._internal import workflow_interceptor as wfi
-from temporal_dbos.converter import Payload
+from dbosify._internal import conversion
+from dbosify._internal import workflow_interceptor as wfi
+from dbosify.converter import Payload
 
 
 def _payloads(*values: object) -> Dict[str, Any]:
@@ -42,7 +42,7 @@ def test_encode_decode_headers_empty() -> None:
 def test_encode_headers_applies_codec() -> None:
     """A configured PayloadCodec transforms header bytes at rest and the
     round-trip restores them (the codec-protection fix)."""
-    from temporal_dbos.converter import DataConverter, PayloadCodec
+    from dbosify.converter import DataConverter, PayloadCodec
 
     class _XorCodec(PayloadCodec):
         async def encode(self, payloads: Sequence[Payload]) -> List[Payload]:

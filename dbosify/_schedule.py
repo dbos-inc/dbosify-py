@@ -2,7 +2,7 @@
 and ``ScheduleHandle``, backed by DBOS schedule primitives.
 
 Mirrors ``temporalio.client``'s schedule types (re-exported from
-``temporal_dbos.client``). A Temporal ``Schedule`` compiles to a single DBOS
+``dbosify.client``). A Temporal ``Schedule`` compiles to a single DBOS
 schedule row: ``DBOS.create_schedule`` fires a generic dispatcher workflow
 (``__temporal_schedule_fire``) which, at each occurrence, starts the action
 workflow with a per-occurrence deterministic id (see
@@ -714,9 +714,7 @@ def serialize_schedule_context(schedule: Schedule) -> Dict[str, Any]:
     """Build the DBOS ``context`` dict carried by the schedule row."""
     action = schedule.action
     if not isinstance(action, ScheduleActionStartWorkflow):
-        raise TypeError(
-            "temporal-dbos schedules support ScheduleActionStartWorkflow only"
-        )
+        raise TypeError("dbosify schedules support ScheduleActionStartWorkflow only")
     return {
         "action": {
             "workflow": _resolve_type_name(action.workflow),
@@ -941,7 +939,7 @@ def _list_description_from_row(row: Mapping[str, Any]) -> ScheduleListDescriptio
 
 
 def require_supported_overlap(overlap: Optional[ScheduleOverlapPolicy]) -> None:
-    """Reject overlap policies temporal-dbos does not implement (DEVIATIONS D22).
+    """Reject overlap policies dbosify does not implement (DEVIATIONS D22).
 
     SKIP, CANCEL_OTHER, TERMINATE_OTHER, and ALLOW_ALL are honored;
     BUFFER_ONE/BUFFER_ALL need durable start-after-completion queueing we don't
@@ -953,7 +951,7 @@ def require_supported_overlap(overlap: Optional[ScheduleOverlapPolicy]) -> None:
         ScheduleOverlapPolicy.BUFFER_ALL,
     ):
         raise NotImplementedError(
-            "temporal-dbos does not support ScheduleOverlapPolicy.BUFFER_ONE / "
+            "dbosify does not support ScheduleOverlapPolicy.BUFFER_ONE / "
             "BUFFER_ALL yet (DEVIATIONS D22); SKIP, CANCEL_OTHER, "
             "TERMINATE_OTHER, and ALLOW_ALL are supported"
         )
@@ -969,7 +967,7 @@ def require_overlap_override_supported(
     other value raises rather than being silently ignored."""
     if overlap is not None and overlap != ScheduleOverlapPolicy.ALLOW_ALL:
         raise NotImplementedError(
-            "temporal-dbos does not honor a per-call ScheduleOverlapPolicy "
+            "dbosify does not honor a per-call ScheduleOverlapPolicy "
             f"override of {overlap!r} on trigger/backfill (DEVIATIONS D22); the "
             "schedule's configured overlap policy applies. Only None or "
             "ALLOW_ALL are accepted."
@@ -986,9 +984,7 @@ async def create_schedule_row(
 ) -> None:
     """Compile and create the DBOS schedule row for a Temporal schedule."""
     if not isinstance(schedule.action, ScheduleActionStartWorkflow):
-        raise TypeError(
-            "temporal-dbos schedules support ScheduleActionStartWorkflow only"
-        )
+        raise TypeError("dbosify schedules support ScheduleActionStartWorkflow only")
     require_supported_overlap(schedule.policy.overlap)
     for b in backfill:
         require_overlap_override_supported(b.overlap)

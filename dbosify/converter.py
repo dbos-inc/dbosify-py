@@ -155,7 +155,7 @@ class PayloadConverter(ABC):
     @abstractmethod
     def to_payloads(self, values: Sequence[Any]) -> List[Payload]:
         """Encode values into payloads. Implementers pass
-        :py:class:`temporal_dbos.common.RawValue` through unchanged."""
+        :py:class:`dbosify.common.RawValue` through unchanged."""
         raise NotImplementedError
 
     @abstractmethod

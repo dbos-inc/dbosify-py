@@ -25,7 +25,7 @@ from typing import (
     get_origin,
 )
 
-logger = logging.getLogger("temporal_dbos")
+logger = logging.getLogger("dbosify")
 
 WORKFLOW_DEFN_ATTR = "__temporal_workflow_definition"
 RUN_ATTR = "__temporal_workflow_run"

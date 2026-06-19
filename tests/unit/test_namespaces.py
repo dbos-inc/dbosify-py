@@ -2,7 +2,7 @@
 
 import pytest
 
-from temporal_dbos._internal.namespaces import (
+from dbosify._internal.namespaces import (
     DEFAULT_NAMESPACE,
     namespace_from_schema,
     namespace_schema,

@@ -13,9 +13,9 @@ policy gives up. Two roles run as separate processes:
                           a terminal failure.
 
 Env knobs (read by the activity, which runs on the activity worker):
-  TDB_TEST_EFFECTS       path to append attempt numbers to (one per real run)
-  TDB_TEST_SUCCEED_AT    attempt number at which the activity succeeds (default 1)
-  TDB_TEST_NON_RETRYABLE "1" -> raise a non-retryable ApplicationError on attempt 1
+  DBOSIFY_TEST_EFFECTS       path to append attempt numbers to (one per real run)
+  DBOSIFY_TEST_SUCCEED_AT    attempt number at which the activity succeeds (default 1)
+  DBOSIFY_TEST_NON_RETRYABLE "1" -> raise a non-retryable ApplicationError on attempt 1
 """
 
 import asyncio
@@ -25,11 +25,11 @@ from datetime import timedelta
 
 from dbos import DBOS, DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client, WorkflowFailureError
-from temporal_dbos.common import RetryPolicy
-from temporal_dbos.exceptions import ApplicationError
-from temporal_dbos.worker import Worker
+from dbosify import activity, workflow
+from dbosify.client import Client, WorkflowFailureError
+from dbosify.common import RetryPolicy
+from dbosify.exceptions import ApplicationError
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 ACTIVITY_TASK_QUEUE = "xq-retry-activity-tq"
@@ -39,12 +39,12 @@ WORKFLOW_TASK_QUEUE = "xq-retry-workflow-tq"
 @activity.defn(name="flaky-say-hello")
 async def flaky_say_hello(name: str) -> str:
     attempt = activity.info().attempt
-    with open(os.environ["TDB_TEST_EFFECTS"], "a") as f:
+    with open(os.environ["DBOSIFY_TEST_EFFECTS"], "a") as f:
         f.write(f"{attempt}\n")
     print(f"ATTEMPT {attempt}", flush=True)
-    if os.environ.get("TDB_TEST_NON_RETRYABLE") == "1":
+    if os.environ.get("DBOSIFY_TEST_NON_RETRYABLE") == "1":
         raise ApplicationError("boom (non-retryable)", type="Boom", non_retryable=True)
-    if attempt < int(os.environ.get("TDB_TEST_SUCCEED_AT", "1")):
+    if attempt < int(os.environ.get("DBOSIFY_TEST_SUCCEED_AT", "1")):
         raise ApplicationError(f"boom on attempt {attempt}", type="Boom")
     return f"Hello, {name}!"
 

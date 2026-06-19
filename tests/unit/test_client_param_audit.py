@@ -13,7 +13,7 @@ from typing import Dict, Mapping, Set
 import pytest
 import temporalio.client
 
-from temporal_dbos.client import Client
+from dbosify.client import Client
 from tests.unit._param_audit import (
     Bucket,
     assert_buckets_disjoint,

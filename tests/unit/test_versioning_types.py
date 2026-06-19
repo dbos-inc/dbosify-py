@@ -1,10 +1,10 @@
 """Worker-versioning value types (no database). These mirror
-``temporalio.common`` for parity; their behavior is inert in temporal-dbos
+``temporalio.common`` for parity; their behavior is inert in dbosify
 (DEVIATIONS D29)."""
 
 import pytest
 
-from temporal_dbos.common import (
+from dbosify.common import (
     AutoUpgradeVersioningOverride,
     PinnedVersioningOverride,
     VersioningBehavior,

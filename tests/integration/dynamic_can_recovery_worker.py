@@ -18,10 +18,10 @@ from typing import List, Optional, Sequence
 
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
-from temporal_dbos.client import Client
-from temporal_dbos.common import RawValue
-from temporal_dbos.worker import Worker
+from dbosify import workflow
+from dbosify.client import Client
+from dbosify.common import RawValue
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 TASK_QUEUE = "dynamic-can-recovery-tq"

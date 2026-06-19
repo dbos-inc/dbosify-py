@@ -9,9 +9,9 @@ from typing import Sequence
 
 import pytest
 
-from temporal_dbos import activity, workflow
-from temporal_dbos._internal import registry
-from temporal_dbos.common import RawValue
+from dbosify import activity, workflow
+from dbosify._internal import registry
+from dbosify.common import RawValue
 
 
 def test_dynamic_workflow_rejected() -> None:
@@ -144,7 +144,7 @@ def test_dynamic_activity_name_mutually_exclusive() -> None:
 
 
 def test_payload_converter_exposed() -> None:
-    from temporal_dbos.converter import PayloadConverter
+    from dbosify.converter import PayloadConverter
 
     assert isinstance(workflow.payload_converter(), PayloadConverter)
     assert isinstance(activity.payload_converter(), PayloadConverter)

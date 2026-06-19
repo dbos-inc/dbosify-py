@@ -1,13 +1,13 @@
 """Subprocess entry point that runs one rewritten sample.
 
 Usage: python runner.py <rewritten_sample.py>
-Env:   TDB_CONFORMANCE_SYSTEM_DATABASE_URL — the (disposable) database.
+Env:   DBOSIFY_CONFORMANCE_SYSTEM_DATABASE_URL — the (disposable) database.
 
 Installs the connection-setup adapter — the documented migration delta
-between temporalio and temporal-dbos — then executes the sample's
+between temporalio and dbosify — then executes the sample's
 ``__main__`` unchanged:
 
-  * ``temporal_dbos.envconfig.ClientConfig`` (the samples load connection
+  * ``dbosify.envconfig.ClientConfig`` (the samples load connection
     config through it) -> returns an empty config.
   * ``Client.connect(target_host="localhost:7233", ...)`` -> a Client over a
     DBOSClient for the conformance database.
@@ -27,7 +27,7 @@ import sqlalchemy as sa
 
 
 def _database_url() -> str:
-    return os.environ["TDB_CONFORMANCE_SYSTEM_DATABASE_URL"]
+    return os.environ["DBOSIFY_CONFORMANCE_SYSTEM_DATABASE_URL"]
 
 
 def _ensure_database_exists(url_str: str) -> None:
@@ -57,16 +57,16 @@ def install_shim() -> None:
 
     from dbos import DBOSClient, DBOSConfig
 
-    from temporal_dbos._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
-    from temporal_dbos.client import Client
-    from temporal_dbos.worker import Worker
+    from dbosify._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
+    from dbosify.client import Client
+    from dbosify.worker import Worker
 
     # The default namespace maps to its own DBOS schema (DEVIATIONS D1); the
     # client must use it, and the Worker derives the same from namespace="default".
     schema = namespace_schema(DEFAULT_NAMESPACE)
 
-    # -- temporal_dbos.envconfig stand-in ------------------------------------
-    envconfig = types.ModuleType("temporal_dbos.envconfig")
+    # -- dbosify.envconfig stand-in ------------------------------------
+    envconfig = types.ModuleType("dbosify.envconfig")
 
     class ClientConfig:
         @staticmethod
@@ -74,7 +74,7 @@ def install_shim() -> None:
             return {}
 
     envconfig.ClientConfig = ClientConfig  # type: ignore[attr-defined]
-    sys.modules["temporal_dbos.envconfig"] = envconfig
+    sys.modules["dbosify.envconfig"] = envconfig
 
     # -- Client.connect(target_host=str) -------------------------------------
     original_connect = Client.connect.__func__  # type: ignore[attr-defined]
@@ -102,7 +102,7 @@ def install_shim() -> None:
 
     Client.connect = classmethod(patched_connect)  # type: ignore[assignment, method-assign]
 
-    # -- temporal_dbos.api.common.v1 stand-in --------------------------------
+    # -- dbosify.api.common.v1 stand-in --------------------------------
     # Some samples import ``temporalio.api.common.v1.Payload`` purely for type
     # annotations (e.g. context_propagation's interceptor, under
     # ``from __future__ import annotations`` so it is never evaluated). The
@@ -111,19 +111,19 @@ def install_shim() -> None:
     # resolve. Samples that actually *construct* a protobuf Payload
     # (custom_converter, encryption) still fail at runtime — correctly, since
     # they depend on protobuf semantics we do not provide.
-    import temporal_dbos as _tdb_pkg
-    from temporal_dbos import converter as _tdb_converter
+    import dbosify as _dbosify_pkg
+    from dbosify import converter as _dbosify_converter
 
     for modname in (
-        "temporal_dbos.api",
-        "temporal_dbos.api.common",
-        "temporal_dbos.api.common.v1",
+        "dbosify.api",
+        "dbosify.api.common",
+        "dbosify.api.common.v1",
     ):
         sys.modules.setdefault(modname, types.ModuleType(modname))
-    sys.modules["temporal_dbos.api.common.v1"].Payload = _tdb_converter.Payload  # type: ignore[attr-defined]
-    sys.modules["temporal_dbos.api.common"].v1 = sys.modules["temporal_dbos.api.common.v1"]  # type: ignore[attr-defined]
-    sys.modules["temporal_dbos.api"].common = sys.modules["temporal_dbos.api.common"]  # type: ignore[attr-defined]
-    _tdb_pkg.api = sys.modules["temporal_dbos.api"]  # type: ignore[attr-defined]
+    sys.modules["dbosify.api.common.v1"].Payload = _dbosify_converter.Payload  # type: ignore[attr-defined]
+    sys.modules["dbosify.api.common"].v1 = sys.modules["dbosify.api.common.v1"]  # type: ignore[attr-defined]
+    sys.modules["dbosify.api"].common = sys.modules["dbosify.api.common"]  # type: ignore[attr-defined]
+    _dbosify_pkg.api = sys.modules["dbosify.api"]  # type: ignore[attr-defined]
 
     # -- Worker(client, ...) --------------------------------------------------
     original_worker_init = Worker.__init__
@@ -136,7 +136,7 @@ def install_shim() -> None:
             if harvested and "interceptors" not in kwargs:
                 kwargs["interceptors"] = harvested
             config: DBOSConfig = {
-                "name": "tdb_conformance",
+                "name": "dbosify_conformance",
                 "system_database_url": url,
                 "run_admin_server": False,
                 "notification_listener_polling_interval_sec": 0.01,
@@ -151,7 +151,7 @@ def install_shim() -> None:
             # declaration races the Worker's own post-launch database-backed
             # registration and breaks the cancellation/terminate-reuse dequeue
             # path (it regressed message_passing once).
-            if os.environ.get("TDB_CONFORMANCE_FAST_QUEUE"):
+            if os.environ.get("DBOSIFY_CONFORMANCE_FAST_QUEUE"):
                 from dbos import Queue
 
                 Queue(self._task_queue, polling_interval_sec=0.05)

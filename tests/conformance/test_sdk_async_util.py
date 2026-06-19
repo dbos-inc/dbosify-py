@@ -5,13 +5,13 @@ from typing import Optional, Sequence, Union, cast
 
 import pytest
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client, WorkflowFailureError
-from temporal_dbos.common import RawValue
-from temporal_dbos.exceptions import ApplicationError, CancelledError
+from dbosify import activity, workflow
+from dbosify.client import Client, WorkflowFailureError
+from dbosify.common import RawValue
+from dbosify.exceptions import ApplicationError, CancelledError
 from tests.conformance.sdk_harness import assert_eq_eventually, new_worker, wid
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 
 # ---------------------------------------------------------------------------

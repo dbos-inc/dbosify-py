@@ -1,5 +1,5 @@
 [project]
-name = "temporal-dbos"
+name = "dbosify"
 dynamic = ["version"]
 description = "A drop-in replacement for the Temporal Python SDK, backed by DBOS Transact (Postgres) instead of a Temporal server"
 readme = "README.md"
@@ -60,7 +60,7 @@ atomic = true
 
 [tool.mypy]
 strict = true
-files = ["temporal_dbos", "tests", "publish"]
+files = ["dbosify", "tests", "publish"]
 
 # dateutil (the pre-3.11 ISO datetime fallback) ships no type stubs; the import
 # is also unreachable on 3.11+, so an inline ignore would be flagged unused

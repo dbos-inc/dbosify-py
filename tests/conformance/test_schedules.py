@@ -54,7 +54,7 @@ def test_schedules_corpus(rewritten_schedules: Path) -> None:
 
     env = {
         "PYTHONPATH": f"{rewritten_schedules}{os.pathsep}{Path(__file__).parents[2]}",
-        "TDB_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_CONFORMANCE_SYSTEM_DATABASE_URL": system_database_url(),
     }
 
     worker = PythonProcess(RUNNER, "run_worker", env=env)

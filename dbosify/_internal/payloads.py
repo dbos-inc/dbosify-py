@@ -37,7 +37,7 @@ from ..common import RetryPolicy
 
 FailureEnvelope = Dict[str, Any]
 
-INPUT_ENVELOPE_KEY = "__tdb_input__"
+INPUT_ENVELOPE_KEY = "__dbosify_input__"
 
 
 @dataclass

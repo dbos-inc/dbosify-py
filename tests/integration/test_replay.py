@@ -14,22 +14,22 @@ from typing import AsyncIterator, Dict, List
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos._internal import registry
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify._internal import registry
+from dbosify.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowFailureError,
     WorkflowHistory,
     WorkflowQueryFailedError,
 )
-from temporal_dbos.exceptions import ApplicationError
-from temporal_dbos.worker import Interceptor, Replayer, Worker
-from temporal_dbos.workflow import NondeterminismError
+from dbosify.exceptions import ApplicationError
+from dbosify.worker import Interceptor, Replayer, Worker
+from dbosify.workflow import NondeterminismError
 from tests.dbconfig import default_config, system_database_url
 from tests.harness import retry_until_success_async
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "replay-tq"
 _OPTS: Dict[str, object] = {"start_to_close_timeout": timedelta(seconds=30)}

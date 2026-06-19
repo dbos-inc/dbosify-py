@@ -7,12 +7,12 @@ from typing import Any, AsyncIterator, Dict, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "info-root-tq"
 

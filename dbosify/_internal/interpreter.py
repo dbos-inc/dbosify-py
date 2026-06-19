@@ -107,7 +107,7 @@ from .payloads import (
 )
 from .registry import WorkflowDefinition
 
-logger = logging.getLogger("temporal_dbos.interpreter")
+logger = logging.getLogger("dbosify.interpreter")
 
 
 class WorkflowTaskFailure(Exception):
@@ -177,7 +177,7 @@ _patch_step: Optional[Callable[[str], Any]] = None
 # of recorded patch ids by scanning its step list for this name (see
 # Interpreter.execute). Mirrors temporalio's SetPatchMarker, but keyed by id
 # (set membership), not by position — robust to code that shifts checkpoints.
-PATCH_STEP_NAME = "__tdb_patch"
+PATCH_STEP_NAME = "__dbosify_patch"
 
 
 def _workflow_init_step() -> Any:
@@ -187,7 +187,7 @@ def _workflow_init_step() -> Any:
     global _init_step
     if _init_step is None:
 
-        @DBOS.step(name="__tdb_init")
+        @DBOS.step(name="__dbosify_init")
         async def init_step() -> Dict[str, Any]:
             return {"start_time": time_mod.time(), "seed": secrets.randbits(63)}
 
@@ -206,7 +206,7 @@ def _validate_update(validate: Callable[[], None]) -> Any:
     global _update_validate_step
     if _update_validate_step is None:
 
-        @DBOS.step(name="__tdb_upd_validate")
+        @DBOS.step(name="__dbosify_upd_validate")
         async def update_validate_step(validate: Callable[[], None]) -> Dict[str, Any]:
             from .payloads import serialize_failure
 
@@ -233,7 +233,7 @@ def _await_child_result(child_id: str) -> Any:
     global _child_result_step
     if _child_result_step is None:
 
-        @DBOS.step(name="__tdb_child_result")
+        @DBOS.step(name="__dbosify_child_result")
         async def child_result_step(child_id: str) -> Dict[str, Any]:
             from dbos._dbos import _get_dbos_instance  # see docs/phase0.md
             from dbos._error import DBOSAwaitedWorkflowCancelledError
@@ -311,7 +311,7 @@ def _child_id_taken(child_id: str) -> Any:
     global _child_exists_step
     if _child_exists_step is None:
 
-        @DBOS.step(name="__tdb_child_check")
+        @DBOS.step(name="__dbosify_child_check")
         async def child_exists_step(child_id: str) -> bool:
             status = await DBOS.get_workflow_status_async(child_id)
             return status is not None
@@ -336,7 +336,7 @@ def _await_activity_result(activity_id: str) -> Any:
     global _activity_result_step
     if _activity_result_step is None:
 
-        @DBOS.step(name="__tdb_activity_result")
+        @DBOS.step(name="__dbosify_activity_result")
         async def activity_result_step(activity_id: str) -> Dict[str, Any]:
             from dbos._dbos import _get_dbos_instance  # see docs/phase0.md
             from dbos._error import DBOSAwaitedWorkflowCancelledError
@@ -380,7 +380,7 @@ def _safe_status(workflow_id: str) -> Any:
     global _safe_status_step
     if _safe_status_step is None:
 
-        @DBOS.step(name="__tdb_status")
+        @DBOS.step(name="__dbosify_status")
         async def safe_status_step(workflow_id: str) -> Optional[Dict[str, Any]]:
             status = await DBOS.get_workflow_status_async(workflow_id)
             if status is None:
@@ -401,7 +401,7 @@ def _safe_status_list(dbos_ids: List[str]) -> Any:
     global _safe_status_list_step
     if _safe_status_list_step is None:
 
-        @DBOS.step(name="__tdb_status_list")
+        @DBOS.step(name="__dbosify_status_list")
         async def safe_status_list_step(dbos_ids: List[str]) -> Dict[str, str]:
             statuses = await DBOS.list_workflows_async(workflow_ids=dbos_ids)
             return {s.workflow_id: s.status for s in statuses}
@@ -425,7 +425,7 @@ def _schedule_occurrences(schedule_name: str, before_epoch: int, limit: int) -> 
     global _schedule_occurrences_step
     if _schedule_occurrences_step is None:
 
-        @DBOS.step(name="__tdb_schedule_occurrences")
+        @DBOS.step(name="__dbosify_schedule_occurrences")
         async def schedule_occurrences_step(
             schedule_name: str, before_epoch: int, limit: int
         ) -> List[int]:
@@ -526,7 +526,7 @@ class _VirtualLoop(asyncio.AbstractEventLoop):
         self.ready: Deque[asyncio.Handle] = deque()
         self.time_seconds = 0.0
         # Read by workflow.py's _runtime() via asyncio.get_running_loop().
-        self.tdb_runtime = interpreter
+        self.dbosify_runtime = interpreter
 
     # -- scheduling callbacks -------------------------------------------------
 
@@ -766,16 +766,16 @@ class _RootWorkflowOutbound(_wfi.WorkflowOutboundInterceptor):
 
     def continue_as_new(self, input: _wfi.ContinueAsNewInput) -> "NoReturn":
         err = ContinueAsNewError("Workflow continued as new")
-        err._tdb_args = list(input.args)
-        err._tdb_workflow = input.workflow
-        err._tdb_task_queue = input.task_queue
-        err._tdb_run_timeout = input.run_timeout
-        err._tdb_retry_policy = input.retry_policy
-        err._tdb_memo = input.memo
-        err._tdb_search_attributes = input.search_attributes
+        err._dbosify_args = list(input.args)
+        err._dbosify_workflow = input.workflow
+        err._dbosify_task_queue = input.task_queue
+        err._dbosify_run_timeout = input.run_timeout
+        err._dbosify_retry_policy = input.retry_policy
+        err._dbosify_memo = input.memo
+        err._dbosify_search_attributes = input.search_attributes
         # Raw Payloads; codec-encoded on the real loop in _begin_continue_as_new
         # (this runs on the virtual loop, which can't await the async codec).
-        err._tdb_headers = dict(input.headers)
+        err._dbosify_headers = dict(input.headers)
         raise err
 
     def info(self) -> Info:
@@ -1216,12 +1216,12 @@ class Interpreter(_Runtime):
         from . import enqueue, registry
         from .payloads import serialize_retry_policy
 
-        type_name = can._tdb_workflow or self._defn.name
+        type_name = can._dbosify_workflow or self._defn.name
         dispatch_fn = registry.dbos_workflow_for(type_name)
         base, index = ids.parse_run(self._workflow_id)
         new_run_id = ids.run_dbos_id(base, index + 1)
         await self._resolve_own_queue()
-        queue_name = can._tdb_task_queue or self._own_queue_name
+        queue_name = can._dbosify_task_queue or self._own_queue_name
         queue = (
             await DBOS.retrieve_queue_async(queue_name)
             if queue_name is not None
@@ -1235,35 +1235,40 @@ class Interpreter(_Runtime):
         carried = self._meta.carried_forward()
         # Headers do NOT auto-carry across continue-as-new (Temporal semantics):
         # the outbound chain sets them explicitly (an interceptor re-injects
-        # context). _tdb_headers holds raw Payloads; codec-encode here (real
+        # context). _dbosify_headers holds raw Payloads; codec-encode here (real
         # loop) into wire form for the next run.
         carried.headers = (
-            await conversion.encode_headers(getattr(can, "_tdb_headers", None)) or None
+            await conversion.encode_headers(getattr(can, "_dbosify_headers", None))
+            or None
         )
-        if can._tdb_run_timeout is not None:
-            carried.run_timeout = can._tdb_run_timeout.total_seconds()
-        if can._tdb_retry_policy is not None:
-            carried.retry_policy = serialize_retry_policy(can._tdb_retry_policy)
+        if can._dbosify_run_timeout is not None:
+            carried.run_timeout = can._dbosify_run_timeout.total_seconds()
+        if can._dbosify_retry_policy is not None:
+            carried.retry_policy = serialize_retry_policy(can._dbosify_retry_policy)
         # Memo + search attributes carry forward at their CURRENT (post-upsert)
         # values; continue_as_new's own memo/search_attributes override them
         # for the new run (matching Temporal). Re-encoded only when overridden;
         # otherwise the current encoded form is reused as-is.
-        if can._tdb_memo is None and can._tdb_search_attributes is None:
+        if can._dbosify_memo is None and can._dbosify_search_attributes is None:
             carried.attributes = await _attributes.encode_attributes(
                 self._memo or None, self._typed_sa
             )
         else:
             carried.attributes = await _attributes.encode_attributes(
-                can._tdb_memo if can._tdb_memo is not None else (self._memo or None),
                 (
-                    can._tdb_search_attributes
-                    if can._tdb_search_attributes is not None
+                    can._dbosify_memo
+                    if can._dbosify_memo is not None
+                    else (self._memo or None)
+                ),
+                (
+                    can._dbosify_search_attributes
+                    if can._dbosify_search_attributes is not None
                     else self._typed_sa
                 ),
             )
         # The new run's args come from user code, so encode them (the next
         # run's interpreter decodes against its run signature).
-        payload = wrap_input(await conversion.encode_values(can._tdb_args), carried)
+        payload = wrap_input(await conversion.encode_values(can._dbosify_args), carried)
         await enqueue.enqueue_run(
             dispatch_fn,
             payload,

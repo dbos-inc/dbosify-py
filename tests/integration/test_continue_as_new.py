@@ -11,18 +11,18 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
-from temporal_dbos._internal import inbox
-from temporal_dbos.client import (
+from dbosify import workflow
+from dbosify._internal import inbox
+from dbosify.client import (
     Client,
     WorkflowContinuedAsNewError,
     WorkflowExecutionStatus,
     WorkflowFailureError,
 )
-from temporal_dbos.worker import Worker
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "can-tq"
 
@@ -586,7 +586,7 @@ async def _exists(client: Client, dbos_id: str) -> bool:
 
 
 async def _status_of(client: Client, dbos_id: str) -> WorkflowExecutionStatus:
-    from temporal_dbos._internal import ids as _ids
+    from dbosify._internal import ids as _ids
 
     handle = client.get_workflow_handle(_ids.parse_run(dbos_id)[0], run_id=dbos_id)
     status = (await handle.describe()).status

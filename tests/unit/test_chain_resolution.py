@@ -8,7 +8,7 @@ from typing import Any, Dict, Sequence
 
 import pytest
 
-from temporal_dbos._internal import ids
+from dbosify._internal import ids
 
 
 class FakeChain:

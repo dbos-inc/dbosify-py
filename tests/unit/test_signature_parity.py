@@ -1,6 +1,6 @@
 """Signature parity against the real temporalio SDK (a dev-dependency).
 
-This is the API-drift alarm (DESIGN §9): every public name temporal_dbos
+This is the API-drift alarm (DESIGN §9): every public name dbosify
 exposes is diffed against its temporalio counterpart.
 
 Rules enforced per callable:
@@ -12,7 +12,7 @@ Rules enforced per callable:
     from the ledger fails the test, so the ledger can't go stale.
 
 DELIBERATE_DEVIATIONS skips items whose shape intentionally differs — it is
-the formal record of where temporal-dbos diverges on purpose.
+the formal record of where dbosify diverges on purpose.
 """
 
 import enum
@@ -28,24 +28,24 @@ import temporalio.testing
 import temporalio.worker
 import temporalio.workflow
 
-import temporal_dbos.activity
-import temporal_dbos.client
-import temporal_dbos.common
-import temporal_dbos.converter
-import temporal_dbos.exceptions
-import temporal_dbos.testing
-import temporal_dbos.worker
-import temporal_dbos.workflow
+import dbosify.activity
+import dbosify.client
+import dbosify.common
+import dbosify.converter
+import dbosify.exceptions
+import dbosify.testing
+import dbosify.worker
+import dbosify.workflow
 
 MODULE_PAIRS = {
-    "workflow": (temporal_dbos.workflow, temporalio.workflow),
-    "activity": (temporal_dbos.activity, temporalio.activity),
-    "client": (temporal_dbos.client, temporalio.client),
-    "worker": (temporal_dbos.worker, temporalio.worker),
-    "common": (temporal_dbos.common, temporalio.common),
-    "converter": (temporal_dbos.converter, temporalio.converter),
-    "exceptions": (temporal_dbos.exceptions, temporalio.exceptions),
-    "testing": (temporal_dbos.testing, temporalio.testing),
+    "workflow": (dbosify.workflow, temporalio.workflow),
+    "activity": (dbosify.activity, temporalio.activity),
+    "client": (dbosify.client, temporalio.client),
+    "worker": (dbosify.worker, temporalio.worker),
+    "common": (dbosify.common, temporalio.common),
+    "converter": (dbosify.converter, temporalio.converter),
+    "exceptions": (dbosify.exceptions, temporalio.exceptions),
+    "testing": (dbosify.testing, temporalio.testing),
 }
 
 # Names/methods whose shape deliberately differs. qualname -> reason.
@@ -215,7 +215,7 @@ KNOWN_MISSING_PARAMS: Dict[str, Set[str]] = {
 # temporalio counterpart (asserted by the test), so this can't drift into
 # inventing API.
 EXPLICITLY_ACCEPTED_PARAMS: Dict[str, Set[str]] = {
-    # (Worker's ``data_converter`` is a deliberate temporal_dbos extension — it
+    # (Worker's ``data_converter`` is a deliberate dbosify extension — it
     # has no temporalio Worker counterpart — so it isn't listed here; every
     # name below must exist on temporalio's Worker.)
     "worker.Worker.__init__": {

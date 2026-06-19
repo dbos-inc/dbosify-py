@@ -13,12 +13,12 @@ from typing import AsyncIterator, List, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import activity, workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "worker-tuning-tq"
 
@@ -98,7 +98,7 @@ async def test_max_concurrent_activities_caps_execution() -> None:
 
 
 async def test_identity_maps_to_executor_id() -> None:
-    async with _env(identity="tdb-custom-identity") as client:
+    async with _env(identity="dbosify-custom-identity") as client:
         await client.execute_workflow(
             FanOut.run, 1, id="tuning-identity", task_queue=TASK_QUEUE
         )
@@ -107,12 +107,12 @@ async def test_identity_maps_to_executor_id() -> None:
         status = probe.retrieve_workflow("tuning-identity").get_status()
     finally:
         probe.destroy()
-    assert status.executor_id == "tdb-custom-identity"
+    assert status.executor_id == "dbosify-custom-identity"
 
 
 async def test_activity_executor_runs_sync_activities() -> None:
     _reset_tracker()
-    executor = ThreadPoolExecutor(thread_name_prefix="tdb-actexec")
+    executor = ThreadPoolExecutor(thread_name_prefix="dbosify-actexec")
     try:
         async with _env(activity_executor=executor) as client:
             names: List[str] = await client.execute_workflow(
@@ -122,4 +122,4 @@ async def test_activity_executor_runs_sync_activities() -> None:
         executor.shutdown(wait=True)
     # Each sync activity ran on a thread from the provided pool.
     assert names
-    assert all(name.startswith("tdb-actexec") for name in names), names
+    assert all(name.startswith("dbosify-actexec") for name in names), names

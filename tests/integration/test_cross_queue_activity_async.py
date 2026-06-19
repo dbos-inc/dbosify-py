@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos.client import Client
+from dbosify.client import Client
 from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess
 
@@ -24,12 +24,12 @@ REPO_ROOT = Path(__file__).parents[2]
 def _env(vmid: str, token: "Path | None" = None, **extra: str) -> "dict[str, str]":
     env = {
         "PYTHONPATH": str(REPO_ROOT),
-        "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_TEST_SYSTEM_DATABASE_URL": system_database_url(),
         "DBOS__VMID": vmid,
         **extra,
     }
     if token is not None:
-        env["TDB_TEST_TOKEN"] = str(token)
+        env["DBOSIFY_TEST_TOKEN"] = str(token)
     return env
 
 
@@ -52,12 +52,18 @@ async def _complete(
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_queued_async_completion(tmp_path: Path) -> None:
     token_file = tmp_path / "token"
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act", token_file))
+    activity_worker = PythonProcess(
+        WORKER, "activity", env=_env("dbosify-act", token_file)
+    )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
         workflow_worker = PythonProcess(
-            WORKER, "workflow", "start", "xq-async-wf", env=_env("tdb-wf", token_file)
+            WORKER,
+            "workflow",
+            "start",
+            "xq-async-wf",
+            env=_env("dbosify-wf", token_file),
         )
         workflow_worker.start()
         try:
@@ -84,12 +90,14 @@ def test_queued_async_heartbeat_then_complete(tmp_path: Path) -> None:
     # completion (it shares the completion topic): the activity workflow skips it
     # and the later complete() still resolves the workflow.
     token_file = tmp_path / "token"
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act", token_file))
+    activity_worker = PythonProcess(
+        WORKER, "activity", env=_env("dbosify-act", token_file)
+    )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
         workflow_worker = PythonProcess(
-            WORKER, "workflow", "start", "xq-async-hb-wf", env=_env("tdb-wf")
+            WORKER, "workflow", "start", "xq-async-hb-wf", env=_env("dbosify-wf")
         )
         workflow_worker.start()
         try:
@@ -115,7 +123,7 @@ def test_queued_async_cancel_while_parked(tmp_path: Path) -> None:
     # (a marker wakes its completion-topic recv), yielding a real cancellation —
     # not the start-to-close timeout (120s) that an undelivered cancel would
     # produce. The 60s wait below would fail in that unfixed case.
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act"))
+    activity_worker = PythonProcess(WORKER, "activity", env=_env("dbosify-act"))
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
@@ -124,7 +132,7 @@ def test_queued_async_cancel_while_parked(tmp_path: Path) -> None:
             "workflow",
             "start",
             "xq-async-cancel-wf",
-            env=_env("tdb-wf", TDB_TEST_WF="cancel"),
+            env=_env("dbosify-wf", DBOSIFY_TEST_WF="cancel"),
         )
         workflow_worker.start()
         try:

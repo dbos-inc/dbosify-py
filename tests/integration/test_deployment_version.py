@@ -14,20 +14,20 @@ from typing import Any, AsyncIterator, Dict, Optional
 import pytest
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
-from temporal_dbos.client import Client
-from temporal_dbos.common import (
+from dbosify import workflow
+from dbosify.client import Client
+from dbosify.common import (
     VersioningBehavior,
     WorkerDeploymentVersion,
 )
-from temporal_dbos.worker import DEFAULT_APP_VERSION, Worker, WorkerDeploymentConfig
+from dbosify.worker import DEFAULT_APP_VERSION, Worker, WorkerDeploymentConfig
 from tests.dbconfig import default_config, system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "deployment-version-tq"
 # default_config()["name"]
-APP_NAME = "temporal_dbos_test"
+APP_NAME = "dbosify_test"
 
 
 @workflow.defn

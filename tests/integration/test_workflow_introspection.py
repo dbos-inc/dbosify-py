@@ -7,9 +7,9 @@ from typing import Any, Dict
 
 import pytest
 
-from temporal_dbos import workflow
-from temporal_dbos._internal import dispatcher
-from temporal_dbos.exceptions import TemporalError
+from dbosify import workflow
+from dbosify._internal import dispatcher
+from dbosify.exceptions import TemporalError
 
 
 @workflow.defn
@@ -50,7 +50,7 @@ class IntrospectionWorkflow:
         return result
 
 
-@pytest.mark.usefixtures("tdb")
+@pytest.mark.usefixtures("dbosify")
 def test_instance_random_and_update_info() -> None:
     dispatcher.register_worker(workflows=[IntrospectionWorkflow])
     handle = dispatcher.start_workflow(

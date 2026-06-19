@@ -2,12 +2,12 @@
 (``temporalio/client/_interceptor.py``).
 
 This is the Phase-3 surface. The classes are re-exported from
-:py:mod:`temporal_dbos.client` so user code extends
-``temporal_dbos.client.Interceptor`` exactly as it would
+:py:mod:`dbosify.client` so user code extends
+``dbosify.client.Interceptor`` exactly as it would
 ``temporalio.client.Interceptor``.
 
 The ``*Input`` dataclasses are copied field-for-field from the SDK (DESIGN
-§6.8) so signature parity holds; fields temporal_dbos does not act on (e.g.
+§6.8) so signature parity holds; fields dbosify does not act on (e.g.
 ``callbacks``, ``links``, ``request_id``, ``versioning_override``, ``priority``,
 ``rpc_metadata``/``rpc_timeout``, ``data_converter_override``) are carried but
 inert. ``headers`` is *not* inert: a header set on ``start_workflow`` /
@@ -17,7 +17,7 @@ into the workflow as ``ExecuteWorkflowInput.headers`` / the matching
 Annotations use our own types or ``Any`` (the parity test checks parameter
 names/kind/default/order, not annotations).
 
-``OutboundInterceptor`` exposes only the verbs temporal_dbos actually routes
+``OutboundInterceptor`` exposes only the verbs dbosify actually routes
 through the chain — Nexus, worker build-id, workflow history-event fetching,
 and the distributed activity-as-RPC verbs are unsupported and intentionally
 absent (no silent no-op overrides). ``Client.start_update_with_start_workflow``
@@ -378,7 +378,7 @@ class Interceptor:
     """Interceptor for clients.
 
     This should be extended by any client interceptors. Pass instances to
-    ``temporal_dbos.client.Client(..., interceptors=[...])``.
+    ``dbosify.client.Client(..., interceptors=[...])``.
     """
 
     def intercept_client(self, next: OutboundInterceptor) -> OutboundInterceptor:
@@ -477,7 +477,7 @@ class OutboundInterceptor:
     ) -> "ScheduleAsyncIterator":
         """Called for every :py:meth:`Client.list_schedules` call.
 
-        (Async in temporal_dbos — our ``Client.list_schedules`` is async —
+        (Async in dbosify — our ``Client.list_schedules`` is async —
         unlike temporalio's synchronous outbound; invisible to parity.)"""
         return await self.next.list_schedules(input)
 

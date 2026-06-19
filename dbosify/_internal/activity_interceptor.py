@@ -4,8 +4,8 @@
 Activity inbound/outbound interception lives here; the workflow
 inbound/outbound classes and their ``*Input`` dataclasses live in
 :py:mod:`._internal.workflow_interceptor`. Both sets are re-exported from
-:py:mod:`temporal_dbos.worker` so user code extends
-``temporal_dbos.worker.Interceptor`` exactly as it would
+:py:mod:`dbosify.worker` so user code extends
+``dbosify.worker.Interceptor`` exactly as it would
 ``temporalio.worker.Interceptor``.
 
 A worker ``Interceptor`` advertises an activity interceptor via
@@ -44,7 +44,7 @@ class Interceptor:
     """Interceptor for workers.
 
     This should be extended by any worker interceptors. Pass instances to
-    ``temporal_dbos.worker.Worker(interceptors=[...])``.
+    ``dbosify.worker.Worker(interceptors=[...])``.
     """
 
     def intercept_activity(
@@ -74,7 +74,7 @@ class Interceptor:
 
         Args:
             input: Carries ``unsafe_extern_functions`` for parity; inert here
-                (temporal_dbos has no workflow sandbox, DEVIATIONS D3).
+                (dbosify has no workflow sandbox, DEVIATIONS D3).
 
         Returns:
             The class to construct to intercept each workflow, or ``None``.
@@ -88,7 +88,7 @@ class ExecuteActivityInput:
 
     fn: Callable[..., Any]
     args: Sequence[Any]
-    # Always ``None`` in temporal_dbos: sync activities run via
+    # Always ``None`` in dbosify: sync activities run via
     # ``asyncio.to_thread``, not a user-supplied executor. Present for parity.
     executor: Any | None
     # Headers (str -> Payload) a workflow outbound interceptor set on
@@ -141,9 +141,9 @@ class ActivityOutboundInterceptor:
         self.next = next
 
     def info(self) -> Info:
-        """Called for every :py:func:`temporal_dbos.activity.info` call."""
+        """Called for every :py:func:`dbosify.activity.info` call."""
         return self.next.info()
 
     def heartbeat(self, *details: Any) -> None:
-        """Called for every :py:func:`temporal_dbos.activity.heartbeat` call."""
+        """Called for every :py:func:`dbosify.activity.heartbeat` call."""
         self.next.heartbeat(*details)

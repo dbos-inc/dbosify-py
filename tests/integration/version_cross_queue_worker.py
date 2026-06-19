@@ -8,7 +8,7 @@ D29). Two roles run as separate processes, both on the same build id:
 A cross-queue activity is enqueued in-workflow as a ``__temporal_activity``
 workflow, so DBOS stamps it with the workflow worker's application_version
 (= build id); the activity worker dequeues it only if its own build id matches.
-Both roles run on build id ``$TDB_BUILD_ID``.
+Both roles run on build id ``$DBOSIFY_BUILD_ID``.
 """
 
 import asyncio
@@ -18,9 +18,9 @@ from datetime import timedelta
 
 from dbos import DBOS, DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import activity, workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 ACTIVITY_TASK_QUEUE = "version-xq-activity-tq"
@@ -50,7 +50,7 @@ async def run_activity_worker() -> None:
         default_config(),
         task_queue=ACTIVITY_TASK_QUEUE,
         activities=[say_hello],
-        build_id=os.environ["TDB_BUILD_ID"],
+        build_id=os.environ["DBOSIFY_BUILD_ID"],
     ):
         for _ in range(500):
             if await DBOS.retrieve_queue_async(ACTIVITY_TASK_QUEUE) is not None:
@@ -65,7 +65,7 @@ async def run_workflow_worker(workflow_id: str) -> None:
         default_config(),
         task_queue=WORKFLOW_TASK_QUEUE,
         workflows=[VersionCrossQueueWorkflow],
-        build_id=os.environ["TDB_BUILD_ID"],
+        build_id=os.environ["DBOSIFY_BUILD_ID"],
     ):
         client = Client(DBOSClient(system_database_url=system_database_url()))
         result = await client.execute_workflow(

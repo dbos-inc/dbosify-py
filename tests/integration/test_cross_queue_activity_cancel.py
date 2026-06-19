@@ -25,8 +25,8 @@ REPO_ROOT = Path(__file__).parents[2]
 def _env(vmid: str, effects: Path, **extra: str) -> "dict[str, str]":
     return {
         "PYTHONPATH": str(REPO_ROOT),
-        "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
-        "TDB_TEST_EFFECTS": str(effects),
+        "DBOSIFY_TEST_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_TEST_EFFECTS": str(effects),
         "DBOS__VMID": vmid,
         **extra,
     }
@@ -37,7 +37,9 @@ def _env(vmid: str, effects: Path, **extra: str) -> "dict[str, str]":
 @pytest.mark.parametrize("cancel_type", ["try", "wait"])
 def test_cross_queue_activity_is_cancelled(tmp_path: Path, cancel_type: str) -> None:
     effects = tmp_path / "effects"
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act", effects))
+    activity_worker = PythonProcess(
+        WORKER, "activity", env=_env("dbosify-act", effects)
+    )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
@@ -46,7 +48,7 @@ def test_cross_queue_activity_is_cancelled(tmp_path: Path, cancel_type: str) -> 
             "workflow",
             "start",
             "xq-cancel-wf",
-            env=_env("tdb-wf", effects, TDB_TEST_CANCEL_TYPE=cancel_type),
+            env=_env("dbosify-wf", effects, DBOSIFY_TEST_CANCEL_TYPE=cancel_type),
         )
         workflow_worker.start()
         try:
@@ -93,7 +95,9 @@ def test_cross_queue_activity_cancelled_before_dispatch(
     this test's wait rather than reporting ``activity-cancelled``.
     """
     effects = tmp_path / "effects"
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act", effects))
+    activity_worker = PythonProcess(
+        WORKER, "activity", env=_env("dbosify-act", effects)
+    )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
@@ -103,10 +107,10 @@ def test_cross_queue_activity_cancelled_before_dispatch(
             "start",
             "xq-cancel-predispatch-wf",
             env=_env(
-                "tdb-wf",
+                "dbosify-wf",
                 effects,
-                TDB_TEST_CANCEL_TYPE=cancel_type,
-                TDB_TEST_CANCEL_WHEN="immediate",
+                DBOSIFY_TEST_CANCEL_TYPE=cancel_type,
+                DBOSIFY_TEST_CANCEL_WHEN="immediate",
             ),
         )
         workflow_worker.start()

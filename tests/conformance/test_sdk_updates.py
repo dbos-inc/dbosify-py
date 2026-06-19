@@ -27,15 +27,15 @@ from typing import cast
 
 import pytest
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify.client import (
     Client,
     WorkflowFailureError,
     WorkflowUpdateFailedError,
     WorkflowUpdateStage,
 )
-from temporal_dbos.exceptions import ApplicationError, CancelledError
-from temporal_dbos.worker import Worker
+from dbosify.exceptions import ApplicationError, CancelledError
+from dbosify.worker import Worker
 from tests.conformance.sdk_harness import (
     assert_eq_eventually,
     new_worker,
@@ -43,7 +43,7 @@ from tests.conformance.sdk_harness import (
     wid,
 )
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 
 # ---------------------------------------------------------------------------

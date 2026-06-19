@@ -2,7 +2,7 @@
 
 The samples-python ``activity_worker/`` corpus is a single cross-language
 sample: a Go workflow invoking a Python activity over a Temporal server. It
-cannot run as written against temporal-dbos (no server, no Go worker;
+cannot run as written against dbosify (no server, no Go worker;
 ``execute_workflow("say-hello-workflow", ...)`` targets a workflow registered
 only in Go). This helper discharges the Phase-3 exit gate by proving the
 capability the directory demonstrates — an **activity-only** Python worker
@@ -25,9 +25,9 @@ from datetime import timedelta
 
 from dbos import DBOS, DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import activity, workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 ACTIVITY_TASK_QUEUE = "say-hello-task-queue"

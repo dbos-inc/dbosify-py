@@ -1,6 +1,6 @@
 """DBOS workflow status -> Temporal ``WorkflowExecutionStatus`` (DESIGN §6.2).
 
-The enum lives here (re-exported by ``temporal_dbos.client``) so internal
+The enum lives here (re-exported by ``dbosify.client``) so internal
 modules can map statuses without importing the client facade.
 """
 

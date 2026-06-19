@@ -1,4 +1,4 @@
-"""Unit tests for the data-conversion pipeline (temporal_dbos.converter).
+"""Unit tests for the data-conversion pipeline (dbosify.converter).
 
 No database needed. The crux these cover: JSON forgets Python types, so
 without a hint a value comes back as a plain dict/scalar (temporalio's
@@ -14,8 +14,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import pytest
 
-from temporal_dbos.common import RawValue
-from temporal_dbos.converter import (
+from dbosify.common import RawValue
+from dbosify.converter import (
     BinaryNullPayloadConverter,
     DataConverter,
     DefaultPayloadConverter,
@@ -292,7 +292,7 @@ def test_custom_json_encoding_name() -> None:
 def test_internal_encode_honors_converter_override() -> None:
     """conversion.encode_value / encode_values / encode_values_sync use a
     per-call converter override instead of the process converter."""
-    from temporal_dbos._internal import conversion
+    from dbosify._internal import conversion
 
     override = DataConverter(payload_codec=_ReverseCodec())
     value = {"a": 1}
@@ -312,7 +312,7 @@ def test_async_activity_handle_threads_converter_override() -> None:
     """AsyncActivityHandle stores its override and threads it onto every
     outbound *Input, so the chain-root rebuild (which carries only id_or_token)
     still encodes complete/heartbeat/fail with it."""
-    from temporal_dbos.client import AsyncActivityHandle
+    from dbosify.client import AsyncActivityHandle
 
     captured: Dict[str, Any] = {}
 

@@ -71,7 +71,7 @@ from .payloads import (
     wrap_input,
 )
 
-logger = logging.getLogger("temporal_dbos.dispatcher")
+logger = logging.getLogger("dbosify.dispatcher")
 
 FAIL_FAST_ENV = "TEMPORAL_DBOS_FAIL_FAST"
 TASK_RETRY_INITIAL_ENV = "TEMPORAL_DBOS_TASK_RETRY_INITIAL_SECONDS"
@@ -79,7 +79,7 @@ TASK_RETRY_MAX_SECONDS = 60.0
 
 
 def _reset_for_tests() -> None:
-    """Clear all per-process temporal-dbos state. Test-only: needed when the
+    """Clear all per-process dbosify state. Test-only: needed when the
     DBOS registry is destroyed and re-created, which strands every function
     decorated against the old one.
     """

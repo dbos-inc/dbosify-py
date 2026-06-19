@@ -8,12 +8,12 @@ from datetime import timedelta
 import pytest
 import sqlalchemy
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.testing import WorkflowEnvironment
-from temporal_dbos.worker import Worker
+from dbosify import activity, workflow
+from dbosify.testing import WorkflowEnvironment
+from dbosify.worker import Worker
 from tests.dbconfig import system_database_url
 
-pytestmark = pytest.mark.usefixtures("tdb_env")
+pytestmark = pytest.mark.usefixtures("dbosify_env")
 
 TASK_QUEUE = "env-tq"
 
@@ -60,7 +60,7 @@ async def test_workflow_environment_start_local() -> None:
     )
     async with env:
         # Its own database, not the one the URL named.
-        assert db_name.startswith("temporal_dbos_env_")
+        assert db_name.startswith("dbosify_env_")
         assert _database_exists(maintenance_url, db_name)
         assert not env.supports_time_skipping
 

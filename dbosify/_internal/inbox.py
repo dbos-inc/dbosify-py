@@ -19,12 +19,12 @@ replay-stable).
 import time
 from typing import Any, Dict, Mapping, Optional, Sequence
 
-INBOX_TOPIC = "__tdb_inbox"
+INBOX_TOPIC = "__dbosify_inbox"
 
 # The topic a queued activity workflow parks on for external completion
 # (raise_complete_async on the cross-queue path, §6.1.2): AsyncActivityHandle
 # sends the completion envelope here, addressed to the activity workflow id.
-ASYNC_COMPLETE_TOPIC = "__tdb_async_complete"
+ASYNC_COMPLETE_TOPIC = "__dbosify_async_complete"
 
 # recv timeout per wait; on (checkpointed, deterministic) timeout the
 # interpreter just re-issues the recv.
@@ -109,7 +109,7 @@ def async_activity_gone_key(activity_id: str) -> str:
     """Event set when a parked async activity will never accept its
     completion (cancelled, or its run closed): completers poll it so their
     heartbeats/completions can raise instead of going into the void."""
-    return f"__tdb_act_{activity_id}_gone"
+    return f"__dbosify_act_{activity_id}_gone"
 
 
 def activity_cancel_key(activity_id: str) -> str:
@@ -117,7 +117,7 @@ def activity_cancel_key(activity_id: str) -> str:
     (§6.1.2): the activity's attempt step on the other worker polls it and, when
     set, delivers cancellation into the running activity. (The local path uses an
     in-process threading.Event instead — same process, no event needed.)"""
-    return f"__tdb_act_{activity_id}_cancel"
+    return f"__dbosify_act_{activity_id}_cancel"
 
 
 def query_envelope(
@@ -140,19 +140,19 @@ def query_envelope(
 # [{"id": child_id, "policy": int}, ...]. Written (checkpointed set_event) as
 # children start, so parent-close policies survive the parent — including
 # termination, where no workflow code runs and the *client* applies them.
-CHILDREN_EVENT_KEY = "__tdb_children"
+CHILDREN_EVENT_KEY = "__dbosify_children"
 
 
 def update_acceptance_key(update_id: str) -> str:
-    return f"__tdb_upd_{update_id}_accepted"
+    return f"__dbosify_upd_{update_id}_accepted"
 
 
 def update_result_key(update_id: str) -> str:
-    return f"__tdb_upd_{update_id}"
+    return f"__dbosify_upd_{update_id}"
 
 
 def query_result_key(request_id: str) -> str:
-    return f"__tdb_q_{request_id}"
+    return f"__dbosify_q_{request_id}"
 
 
 def rehydrate_stop_envelope() -> Envelope:

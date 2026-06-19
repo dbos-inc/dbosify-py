@@ -1,7 +1,7 @@
 """Subprocess worker for cross-version PINNED-recovery (DEVIATIONS D29).
 
 Run as: python version_recovery_worker.py <start|idle|resume> <workflow_id>
-with env TDB_BUILD_ID selecting the worker's build id (= DBOS application_version).
+with env DBOSIFY_BUILD_ID selecting the worker's build id (= DBOS application_version).
 
 DBOS scopes recovery to application_version, so a workflow stamped with build id
 v1 is recovered only by v1 workers. This script demonstrates that end-to-end:
@@ -21,13 +21,13 @@ import sys
 
 from dbos import DBOSClient
 
-from temporal_dbos import workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import Worker
+from dbosify import workflow
+from dbosify.client import Client
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 TASK_QUEUE = "version-recovery-tq"
-BUILD_ID = os.environ["TDB_BUILD_ID"]
+BUILD_ID = os.environ["DBOSIFY_BUILD_ID"]
 
 
 @workflow.defn(name="VersionPinnedWorkflow")

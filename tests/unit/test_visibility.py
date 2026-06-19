@@ -6,12 +6,12 @@ of everything outside the supported grammar."""
 import pytest
 from dbos import WorkflowStatus
 
-from temporal_dbos._internal.payloads import (
+from dbosify._internal.payloads import (
     SerializedContinueAsNew,
     SerializedWorkflowCancellation,
 )
-from temporal_dbos._internal.status import WorkflowExecutionStatus
-from temporal_dbos._internal.visibility import (
+from dbosify._internal.status import WorkflowExecutionStatus
+from dbosify._internal.visibility import (
     VisibilityQueryError,
     parse_query,
 )

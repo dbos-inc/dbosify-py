@@ -1,4 +1,4 @@
-"""The DBOS ``Serializer`` adapter: JSON transport for temporal-dbos
+"""The DBOS ``Serializer`` adapter: JSON transport for dbosify
 checkpoints (DESIGN §6.9), replacing DBOS's default pickle.
 
 By the time data reaches this serializer it is already JSON-safe: every user
@@ -45,7 +45,7 @@ from .payloads import (
     SerializedWorkflowFailure,
 )
 
-SERIALIZER_NAME = "temporal_dbos_json"
+SERIALIZER_NAME = "dbosify_json"
 
 
 def _json_default(value: Any) -> Any:
@@ -80,8 +80,8 @@ def _dict_to_exc(data: dict[str, Any]) -> BaseException:
     return Exception(data.get("message", "unknown error"))
 
 
-class TemporalDBOSSerializer(Serializer):
-    """JSON serializer for temporal-dbos checkpoints (see module docstring)."""
+class DBOSifySerializer(Serializer):
+    """JSON serializer for dbosify checkpoints (see module docstring)."""
 
     def name(self) -> str:
         return SERIALIZER_NAME
@@ -103,4 +103,4 @@ class TemporalDBOSSerializer(Serializer):
 
 
 # Stateless — one shared instance is enough (and keeps name() identical).
-TEMPORAL_SERIALIZER = TemporalDBOSSerializer()
+TEMPORAL_SERIALIZER = DBOSifySerializer()

@@ -6,7 +6,7 @@ collide with a user/child id — a collision would make the idempotent
 
 import pytest
 
-from temporal_dbos._internal import ids
+from dbosify._internal import ids
 
 
 @pytest.mark.parametrize(

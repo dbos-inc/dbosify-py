@@ -22,9 +22,9 @@ from typing import Any
 
 from dbos import DBOS, DBOSClient
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import Client
-from temporal_dbos.worker import (
+from dbosify import activity, workflow
+from dbosify.client import Client
+from dbosify.worker import (
     ActivityInboundInterceptor,
     ExecuteActivityInput,
     Interceptor,

@@ -7,16 +7,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from temporal_dbos._internal import schedules
-from temporal_dbos._internal.dispatcher import _workflow_retry_delay
-from temporal_dbos._internal.payloads import (
+from dbosify._internal import schedules
+from dbosify._internal.dispatcher import _workflow_retry_delay
+from dbosify._internal.payloads import (
     RunMeta,
     deserialize_retry_policy,
     serialize_retry_policy,
     unwrap_input,
     wrap_input,
 )
-from temporal_dbos.common import RetryPolicy
+from dbosify.common import RetryPolicy
 
 
 class TestInputEnvelope:

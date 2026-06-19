@@ -5,7 +5,7 @@ service container or a local installation). Tests never launch a server; they
 drop and re-create their own databases on the provided one.
 
 Connection configuration, in priority order:
-1. ``TDB_TEST_SYSTEM_DATABASE_URL`` — full SQLAlchemy URL; the database it
+1. ``DBOSIFY_TEST_SYSTEM_DATABASE_URL`` — full SQLAlchemy URL; the database it
    names is dropped/created by tests, so never point it at a database you
    care about.
 2. ``PGHOST``/``PGPORT``/``PGUSER``/``PGPASSWORD`` (defaults: localhost,
@@ -19,10 +19,10 @@ from urllib.parse import quote
 import dbos
 from dbos import DBOSConfig
 
-from temporal_dbos._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
-from temporal_dbos._internal.serializer import TEMPORAL_SERIALIZER
+from dbosify._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
+from dbosify._internal.serializer import TEMPORAL_SERIALIZER
 
-TEST_SYSTEM_DB_NAME = "temporal_dbos_test_dbos_sys"
+TEST_SYSTEM_DB_NAME = "dbosify_test_dbos_sys"
 
 # Every namespace maps to its own DBOS system schema (DEVIATIONS D1). Tests run
 # in the default namespace, so all components — the product Worker/Client and
@@ -47,7 +47,7 @@ dbos.DBOSClient.__init__ = _dbos_client_init  # type: ignore[method-assign]
 
 
 def system_database_url() -> str:
-    url = os.environ.get("TDB_TEST_SYSTEM_DATABASE_URL")
+    url = os.environ.get("DBOSIFY_TEST_SYSTEM_DATABASE_URL")
     if url is not None:
         return url
     host = os.environ.get("PGHOST", "localhost")
@@ -59,7 +59,7 @@ def system_database_url() -> str:
 
 def default_config() -> DBOSConfig:
     return {
-        "name": "temporal_dbos_test",
+        "name": "dbosify_test",
         "system_database_url": system_database_url(),
         "run_admin_server": False,
         # Speeds up recv/event delivery in tests.

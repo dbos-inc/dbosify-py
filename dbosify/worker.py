@@ -100,7 +100,7 @@ __all__ = [
     "Worker",
 ]
 
-logger = logging.getLogger("temporal_dbos.worker")
+logger = logging.getLogger("dbosify.worker")
 
 # A stable default DBOS application version. DBOS scopes workflow recovery and
 # queue dequeuing by ``application_version`` and otherwise auto-computes it from
@@ -157,7 +157,7 @@ def _with_default_app_version(config: DBOSConfig) -> DBOSConfig:
 
 
 def _reset_for_tests() -> None:
-    """Clear the per-process worker slot and all temporal-dbos/DBOS state."""
+    """Clear the per-process worker slot and all dbosify/DBOS state."""
     global _live_worker
     _live_worker = None
     DBOS.destroy(destroy_registry=True)
@@ -480,7 +480,7 @@ class Worker:
             # the loop's default executor is DBOS's own pool, which destroy
             # shuts down.
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="tdb-worker-shutdown"
+                max_workers=1, thread_name_prefix="dbosify-worker-shutdown"
             ) as shutdown_pool:
                 await loop.run_in_executor(
                     shutdown_pool,

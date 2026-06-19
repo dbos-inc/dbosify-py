@@ -19,15 +19,15 @@ from pathlib import Path
 
 from dbos import DBOSClient, DBOSConfig
 
-from temporal_dbos import activity, workflow
-from temporal_dbos.client import (
+from dbosify import activity, workflow
+from dbosify.client import (
     Client,
     Schedule,
     ScheduleActionStartWorkflow,
     ScheduleIntervalSpec,
     ScheduleSpec,
 )
-from temporal_dbos.worker import Worker
+from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
 TASK_QUEUE = "schedules-recovery-tq"

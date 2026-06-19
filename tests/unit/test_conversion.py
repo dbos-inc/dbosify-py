@@ -1,5 +1,5 @@
 """Unit tests for the embeddable payload-dict representation
-(temporal_dbos._internal.conversion). No database needed.
+(dbosify._internal.conversion). No database needed.
 
 These pin the on-disk shape that DBOS observability tools (Conductor,
 list_workflows) render: json/plain values inline (readable), everything else
@@ -10,13 +10,13 @@ import base64
 import json
 from dataclasses import dataclass
 
-from temporal_dbos._internal.conversion import (
+from dbosify._internal.conversion import (
     _payload_from_dict,
     _payload_to_dict,
     decode_values,
     encode_values,
 )
-from temporal_dbos.converter import Payload
+from dbosify.converter import Payload
 
 
 @dataclass

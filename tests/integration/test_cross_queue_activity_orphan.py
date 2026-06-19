@@ -23,8 +23,8 @@ REPO_ROOT = Path(__file__).parents[2]
 def _env(vmid: str, effects: Path) -> "dict[str, str]":
     return {
         "PYTHONPATH": str(REPO_ROOT),
-        "TDB_TEST_SYSTEM_DATABASE_URL": system_database_url(),
-        "TDB_TEST_EFFECTS": str(effects),
+        "DBOSIFY_TEST_SYSTEM_DATABASE_URL": system_database_url(),
+        "DBOSIFY_TEST_EFFECTS": str(effects),
         "DBOS__VMID": vmid,
     }
 
@@ -33,12 +33,14 @@ def _env(vmid: str, effects: Path) -> "dict[str, str]":
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_continue_as_new_cancels_pending_cross_queue_activity(tmp_path: Path) -> None:
     effects = tmp_path / "effects"
-    activity_worker = PythonProcess(WORKER, "activity", env=_env("tdb-act", effects))
+    activity_worker = PythonProcess(
+        WORKER, "activity", env=_env("dbosify-act", effects)
+    )
     activity_worker.start()
     try:
         activity_worker.wait_for_line("ACTIVITY_WORKER_READY", timeout=90)
         workflow_worker = PythonProcess(
-            WORKER, "workflow", "start", "xq-orphan-wf", env=_env("tdb-wf", effects)
+            WORKER, "workflow", "start", "xq-orphan-wf", env=_env("dbosify-wf", effects)
         )
         workflow_worker.start()
         try:
