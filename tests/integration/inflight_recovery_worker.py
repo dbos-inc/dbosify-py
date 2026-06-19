@@ -1,6 +1,6 @@
-"""Subprocess worker for Phase 2 recovery tests.
+"""Subprocess worker for recovery tests.
 
-Run as: python phase2_worker.py <scenario>-<start|resume> <workflow_id> <effects_path>
+Run as: python inflight_recovery_worker.py <scenario>-<start|resume> <workflow_id> <effects_path>
 
 Scenarios:
   cancel  cancellation unwind: parks forever; on cancel the unwind runs a
@@ -35,7 +35,7 @@ from dbosify.exceptions import ApplicationError, ChildWorkflowError
 from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-TASK_QUEUE = "phase2-recovery-tq"
+TASK_QUEUE = "inflight-recovery-tq"
 
 
 @activity.defn

@@ -11,7 +11,7 @@ fails the test until it is classified, so no behavior-changing option can be
 silently swallowed unnoticed.
 
 The pending set is the point of the audit: it is the explicit, reviewed list of
-behavior-changing options we accept but do not yet honor (see DEVIATIONS D35).
+behavior-changing options we accept but do not yet honor (see DEVIATIONS start-params).
 ``execute_*`` variants share the start verbs' parameter surface and impl path;
 their signatures are pinned separately by ``test_signature_parity``.
 """
@@ -77,20 +77,20 @@ _START_WORKFLOW = _Spec(
         "task_timeout": "no workflow-task concept (no Temporal workflow tasks)",
         "static_summary": "static metadata surfaced only in Temporal UI; no UI",
         "static_details": "static metadata surfaced only in Temporal UI; no UI",
-        "rpc_metadata": "gRPC call metadata; no Temporal gRPC (D1)",
-        "rpc_timeout": "bounds a single gRPC RPC; no Temporal gRPC (D1)",
-        "request_eager_start": "server-side eager-start optimization; no server (D1)",
+        "rpc_metadata": "gRPC call metadata; no Temporal gRPC (no-server)",
+        "rpc_timeout": "bounds a single gRPC RPC; no Temporal gRPC (no-server)",
+        "request_eager_start": "server-side eager-start optimization; no server (no-server)",
         "priority": "task-queue priority; DBOS queues have no priority lanes",
-        "request_id": "gRPC start-dedup id; DBOS dedups on workflow id (D2)",
+        "request_id": "gRPC start-dedup id; DBOS dedups on workflow id (connection-surface)",
         "versioning_override": "per-start version override; pinned default matches, "
-        "auto-upgrade has no DBOS analog (D29)",
-        "callbacks": "server-side completion callbacks; no server (D1)",
-        "links": "event-level links for Temporal visibility; no server (D1)",
+        "auto-upgrade has no DBOS analog (worker-versioning)",
+        "callbacks": "server-side completion callbacks; no server (no-server)",
+        "links": "event-level links for Temporal visibility; no server (no-server)",
         "stack_level": "controls temporalio's own warning stacklevel; cosmetic",
     },
     pending={
         "execution_timeout": "whole-execution (run-chain) deadline not enforced; "
-        "tied to the pending TIMED_OUT status work (D19/D35)",
+        "tied to the pending TIMED_OUT status work (cron-chains/start-params)",
     },
 )
 
@@ -111,17 +111,17 @@ _START_CHILD = _Spec(
     },
     inert={
         "task_timeout": "no workflow-task concept (no Temporal workflow tasks)",
-        "versioning_intent": "child version pinning has no DBOS analog (D29)",
+        "versioning_intent": "child version pinning has no DBOS analog (worker-versioning)",
         "static_summary": "static metadata surfaced only in Temporal UI; no UI",
         "static_details": "static metadata surfaced only in Temporal UI; no UI",
         "priority": "task-queue priority; DBOS queues have no priority lanes",
     },
     pending={
-        "execution_timeout": "whole-execution deadline not enforced (D19/D35)",
+        "execution_timeout": "whole-execution deadline not enforced (cron-chains/start-params)",
         "cron_schedule": "cron child spawns a detached chain the parent-close "
-        "sweep would need to follow; honored for top-level only (D35)",
+        "sweep would need to follow; honored for top-level only (start-params)",
         "id_reuse_policy": "children enforce reject-on-duplicate; other policies "
-        "need run-chain resolution the child-start path lacks (D35)",
+        "need run-chain resolution the child-start path lacks (start-params)",
     },
 )
 
@@ -141,7 +141,7 @@ _START_ACTIVITY = _Spec(
         "activity_id",
     },
     inert={
-        "versioning_intent": "activity version pinning has no DBOS analog (D29)",
+        "versioning_intent": "activity version pinning has no DBOS analog (worker-versioning)",
         "summary": "static metadata surfaced only in Temporal UI; no UI",
         "priority": "task-queue priority; DBOS queues have no priority lanes",
     },
@@ -161,8 +161,8 @@ _CONTINUE_AS_NEW = _Spec(
     },
     inert={
         "task_timeout": "no workflow-task concept (no Temporal workflow tasks)",
-        "versioning_intent": "version pinning has no DBOS analog (D29)",
-        "initial_versioning_behavior": "ramping/auto-upgrade has no DBOS analog (D29)",
+        "versioning_intent": "version pinning has no DBOS analog (worker-versioning)",
+        "initial_versioning_behavior": "ramping/auto-upgrade has no DBOS analog (worker-versioning)",
     },
     pending={},
 )

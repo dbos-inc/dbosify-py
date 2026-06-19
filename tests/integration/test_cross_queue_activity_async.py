@@ -1,4 +1,4 @@
-"""External (async) completion of a cross-queue activity (Phase 4, §6.1.2).
+"""External (async) completion of a cross-queue activity (§6.1.2).
 
 ``raise_complete_async()`` on the queued path parks the ``__temporal_activity``
 workflow on its completion topic (rather than the parent run's inbox), addressed
@@ -86,9 +86,8 @@ def test_queued_async_completion(tmp_path: Path) -> None:
 @pytest.mark.timeout(150)
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_queued_async_heartbeat_then_complete(tmp_path: Path) -> None:
-    # A heartbeat sent to a parked queued activity must not be mistaken for the
-    # completion (it shares the completion topic): the activity workflow skips it
-    # and the later complete() still resolves the workflow.
+    # A heartbeat to a parked queued activity (it shares the completion topic)
+    # is skipped, not mistaken for completion; the later complete() resolves it.
     token_file = tmp_path / "token"
     activity_worker = PythonProcess(
         WORKER, "activity", env=_env("dbosify-act", token_file)
@@ -119,10 +118,8 @@ def test_queued_async_heartbeat_then_complete(tmp_path: Path) -> None:
 @pytest.mark.timeout(120)
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_queued_async_cancel_while_parked(tmp_path: Path) -> None:
-    # Cancelling a queued activity that has async-parked must reach it promptly
-    # (a marker wakes its completion-topic recv), yielding a real cancellation —
-    # not the start-to-close timeout (120s) that an undelivered cancel would
-    # produce. The 60s wait below would fail in that unfixed case.
+    # Cancelling a queued activity that has async-parked reaches it promptly (a
+    # marker wakes its completion-topic recv), yielding a real cancellation.
     activity_worker = PythonProcess(WORKER, "activity", env=_env("dbosify-act"))
     activity_worker.start()
     try:

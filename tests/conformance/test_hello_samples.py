@@ -1,8 +1,7 @@
 """Conformance: run temporalio/samples-python ``hello/`` samples against
 dbosify with the mechanical import rewrite plus the connection-setup
-adapter (see runner.py). The pass/xfail expectations below are the
-conformance table published in the README — xfail reasons name the roadmap
-phase that unblocks each sample.
+adapter (see runner.py). The pass/xfail/skip expectations below record the
+conformance status of each sample.
 """
 
 import subprocess
@@ -19,11 +18,8 @@ from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess
 
 RUNNER = Path(__file__).parent / "runner.py"
-# Generous by default: each sample subprocess pays full DBOS init plus all
-# schema migrations on a fresh database before any workflow runs, which can
-# eat several seconds on a loaded CI runner (observed flake:
-# hello_activity_retry, whose ~5s of retry backoff sat right at a 10s line).
-# Known-hanging xfail samples pin timeout=10 so they don't slow CI down.
+# Generous by default: each subprocess pays full DBOS init plus schema migrations on
+# a fresh database before any workflow, eating seconds on CI. Hanging xfails pin timeout=10.
 SAMPLE_TIMEOUT_SECONDS = 30
 
 
@@ -33,12 +29,8 @@ class Expectation:
     xfail: Optional[str] = None  # reason this can't pass yet
     skip: Optional[str] = None  # reason this isn't runnable in the harness
     timeout: int = SAMPLE_TIMEOUT_SECONDS  # for samples that legitimately run long
-    # The sample never exits by design (e.g. hello_cron awaits forever):
-    # run it in the background, prove the expected effect through the
-    # database (see DB_VERIFIERS), then tear it down. `ready_line` is the
-    # output that marks the sample as booted and started — waited for (with
-    # its own READY_TIMEOUT budget) before the DB verification clock starts,
-    # so slow CI boot can't eat the verification window.
+    # Sample never exits by design (e.g. hello_cron): run in background, verify via
+    # database (DB_VERIFIERS), tear down. `ready_line` marks boot, waited before verify.
     runs_forever: bool = False
     ready_line: Optional[str] = None
     # Opt this sample's worker into near-immediate queue dispatch (runner.py).
@@ -84,13 +76,8 @@ EXPECTATIONS = {
         timeout=90,
     ),
     "hello_cron": Expectation(
-        # The sample starts a "* * * * *" cron and waits forever; the cron
-        # proof is in the database (the workflow logs at INFO with no
-        # logging config, so there is no completion line to wait for). The
-        # ready line marks boot + start_workflow; the timeout then covers
-        # up to a full minute to the next cron boundary plus execution.
-        # (A combined 100s budget flaked in CI: boot ate the window and the
-        # fire was still executing at the deadline.)
+        # Starts a "* * * * *" cron and waits forever; proof is in the database (no
+        # completion line). Timeout covers up to a minute to the next boundary plus run.
         runs_forever=True,
         ready_line="Running workflow once a minute",
         timeout=150,
@@ -104,18 +91,12 @@ EXPECTATIONS = {
     ),
     "hello_query": Expectation(
         # The second query hits a *completed* workflow; rehydrate-by-replay
-        # reconstructs its final state to answer it (README deviation #2).
+        # reconstructs its final state to answer it.
         expect_output="Second greeting result: Goodbye, World!",
     ),
     "hello_search_attributes": Expectation(
-        # Starts with an (untyped) search attribute, upserts it from inside the
-        # workflow, and reads both values back via describe(). The workflow
-        # upserts 2s in and the client describes 3s later — a 1s margin that
-        # DBOS's default ~1s queue-dispatch latency would race, so this sample
-        # opts its worker into near-immediate dispatch (fast_queue, scoped to
-        # this sample only — see runner.py). Storage itself is independently
-        # covered by tests/unit/test_attributes.py and
-        # tests/integration/test_search_attributes*.py (incl. SIGKILL recovery).
+        # Upsert at 2s, describe at 3s — a 1s margin DBOS's ~1s dispatch latency would
+        # race, so this worker opts into near-immediate dispatch (fast_queue, runner.py).
         expect_output="Second search attribute values:  ['new-value']",
         fast_queue=True,
         timeout=30,
@@ -213,8 +194,7 @@ def _verify_hello_cron(deadline_seconds: float, process: PythonProcess) -> None:
             except Exception as err:
                 bookkeeping = f"<query failed: {err!r}>"
         # SIGABRT + PYTHONFAULTHANDLER dumps every thread's stack into the
-        # captured output — the difference between "slow" and "stuck", and
-        # where exactly the stuck frame is.
+        # captured output — distinguishing "slow" from "stuck" and where.
         process.sigabrt_for_stacks(grace_seconds=3.0)
         transcript = "".join(process.transcript[-120:]) or "<no output>"
         pytest.fail(
@@ -256,9 +236,8 @@ def test_hello_sample(sample_name: str, rewritten_samples: Path) -> None:
         )
         process.start()
         try:
-            # Boot first, on its own budget: the verification clock starts
-            # only once the sample is up and has started its workflow.
-            # (wait_for_line's TimeoutError includes the output so far.)
+            # Boot first, on its own budget: the verification clock starts only
+            # once the sample is up and has started its workflow.
             assert expectation.ready_line is not None
             process.wait_for_line(expectation.ready_line, timeout=READY_TIMEOUT_SECONDS)
             DB_VERIFIERS[sample_name](expectation.timeout, process)

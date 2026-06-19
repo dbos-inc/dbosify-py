@@ -1,6 +1,6 @@
-"""The §4.3 SIGKILL-recovery suite (DESIGN.md Phase 0 exit criteria 1, 2, 4,
-and 5), driven through real worker subprocesses against real Postgres. The
-non-kill criteria (3 and 6) live in test_interpreter_basic.py.
+"""The §4.3 SIGKILL-recovery suite (criteria 1, 2, 4, and 5), driven through
+real worker subprocesses against real Postgres. The non-kill criteria (3 and 6)
+live in test_interpreter_basic.py.
 """
 
 import json
@@ -16,7 +16,7 @@ from dbosify._internal import conversion, inbox
 from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess
 
-WORKER = Path(__file__).parent / "phase0_worker.py"
+WORKER = Path(__file__).parent / "interpreter_recovery_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
 ENV = {"PYTHONPATH": str(REPO_ROOT)}
 
@@ -28,7 +28,7 @@ def _result_from(line: str) -> Any:
 
 
 class Driver:
-    """Test-side client for a phase0_worker subprocess: signals/updates via
+    """Test-side client for a interpreter_recovery_worker subprocess: signals/updates via
     DBOSClient envelopes, exactly like a cross-process Temporal client.
     """
 

@@ -64,9 +64,8 @@ async def _wait_workflow_admitted(client: Client, workflow_id: str) -> None:
             return False
 
     await assert_eq_eventually(True, exists)
-    # The update is sent on a background task whose first await is the inbox
-    # send; give that send a moment to land in the system database before the
-    # worker starts draining the queue.
+    # The update is sent on a background task whose first await is the inbox send;
+    # give it a moment to land before the worker starts draining the queue.
     await asyncio.sleep(0.5)
 
 
@@ -137,10 +136,8 @@ class UpImmediatelyCompleteUpdateAndWorkflow:
     "test_update_completion_is_honored_when_after_workflow_return_2."
 )
 async def test_workflow_update_before_worker_start(client: Client) -> None:
-    # Start a workflow and an update against it *before* any worker is running,
-    # then bring up a worker to process both in the first task. Both must
-    # succeed, and a query must observe the update's mutation. Done with the
-    # cache off to also confirm replay behavior.
+    # Start a workflow and an update against it *before* any worker runs, then bring
+    # up a no-cache worker to process both in the first task; a query observes the mutation.
     await warm_schema(client)  # client ops precede the worker; ensure schema exists
     task_queue = f"tq-{wid()}"
     handle = await client.start_workflow(
@@ -339,9 +336,8 @@ class UpUpdateCompletionIsHonoredWhenAfterWorkflowReturnWorkflow2:
     async def run(self) -> str:
         await workflow.wait_condition(lambda: self.received_update)
         self.update_result.set_result("update-result")
-        # The main coroutine's completion command is emitted before the update
-        # completion command; the client awaiting the update must still get the
-        # update result, not an "already completed" error.
+        # The main coroutine's completion command is emitted before the update's; the
+        # awaiting client must still get the update result, not "already completed".
         return "workflow-result"
 
     @workflow.update
@@ -470,8 +466,7 @@ async def test_update_in_first_wft_sees_workflow_init(
 
 
 # ---------------------------------------------------------------------------
-# test_unfinished_update_handler / test_unfinished_signal_handler
-# (lines 5776 / 5783)
+# test_unfinished_update_handler / test_unfinished_signal_handler (lines 5776 / 5783)
 # ---------------------------------------------------------------------------
 
 

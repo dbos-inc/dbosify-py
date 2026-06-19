@@ -1,10 +1,4 @@
-"""Common types and enums, mirroring ``temporalio.common``.
-
-Phase 0 carries only what the interpreter needs (RetryPolicy and the
-workflow-ID policy enums); the rest of the module lands with the client
-facade in Phase 1. Search-attribute types land with memo/search-attribute
-storage in Phase 3.
-"""
+"""Common types and enums, mirroring ``temporalio.common``."""
 
 from __future__ import annotations
 
@@ -30,10 +24,8 @@ from typing import (
     overload,
 )
 
-# typing.NamedTuple cannot be combined with Generic before Python 3.11
-# ("Multiple inheritance with NamedTuple is not supported"). typing_extensions
-# backports the 3.11 generic NamedTuple to our 3.10 floor — same approach as
-# temporalio, which imports NamedTuple from typing_extensions for this reason.
+# typing.NamedTuple can't combine with Generic before 3.11; typing_extensions
+# backports the 3.11 generic NamedTuple to our 3.10 floor (as temporalio does).
 from typing_extensions import NamedTuple
 
 if TYPE_CHECKING:
@@ -185,12 +177,7 @@ class WorkflowIDConflictPolicy(IntEnum):
 
 
 # --- Search attributes (mirroring ``temporalio.common``) --------------------
-#
-# These mirror the Temporal SDK's typed search-attribute surface verbatim
-# (signatures, factory methods, deprecation of the untyped dict form). The one
-# self-contained departure: the indexed-value-type ints are inlined here rather
-# than pulled from ``temporalio.api.enums.v1.IndexedValueType`` (we never depend
-# on ``temporalio`` at runtime); the values match that protobuf enum exactly.
+# Typed surface mirrored verbatim; indexed-value-type ints inlined to match its ``IndexedValueType`` enum.
 
 # A list so we can catch callers accidentally passing a bare ``str`` (which is
 # itself a Sequence) instead of a list of values.
@@ -368,9 +355,8 @@ class SearchAttributeKey(ABC, Generic[SearchAttributeValueType]):
                 return SearchAttributeKey.for_keyword_list(name)
         elif isinstance(vals[0], str):
             return SearchAttributeKey.for_keyword(name)
-        # int is checked before bool, verbatim from temporalio: bool is an int
-        # subclass, so an untyped bool value guesses to for_int (the for_bool
-        # branch is effectively dead, but kept to mirror temporalio exactly).
+        # int before bool, verbatim from temporalio: bool is an int subclass, so
+        # an untyped bool guesses to for_int (the for_bool branch is dead but kept).
         elif isinstance(vals[0], int):
             return SearchAttributeKey.for_int(name)
         elif isinstance(vals[0], float):
@@ -555,20 +541,8 @@ def _warn_on_deprecated_search_attributes(
         )
 
 
-# ---------------------------------------------------------------------------
-# Worker versioning / deployments
-# ---------------------------------------------------------------------------
-#
-# Temporal's Worker Deployment Versioning lets a workflow be pinned to (or
-# auto-upgraded across) worker build versions for safe rolling deploys. In
-# dbosify a "deployment version" maps onto DBOS's own versioning:
-# ``deployment_name`` is the DBOS application name and ``build_id`` is the DBOS
-# ``application_version``. DBOS scopes both workflow recovery and queue dequeue
-# to ``application_version``, so a workflow is recovered/continued only on
-# workers of its build ID — which *is* Temporal's PINNED behavior, enforced.
-# What DBOS has no analog for is AUTO_UPGRADE (migrating a running workflow to a
-# newer version) and the cluster routing-fleet / ramping concepts. See
-# DEVIATIONS D29.
+# Worker versioning / deployments: a "deployment version" maps onto DBOS versioning
+# (enforces PINNED; AUTO_UPGRADE has none — see DEVIATIONS worker-versioning).
 
 
 class VersioningBehavior(IntEnum):
@@ -577,7 +551,7 @@ class VersioningBehavior(IntEnum):
 
     ``PINNED`` is dbosify's enforced behavior (DBOS pins recovery/dequeue
     to ``application_version`` = the build ID). ``AUTO_UPGRADE`` has no DBOS
-    analog and degrades to pinned. See DEVIATIONS D29.
+    analog and degrades to pinned. See DEVIATIONS worker-versioning.
     """
 
     UNSPECIFIED = 0
@@ -625,7 +599,7 @@ class VersioningOverride(ABC):
     execution, mirroring ``temporalio.common.VersioningOverride``.
 
     ``PinnedVersioningOverride`` matches dbosify's enforced default;
-    ``AutoUpgradeVersioningOverride`` has no DBOS analog (DEVIATIONS D29).
+    ``AutoUpgradeVersioningOverride`` has no DBOS analog (DEVIATIONS worker-versioning).
     """
 
 

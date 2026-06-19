@@ -1,4 +1,4 @@
-"""Continue-as-new (Phase 3): chain hops, result-following, status mapping,
+"""Continue-as-new: chain hops, result-following, status mapping,
 message carryover, run-timeout carry, and child chains.
 """
 
@@ -42,7 +42,7 @@ class CanIdProbe:
     """Continues-as-new once, then reports the ids its *second* run surfaces.
     Guards the base-vs-run-id contract: workflow_id must stay the stable base
     across the chain, run_id carries the suffixed DBOS id (the suffix must never
-    leak into workflow_id — cf. the info().workflow_id / list-WorkflowId fixes)."""
+    leak into workflow_id)."""
 
     @workflow.run
     async def run(self, first: bool) -> Dict[str, str]:
@@ -199,10 +199,8 @@ class HandlerHopWorkflow:
 
 @workflow.defn
 class TypeSwitchWorkflow:
-    # Annotated with the chain's eventual result type (LoopingWorkflow returns
-    # List[str]); the client infers result_type from this run signature, and a
-    # mismatched annotation would now fail to decode — matching temporalio's
-    # type-faithful result conversion rather than pickle's exact-object pass.
+    # Annotated with the chain's eventual result type (LoopingWorkflow's
+    # List[str]); the client infers result_type from this run signature.
     @workflow.run
     async def run(self) -> List[str]:
         workflow.continue_as_new(args=[["switched"], 0], workflow=LoopingWorkflow.run)
@@ -259,9 +257,8 @@ class CanThenChildWorkflow:
     async def run(self, hopped: bool) -> List[Any]:
         if not hopped:
             workflow.continue_as_new(True)
-        # This run is --r1: its auto child id embeds "--r1" (the shape that
-        # would mis-parse without the digit guard), and the child itself
-        # continues as new, extending ITS OWN chain.
+        # This run is --r1: its auto child id embeds "--r1", and the child
+        # itself continues as new, extending ITS OWN chain.
         handle = await workflow.start_child_workflow(
             LinkProbeWorkflow.run, args=[[], 1]
         )
@@ -316,9 +313,8 @@ class AbandonedHoppedChildParent:
             id="abandoned-hop-child",
             parent_close_policy=workflow.ParentClosePolicy.ABANDON,
         )
-        # Awaiting the child is what routes the parent's cancellation into
-        # the child future (the in-flight cancellation sweep under test);
-        # ABANDON keeps the close sweep out of the picture.
+        # Awaiting the child routes the parent's cancellation into the child
+        # future (the sweep under test); ABANDON keeps the close sweep out.
         result: str = await handle
         return result
 
@@ -394,8 +390,7 @@ async def _env() -> AsyncIterator[Client]:
 async def test_workflow_id_stays_base_across_continue_as_new() -> None:
     """Guard: across continue-as-new, the surfaced *workflow id* is the stable
     base while the *run id* carries the DBOS suffix — the run suffix must never
-    leak into a workflow_id field (regression guard for the audited class of
-    info().workflow_id / list-by-WorkflowId bugs)."""
+    leak into a workflow_id field."""
     async with _env() as client:
         # execute_workflow follows the chain to the --r1 run and returns the ids
         # that run surfaced from inside the workflow.
@@ -415,10 +410,9 @@ async def test_run_timeout_is_per_run_across_continue_as_new() -> None:
     """Each CAN run gets a fresh run_timeout: three 1s runs complete under a
     2s per-run budget even though the chain's total (3s+) exceeds it.
 
-    Regression: without explicit re-application on the hop, DBOS propagates
-    run 0's *absolute* deadline to its successors, so the chain would be
-    natively killed mid-way (TERMINATED). Temporal applies run_timeout per
-    run.
+    run_timeout is re-applied per run on each hop (Temporal semantics);
+    otherwise DBOS would propagate run 0's absolute deadline to its
+    successors and natively kill the chain mid-way (TERMINATED).
     """
     async with _env() as client:
         result = await client.execute_workflow(
@@ -491,10 +485,9 @@ async def test_continue_as_new_carries_over_messages() -> None:
 async def test_buffered_typed_signal_forwarded_across_can() -> None:
     """A signal with no handler in run 1 is buffered, then forwarded across a
     continue-as-new to a different type that DOES handle it, where its typed
-    arg is reconstructed. Regression: the buffered envelope must keep its
-    *encoded* args — forwarding the (handler-lessly) decoded raw value crashes
-    the next run's strict decoder (KeyError 'encoding'), or the JSON serializer
-    at the send checkpoint for a non-JSON-safe value."""
+    arg is reconstructed. The buffered envelope keeps its *encoded* args so the
+    next run's strict decoder (and the send checkpoint's JSON serializer) can
+    handle a non-JSON-safe value."""
     async with _env() as client:
         handle = await client.start_workflow(
             SignalForwarderWorkflow.run,
@@ -765,9 +758,8 @@ async def test_terminate_follows_can_and_never_clobbers() -> None:
         await _wait_for(hopped)
 
         async def first_run_closed() -> bool:
-            # CAN enqueues the successor BEFORE recording its own marker;
-            # wait until run 0 is actually closed (terminating it in that
-            # window is legal — the convergence loop follows the successor).
+            # CAN enqueues the successor before recording its own marker; wait
+            # until run 0 is actually closed (terminating it earlier is legal).
             return (
                 await _status_of(client, "term-can")
             ) == WorkflowExecutionStatus.CONTINUED_AS_NEW

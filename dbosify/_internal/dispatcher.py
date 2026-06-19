@@ -13,10 +13,6 @@ the interpreter started, and re-runs it — which replays from checkpoints,
 exactly like crash recovery. The workflow stays PENDING (Temporal: RUNNING),
 so users can fix the bug, redeploy, and the workflow resumes. Set
 ``DBOSIFY_FAIL_FAST=1`` to fail immediately instead (dev/test).
-
-This module also carries the Phase 0 in-process client helpers (start /
-signal / update / query). The real ``Client`` facade replaces them in
-Phase 1.
 """
 
 import asyncio
@@ -35,12 +31,12 @@ from dbos import (
     SetWorkflowID,
     WorkflowHandle,
 )
-from dbos._context import get_local_dbos_context  # see docs/phase0.md
+from dbos._context import get_local_dbos_context
 from dbos._error import DBOSUnexpectedStepError
 
 from .. import exceptions
 
-# Re-exported here for the Phase 0 helper API; the canonical home mirrors
+# Re-exported here for the in-process helper API; the canonical home mirrors
 # temporalio.client.WorkflowUpdateFailedError.
 from ..client import WorkflowUpdateFailedError as WorkflowUpdateFailedError
 from ..workflow import NondeterminismError
@@ -135,9 +131,8 @@ def register_worker(
     # The generic schedule-fire dispatcher is process-global (§6.7); register
     # it so this worker can run schedules whose action targets it.
     register_schedule_dispatcher()
-    # The generic queued-activity dispatcher (§6.1.2) is likewise process-global
-    # and registered for every worker — including activities-only workers — so
-    # any worker hosting an activity can run cross-queue activities aimed at it.
+    # The generic queued-activity dispatcher (§6.1.2) is likewise process-global,
+    # registered for every worker so any host can run cross-queue activities.
     register_activity_dispatcher()
     for cls in workflows:
         defn = registry.workflow_definition_of(cls)
@@ -149,14 +144,13 @@ def register_worker(
             # A callable-class activity must be registered as an *instance* (so
             # __call__ runs against its constructor state), not the class.
             raise TypeError(
-                f"{fn.__qualname__} is a class instead of an instance; register "
-                "an instance of the callable class as the activity"
+                f"{fn.__qualname__} is a class instead of an instance; "
+                "register an instance of the callable class"
             )
         activity_defn = registry.activity_definition_of(fn)
         if activity_defn.fn is not fn:
             # A bound method or callable-class instance: the definition was built
-            # at decoration time on the unbound function / class; execute the
-            # callable the user actually registered (temporalio supports both).
+            # on the unbound function/class; run the callable actually registered.
             activity_defn = dataclasses.replace(activity_defn, fn=fn)
         registry.register_activity(activity_defn)
         if activity_defn.dynamic:
@@ -170,39 +164,26 @@ def _make_dbos_workflow(
 ) -> Callable[[Any], Coroutine[Any, Any, Any]]:
     async def dispatch(payload: Any) -> Any:
         args, meta = unwrap_input(payload)
-        # Chain hops (cron continuation, workflow retries) re-enqueue this
-        # run's arguments at close; snapshot them before user code can
-        # mutate nested structures in place.
+        # Chain hops (cron continuation, workflow retries) re-enqueue this run's
+        # arguments at close; snapshot them before user code can mutate them.
         hops_possible = meta.cron is not None or meta.retry_policy is not None
         hop_args = copy.deepcopy(args) if hops_possible else None
         run_flags = {"cancel_observed": False}
         try:
             result = await _run_workflow_task_loop(type_name, args, meta, run_flags)
         except WorkflowContinuedAsNew as can:
-            # The chain-hop marker: the next run is already enqueued; this
-            # run's status maps to CONTINUED_AS_NEW and awaiters follow
-            # envelope["new_run_id"].
+            # Chain-hop marker: the next run is already enqueued; this run's
+            # status maps to CONTINUED_AS_NEW and awaiters follow new_run_id.
             raise SerializedContinueAsNew({"new_run_id": can.new_run_id}) from None
         except WorkflowCancelled as cancelled:
-            # The _TemporalCancelledMarker: cooperative cancellation maps to
-            # status CANCELED (§6.2), distinct from FAILED below and from
-            # TERMINATED (native DBOS cancel, no record at all). Cancellation
-            # ends the chain: no retry, no cron continuation (Temporal
-            # semantics).
+            # Cooperative cancellation maps to CANCELED (§6.2), distinct from
+            # FAILED and TERMINATED; it ends the chain (no retry, no cron).
             raise SerializedWorkflowCancellation(
                 serialize_failure(cancelled.cause)
             ) from None
         except (NondeterminismError, DBOSUnexpectedStepError) as nde:
-            # A replay diverged — verification OR rehydrate (the interpreter
-            # guard fired, or DBOS saw a different step at a recorded
-            # function_id). Record it in the failure envelope under the
-            # nondeterminism marker so the replay engine / rehydrate query can
-            # tell divergence apart from a faithfully-replayed genuine failure.
-            # No chain continuation — replay never retries.
-            # Only convert when a replay guard is active for this run; outside a
-            # replay, a DBOSUnexpectedStepError is a real non-determinism bug and
-            # a user-raised NondeterminismError is an ordinary error — both keep
-            # their prior propagation rather than being stamped as a divergence.
+            # A replay diverged: stamp the nondeterminism marker so the engine can
+            # tell it from a faithful failure. Only convert under an active guard.
             dispatch_ctx = get_local_dbos_context()
             in_replay = (
                 dispatch_ctx is not None
@@ -221,27 +202,22 @@ def _make_dbos_workflow(
                 }
             ) from None
         except exceptions.FailureError as err:
-            # Record workflow failures in the stable envelope format so
-            # clients reconstruct the exact exception, cause chain included
-            # (pickle would drop __cause__).
+            # Record workflow failures in the stable envelope format so clients
+            # reconstruct the exact exception, cause chain included.
             envelope = serialize_failure(err)
             next_run_id = await _continue_chain_after_failure(
                 type_name, hop_args, meta, envelope, run_flags["cancel_observed"]
             )
             if next_run_id is not None:
-                # result(follow_runs=True) follows a failed run to its
-                # retry/cron successor, exactly as temporalio follows
-                # new_execution_run_id on a failure event.
+                # result(follow_runs=True) follows a failed run to its retry/cron
+                # successor, like temporalio's new_execution_run_id.
                 envelope["new_run_id"] = next_run_id
             raise SerializedWorkflowFailure(envelope) from None
         if meta.cron is not None:
             assert hop_args is not None
             carryover = await _drain_unconsumed_inbox()
-            # A cancel requested around the run's close — observed but
-            # swallowed by user code, or still sitting unconsumed in the
-            # inbox of a run that never parked — ends the cron chain
-            # (Temporal suppresses cron continuation once cancellation is
-            # requested). The run itself still closes COMPLETED.
+            # A cancel requested around the run's close ends the cron chain
+            # (Temporal suppresses continuation); the run still closes COMPLETED.
             if not run_flags["cancel_observed"] and not _contains_cancel(carryover):
                 next_meta = meta.carried_forward()
                 # Encoded (no codec — read back synchronously by
@@ -260,8 +236,7 @@ def _make_dbos_workflow(
                 )
                 await _forward_carryover(new_run_id, carryover)
         # Encode the result for the DBOS output: the client (and any awaiting
-        # parent) decodes it against the run's result type. (The cron
-        # last_completion above stays raw for now — Stage 3.)
+        # parent) decodes it against the run's result type.
         return await conversion.encode_value(result)
 
     dispatch.__name__ = dispatch.__qualname__ = f"wf:{type_name}"
@@ -361,12 +336,8 @@ def _workflow_retry_delay(
     """
     cls_name = failure["cls"]
     if cls_name in ("CancelledError", "TerminatedError"):
-        # Never retried, regardless of policy (Temporal's isRetryable):
-        # this covers a cancellation outcome nobody requested externally —
-        # e.g. user code cancelling its own primary task — which reaches
-        # here classified as a plain workflow failure. (A cron chain still
-        # continues past such a failure, as Temporal's cron does; only
-        # *requested* cancellation ends the chain.)
+        # Never retried, regardless of policy (Temporal's isRetryable): a cron
+        # chain still continues past it, only *requested* cancellation ends it.
         return None
     if cls_name == "TimeoutError" and failure.get("timeout_type") not in (
         int(exceptions.TimeoutType.START_TO_CLOSE),
@@ -427,22 +398,8 @@ async def _enqueue_next_run(
     return new_run_id
 
 
-# ---------------------------------------------------------------------------
-# Schedules (§6.7): the generic schedule-fire dispatcher. DBOS fires it once
-# per schedule occurrence with ``(fired_at, context)``; it enforces the spec's
-# start/end bounds and jitter, applies the overlap policy, then starts the
-# action workflow under a per-occurrence deterministic id (so a re-fire at the
-# same nominal time is an idempotent no-op while distinct occurrences each run).
-#
-# Overlap (DEVIATIONS D22): for any policy other than ALLOW_ALL the dispatcher
-# finds the most recently *started* action of this schedule and checks whether
-# it is still open. Every fire is a dispatcher firing that DBOS tags with the
-# schedule name, so an indexed schedule lookup (not a prefix scan, §6.4) yields
-# the prior fire times; their per-occurrence action ids are probed in one batch
-# (skipped fires leave no row). SKIP drops this fire; CANCEL_OTHER cooperatively
-# cancels the prior; TERMINATE_OTHER natively cancels it; then (except SKIP) the
-# new action starts. Bounded to the most recent _OVERLAP_LOOKBACK_LIMIT fires.
-# ---------------------------------------------------------------------------
+# Schedules (§6.7): per-occurrence fire dispatcher — enforces bounds/jitter, applies
+# the overlap policy (DEVIATIONS schedules, _apply_overlap_policy), starts the action.
 
 SCHEDULE_FIRE_NAME = "__temporal_schedule_fire"
 _schedule_dispatcher_registered = False
@@ -452,9 +409,8 @@ _OVERLAP_SKIP = 1
 _OVERLAP_CANCEL_OTHER = 4
 _OVERLAP_TERMINATE_OTHER = 5
 _OVERLAP_ALLOW_ALL = 6
-# Cap on how many recent fires the overlap lookup considers. Generous for
-# CANCEL/TERMINATE_OTHER (one action per fire → the prior is the latest fire);
-# for SKIP it bounds detection across a long run of skipped fires.
+# Cap on how many recent fires the overlap lookup considers; generous for
+# CANCEL/TERMINATE_OTHER, and bounds SKIP detection across many skipped fires.
 _OVERLAP_LOOKBACK_LIMIT = 60
 
 
@@ -525,9 +481,8 @@ async def _apply_overlap_policy(
     if overlap == _OVERLAP_TERMINATE_OTHER:
         await DBOS.cancel_workflow_async(prior, cancel_children=True)
     elif overlap == _OVERLAP_CANCEL_OTHER:
-        # Cooperative cancel (lets the running action's cleanup run). We do not
-        # wait for it to finish unwinding before starting the next (DEVIATIONS
-        # D22): they may briefly overlap.
+        # Cooperative cancel (lets the running action's cleanup run); we do not
+        # wait for it to unwind before starting the next (DEVIATIONS schedules).
         await DBOS.send_async(
             prior, inbox.cancel_envelope("schedule overlap"), inbox.INBOX_TOPIC
         )
@@ -542,13 +497,12 @@ async def _running_prior_occurrence(
 
     Every fire — regular, ``trigger``, or ``backfill`` — is a dispatcher firing
     that DBOS tags with the schedule's name, so one indexed lookup yields the
-    prior fire times (checkpointed → replay-stable). We map each to its
-    per-occurrence action id and probe those statuses in a single batch; the
-    most recent occurrence that actually left an action row (skipped fires leave
-    none) is the candidate, and it counts as a running prior iff still open.
-    Bounded to the most recent ``_OVERLAP_LOOKBACK_LIMIT`` fires (DEVIATIONS
-    D22). Unlike the old cron-grid walk this also matches off-grid trigger/
-    backfill fires, which that walk could not reproduce."""
+    prior fire times (checkpointed → replay-stable), including off-grid trigger/
+    backfill fires. We map each to its per-occurrence action id and probe those
+    statuses in a single batch; the most recent occurrence that actually left an
+    action row (skipped fires leave none) is the candidate, and it counts as a
+    running prior iff still open. Bounded to the most recent
+    ``_OVERLAP_LOOKBACK_LIMIT`` fires (DEVIATIONS schedules)."""
     base = action["id"]
     schedule_name = context["schedule_id"]
     before_epoch = int(fired_at.timestamp())
@@ -558,8 +512,7 @@ async def _running_prior_occurrence(
     if not occurrences:
         return None
     # Map prior fire times to per-occurrence action ids; the batched probe
-    # returns only the ones that exist (i.e. fires that actually started an
-    # action — skipped fires left no row).
+    # returns only the ones that exist (skipped fires left no row).
     by_id = {f"{base}-{ts}": ts for ts in occurrences}
     statuses = await _safe_status_list(list(by_id))
     if not statuses:
@@ -586,8 +539,7 @@ async def _start_scheduled_action(action: Dict[str, Any], fired_at: datetime) ->
     queue = await DBOS.retrieve_queue_async(action["task_queue"])
     assert queue is not None, f"task queue {action['task_queue']!r} is not registered"
     # Write memo + SAs to the started workflow's DBOS attributes column
-    # (describe()/visibility); the envelope already carries them for in-workflow
-    # info()/memo().
+    # (describe()/visibility); the envelope already carries them in-workflow.
     await enqueue.enqueue_run(
         dispatch_fn,
         payload,
@@ -617,11 +569,8 @@ async def _run_workflow_task_loop(
             try:
                 return await interpreter.execute()
             finally:
-                # Whether the run returned, was cancelled, or failed, the
-                # chain-hop decision needs to know a cancel request was
-                # observed (replay-stable: it derives from checkpointed
-                # inbox deliveries). Task-failure retries overwrite this on
-                # their next attempt.
+                # The chain-hop decision needs to know whether a cancel was
+                # observed (replay-stable, from checkpointed inbox deliveries).
                 if run_flags is not None:
                     run_flags["cancel_observed"] = interpreter._cancel_requested
         except WorkflowTaskFailure as failure:
@@ -641,17 +590,13 @@ async def _run_workflow_task_loop(
             )
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, TASK_RETRY_MAX_SECONDS)
-            # Rewind the checkpoint cursor: the fresh interpreter re-runs
-            # the same logical sequence and replays recorded results, the
-            # same way crash recovery does.
+            # Rewind the checkpoint cursor: the fresh interpreter re-runs the same
+            # logical sequence and replays recorded results, as crash recovery does.
             ctx.function_id = start_function_id
 
 
 # ---------------------------------------------------------------------------
-# Phase 0 in-process client helpers (superseded by the Client facade in
-# Phase 1). Cross-process callers use DBOSClient with the inbox envelope
-# helpers directly.
-# ---------------------------------------------------------------------------
+# In-process client helpers. Cross-process callers use DBOSClient + inbox envelopes.
 
 
 def _type_name(workflow: Union[Type[Any], str]) -> str:
@@ -675,9 +620,9 @@ def start_workflow(
 def workflow_result(
     handle: "WorkflowHandle[Any]", type_hint: Optional[type] = None
 ) -> Any:
-    """Decoded result for a Phase-0-started workflow (the raw DBOS handle's
+    """Decoded result for a started workflow (the raw DBOS handle's
     ``get_result`` returns the encoded payload dict). Failures propagate as the
-    serialized markers, as before."""
+    serialized markers."""
     return conversion.decode_value_sync(handle.get_result(), type_hint)
 
 

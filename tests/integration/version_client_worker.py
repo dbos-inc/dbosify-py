@@ -1,5 +1,5 @@
 """Subprocess worker for the separate-process-client versioning test
-(DEVIATIONS D29). Runs a Worker on ``$DBOSIFY_BUILD_ID`` hosting a trivial echo
+(DEVIATIONS worker-versioning). Runs a Worker on ``$DBOSIFY_BUILD_ID`` hosting a trivial echo
 workflow, prints ``READY``, and runs until killed. The *test* process acts as a
 bare client (it never sets this build id) and starts the workflow.
 """

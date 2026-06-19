@@ -1,4 +1,4 @@
-"""Cross-queue (queued) activities under a build id (DEVIATIONS D29). A
+"""Cross-queue (queued) activities under a build id (DEVIATIONS worker-versioning). A
 cross-queue activity is enqueued in-workflow as a ``__temporal_activity``
 workflow, stamped with the workflow worker's build id; only an activity worker
 on the same build id dequeues it. With both workers on ``cq-build`` the activity
@@ -35,9 +35,8 @@ def test_cross_queue_activity_pinned_to_build_id() -> None:
 
     assert result_line.split("RESULT ", 1)[1].strip() == "Hello, Temporal!"
 
-    # The queued __temporal_activity workflow (id "<wf>--a<seq>") was stamped
-    # with the workflow worker's build id and dequeued by the matching-version
-    # activity worker — that match is what let it run at all.
+    # The queued __temporal_activity workflow (id "<wf>--a<seq>") was stamped with
+    # the workflow worker's build id; only the matching-version worker dequeues it.
     probe = DBOSClient(system_database_url=system_database_url())
     try:
         activity_rows = probe.list_workflows(workflow_id_prefix=f"{wf_id}--a")

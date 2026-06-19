@@ -84,9 +84,8 @@ class GoodDefn(GoodDefnBase):
 
 @workflow.defn()
 class GoodDefnDeprecatedTypes(GoodDefnBase):
-    # Just having the definition here is enough to confirm the signatures
-    # do not trigger a RuntimeError (the ``typing.Sequence`` spelling of
-    # ``Sequence[RawValue]`` must be accepted, same as ``collections.abc``).
+    # Defining this confirms the typing.Sequence spelling of Sequence[RawValue]
+    # is accepted (same as collections.abc) and triggers no RuntimeError.
     @workflow.run
     async def run(self, _name: str) -> str:
         raise NotImplementedError
@@ -105,12 +104,8 @@ class GoodDefnDeprecatedTypes(GoodDefnBase):
 
 
 def test_workflow_defn_good() -> None:
-    # Adapted: temporalio compares the whole ``_Definition`` against a literal.
-    # Our ``WorkflowDefinition`` has different fields (no ``is_method``/
-    # ``sandboxed``; ``versioning_behavior`` is an int), so we assert the
-    # observable shape: name, run fn, and the signal/query/update handler maps
-    # (including the dynamic handler under the ``None`` key, base-class handlers,
-    # and custom names/descriptions).
+    # Adapted: our WorkflowDefinition has different fields, so we assert the
+    # observable shape: name, run fn, and the signal/query/update handler maps.
     defn = registry.workflow_definition_of(GoodDefn)
     assert defn.name == "workflow-custom"
     assert defn.cls is GoodDefn
@@ -141,9 +136,8 @@ class VersioningBehaviorDefn:
 
 
 def test_workflow_definition_with_versioning_behavior() -> None:
-    # Adapted: we store ``versioning_behavior`` as the enum's int value, not the
-    # enum, and have no ``sandboxed``/``failure_exception_types`` literal to
-    # compare. Assert the stored int matches ``PINNED``.
+    # Adapted: we store versioning_behavior as the enum's int value, not the
+    # enum, so assert the stored int matches PINNED.
     defn = registry.workflow_definition_of(VersioningBehaviorDefn)
     assert defn.name == "VersioningBehaviorDefn"
     assert defn.cls is VersioningBehaviorDefn
@@ -169,12 +163,8 @@ class BadDefnBase:
 
 
 def test_workflow_defn_bad() -> None:
-    # Adapted: temporalio collects ALL problems into one "Invalid workflow class
-    # for N reasons" message. Our registry raises on the FIRST problem it hits
-    # (a single typed ValueError), and it does NOT implement temporalio's
-    # "decorator-on-base-but-not-on-override" check (handlers are inherited via
-    # inspect.getmembers). So we can't assert the aggregate message. Instead we
-    # assert each detectable failure independently, each with OUR message.
+    # Adapted: our registry raises on the FIRST problem (a single typed
+    # ValueError), so we assert each detectable failure independently.
 
     # 1. Missing @workflow.run.
     with pytest.raises(ValueError) as err:
@@ -263,13 +253,8 @@ def test_workflow_defn_bad() -> None:
 
     assert "Multiple update methods found for 'update1'" in str(err.value)
 
-    # NOTE for review: temporalio additionally rejects an override that drops the
-    # @workflow.signal/query/update/run decorator present on the base
-    # ("... defined on Base.x but not on the override"). Our registry has NO such
-    # check — it resolves handlers via inspect.getmembers, so a base-decorated
-    # method is simply inherited. The undecorated-run-override case still fails,
-    # but for a different reason ("Missing @workflow.run method"); see
-    # test_workflow_defn_run_override_without_decorator.
+    # Our registry has no base-vs-override decorator-drop check (handlers resolve
+    # via inspect.getmembers); see test_workflow_defn_run_override_without_decorator.
 
 
 @pytest.mark.skip(
@@ -318,10 +303,8 @@ class RunWithoutDecoratorOnOverride(BaseWithRun):
 
 
 def test_workflow_defn_run_override_without_decorator() -> None:
-    # Adapted: temporalio raises "@workflow.run defined on BaseWithRun.run but not
-    # on the override". Our registry has no base-vs-override decorator check; the
-    # undecorated override shadows the base's decorated method, so getmembers
-    # finds no @workflow.run marker at all -> "Missing @workflow.run method".
+    # Adapted: with no base-vs-override decorator check, the undecorated override
+    # shadows the base's marker, so getmembers finds none -> "Missing @workflow.run".
     with pytest.raises(ValueError) as err:
         workflow.defn(RunWithoutDecoratorOnOverride)
     assert "Missing @workflow.run method" in str(err.value)
@@ -346,13 +329,8 @@ def test_workflow_defn_multiple_run() -> None:
 
 
 def test_workflow_defn_bad_dynamic() -> None:
-    # Adapted: temporalio validates the dynamic-handler signature at DECORATOR
-    # time (``workflow.signal(dynamic=True)(fn)`` raises immediately). Our
-    # decorator only stamps a marker; the signature is validated at @workflow.defn
-    # time, so the bad handlers must be wrapped in a decorated class. Our message
-    # is "Dynamic <kind> handler must accept (self, name: str, args:
-    # Sequence[RawValue])" and the exception type is RuntimeError (matching
-    # temporalio's type).
+    # Adapted: we validate the dynamic-handler signature at @workflow.defn time
+    # (RuntimeError), so the bad handlers must be wrapped in a decorated class.
     with pytest.raises(RuntimeError) as err:
 
         @workflow.defn

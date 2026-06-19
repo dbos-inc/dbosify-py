@@ -1,4 +1,4 @@
-"""schedule_to_start on the cross-queue activity path (Phase 4, §6.1.2).
+"""schedule_to_start on the cross-queue activity path (§6.1.2).
 
 schedule_to_start bounds how long a queued activity may sit before a worker
 starts it. The test enqueues the activity (workflow worker up) but delays the
@@ -30,8 +30,7 @@ def _env(vmid: str) -> "dict[str, str]":
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_schedule_to_start_timeout(tmp_path: Path) -> None:
     # The activity can only be enqueued once its queue is registered in the DB.
-    # Bring a worker up to register it, then stop it so the activity dwells in
-    # the queue with no consumer.
+    # Register it with a worker, then stop it so the activity dwells unconsumed.
     registrar = PythonProcess(WORKER, "activity", env=_env("dbosify-act"))
     registrar.start()
     registrar.wait_for_line("ACTIVITY_WORKER_READY", timeout=60)

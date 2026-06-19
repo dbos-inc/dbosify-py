@@ -27,7 +27,7 @@ the unique scratch id keeps the guard inert for every other (real) workflow that
 happens to run concurrently.
 
 The same fork-and-guard machinery (``start_replay_fork`` with ``mode``) backs
-**query-on-closed-workflow rehydrate** (DEVIATIONS D27): the client forks a
+**query-on-closed-workflow rehydrate** (DEVIATIONS replay): the client forks a
 closed run in ``mode="rehydrate"``, the forked run replays to its final state
 and then *keeps serving* one query against the reconstructed instance (it is not
 deleted-after-verify but stops on a client signal or the
@@ -56,8 +56,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("dbosify.replay")
 
 # Failure-envelope ``type`` marker the dispatcher stamps on a divergence so the
-# engine can tell "the replay diverged" apart from "the workflow faithfully
-# re-failed" (a genuine recorded failure that replays identically is a PASS).
+# engine can tell "the replay diverged" from "the workflow faithfully re-failed".
 NONDETERMINISM_MARKER = "__dbosify_nondeterminism__"
 
 # How long a rehydrated (query-on-closed) scratch run keeps serving queries
@@ -69,8 +68,7 @@ REHYDRATE_SERVE_SECONDS = 30.0
 REHYDRATE_SETTLE_SECONDS = 10.0
 
 # Inbox-recv timeout a rehydrate scratch run uses while serving queries, so its
-# serve deadline stays effective even if the client never sends a stop signal
-# (a plain RECV_TIMEOUT_SECONDS would block the deadline re-check for an hour).
+# serve deadline stays effective even if the client never sends a stop signal.
 REHYDRATE_POLL_SECONDS = 1.0
 
 
@@ -86,7 +84,7 @@ class _ReplayGuard:
     scratch_id: str
     horizon: int
     # "verify" detects non-determinism; "rehydrate" replays a closed workflow to
-    # serve a query against its reconstructed state (both Phase 4).
+    # serve a query against its reconstructed state.
     mode: str = "verify"
 
 
@@ -180,12 +178,8 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     )
     from .status import WorkflowExecutionStatus
 
-    # States that cannot be faithfully reconstructed by replay (mirrors the
-    # query-on-closed gate; DEVIATIONS D27): TERMINATED (native kill) and
-    # TIMED_OUT keep only a partial checkpoint history, so re-execution runs
-    # past the partial horizon and would look nondeterministic; CONTINUED_AS_NEW
-    # would re-enter the continue-as-new path on the throwaway fork. Refuse them
-    # clearly instead of reporting a false divergence.
+    # States that cannot be faithfully reconstructed by replay (DEVIATIONS
+    # replay): partial-history (TERMINATED/TIMED_OUT) or CONTINUED_AS_NEW.
     if history.status in (
         WorkflowExecutionStatus.TERMINATED,
         WorkflowExecutionStatus.TIMED_OUT,
@@ -193,7 +187,7 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     ):
         return ValueError(
             f"cannot replay a {history.status.name} workflow: it cannot be "
-            "faithfully reconstructed from its checkpoints (DEVIATIONS D27)"
+            "faithfully reconstructed from its checkpoints (DEVIATIONS replay)"
         )
 
     handle = await start_replay_fork(
@@ -207,9 +201,8 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
             # so it finishes in well under the 1s default poll interval.
             await handle.get_result(polling_interval_sec=0.1)
         except SerializedWorkflowCancellation:
-            # Faithful cancellation -> PASS. Caught BEFORE SerializedWorkflowFailure
-            # because it is a subclass (payloads.py); the broader clause would
-            # otherwise shadow it.
+            # Faithful cancellation -> PASS. Caught before SerializedWorkflowFailure
+            # because it is a subclass that the broader clause would shadow.
             pass
         except SerializedWorkflowFailure as failure:
             if failure.envelope.get("type") == NONDETERMINISM_MARKER:
@@ -226,10 +219,8 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     finally:
         unregister_guard(scratch_id)
         try:
-            # delete_children stays False: a replayed fork starts no real
-            # children (within-horizon child starts replay from checkpoints;
-            # beyond-horizon ones are blocked by the guard), so it parents
-            # nothing — and we must never touch the source run's subtree.
+            # delete_children stays False: a replayed fork starts no real children
+            # (it parents nothing) and we must never touch the source run's subtree.
             await DBOS.delete_workflow_async(scratch_id, delete_children=False)
         except Exception:  # noqa: BLE001 — cleanup is best-effort
             logger.warning("replay: failed to delete scratch fork %s", scratch_id)
@@ -258,7 +249,7 @@ class Replayer:
     mutate it: ``data_converter``, ``interceptors``, and
     ``workflow_failure_exception_types`` are accepted for API parity but the
     running Worker's values are authoritative (overriding them here would
-    clobber the live Worker, since one Worker owns the process; DEVIATIONS D27).
+    clobber the live Worker, since one Worker owns the process; DEVIATIONS replay).
     Parameters with no dbosify analog (``namespace``, ``build_id``,
     ``identity``, ``workflow_runner``/``unsandboxed_workflow_runner``,
     ``debug_mode``, ``runtime``, ``plugins``, ``workflow_task_executor``, ...)
@@ -286,20 +277,15 @@ class Replayer:
 
         from . import registry
 
-        # Validate that each type is registered by a running Worker — the fork
-        # re-enters that Worker's ``wf:{type}`` dispatcher, so the types must
-        # already be registered. We deliberately do NOT register/replace the
-        # definition, nor reset interceptors / converter / failure types: those
-        # are process-global state the live Worker owns (DEVIATIONS D27).
+        # Validate that each type is registered by a running Worker (the fork
+        # re-enters its dispatcher); we do not mutate that process-global state.
         self._workflow_names: List[str] = []
         for cls in workflows:
             defn = registry.workflow_definition_of(cls)
             if defn.name not in registry._dbos_workflows:
                 raise RuntimeError(
                     f"Workflow type {defn.name!r} is not registered; construct a "
-                    "Worker for the types under test (which launches DBOS and "
-                    "registers their dispatchers) before replaying. The Replayer "
-                    "reuses the process's Worker runtime."
+                    "Worker for the types under test before replaying"
                 )
             self._workflow_names.append(defn.name)
 

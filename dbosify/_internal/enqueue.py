@@ -43,8 +43,7 @@ async def enqueue_run(
     enqueued workflow is converted to a deadline at dequeue (Temporal's per-run
     semantics). ``attributes`` is the encoded memo/search-attribute column for
     ``describe()``/visibility. ``delay_seconds`` (retry backoff / cron spacing)
-    applies only on the queue-dispatched path; the in-process path (Phase 0
-    helpers) ignores it.
+    applies only on the queue-dispatched path; the in-process path ignores it.
     """
     timeout_ctx: ContextManager[Any] = (
         SetWorkflowTimeout(run_timeout) if run_timeout is not None else nullcontext()
@@ -61,6 +60,6 @@ async def enqueue_run(
         if queue is not None:
             await queue.enqueue_async(dispatch_fn, payload)
         else:
-            # Run wasn't queue-dispatched (Phase 0 helpers): start it directly
-            # in-process. Enqueue delays don't apply on this path.
+            # Not queue-dispatched: start it directly in-process. Enqueue delays
+            # don't apply on this path.
             await DBOS.start_workflow_async(dispatch_fn, payload)

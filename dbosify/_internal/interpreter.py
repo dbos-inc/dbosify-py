@@ -62,7 +62,7 @@ from typing import (
 )
 
 from dbos import DBOS
-from dbos._context import get_local_dbos_context  # see docs/phase0.md
+from dbos._context import get_local_dbos_context
 from dbos._error import DBOSUnexpectedStepError
 from dbos._utils import GlobalParams  # the worker's live DBOS application_version
 
@@ -172,11 +172,8 @@ _safe_status_list_step: Optional[Callable[[List[str]], Any]] = None
 _schedule_occurrences_step: Optional[Callable[[str, int, int], Any]] = None
 _patch_step: Optional[Callable[[str], Any]] = None
 
-# The DBOS step name for a workflow.patched()/deprecate_patch() marker. The
-# step's recorded output is the patch id, so a recovering run rebuilds the set
-# of recorded patch ids by scanning its step list for this name (see
-# Interpreter.execute). Mirrors temporalio's SetPatchMarker, but keyed by id
-# (set membership), not by position — robust to code that shifts checkpoints.
+# DBOS step name for a workflow.patched()/deprecate_patch() marker; the step's
+# output is the patch id, scanned from the step list on replay. Keyed by id.
 PATCH_STEP_NAME = "__dbosify_patch"
 
 
@@ -235,7 +232,7 @@ def _await_child_result(child_id: str) -> Any:
 
         @DBOS.step(name="__dbosify_child_result")
         async def child_result_step(child_id: str) -> Dict[str, Any]:
-            from dbos._dbos import _get_dbos_instance  # see docs/phase0.md
+            from dbos._dbos import _get_dbos_instance
             from dbos._error import DBOSAwaitedWorkflowCancelledError
 
             from .payloads import (
@@ -254,16 +251,12 @@ def _await_child_result(child_id: str) -> Any:
                         )
                         break
                     except SerializedContinueAsNew as marker:
-                        # The child continued as new: its result is the
-                        # final run's (Temporal semantics) — follow the
-                        # chain. The step records only the final outcome.
+                        # Child continued as new: follow the chain to the final
+                        # run's result. The step records only the final outcome.
                         child_id = marker.envelope["new_run_id"]
                     except SerializedWorkflowFailure as failed:
-                        # A failed run with a successor (workflow retry from the
-                        # child's retry_policy) is followed to that successor,
-                        # exactly as the client's result(follow_runs=True) and
-                        # temporalio's new_execution_run_id do. A terminal
-                        # failure (no successor) propagates to the handler below.
+                        # A failed run with a successor (workflow retry) is
+                        # followed; a terminal failure propagates to the handler.
                         successor = failed.envelope.get("new_run_id")
                         if successor is None:
                             raise
@@ -338,7 +331,7 @@ def _await_activity_result(activity_id: str) -> Any:
 
         @DBOS.step(name="__dbosify_activity_result")
         async def activity_result_step(activity_id: str) -> Dict[str, Any]:
-            from dbos._dbos import _get_dbos_instance  # see docs/phase0.md
+            from dbos._dbos import _get_dbos_instance
             from dbos._error import DBOSAwaitedWorkflowCancelledError
 
             from .payloads import serialize_failure
@@ -371,10 +364,8 @@ def _await_activity_result(activity_id: str) -> Any:
     return _activity_result_step(activity_id)
 
 
-# The status fields the interpreter actually reads — all JSON-serializable.
-# A whole WorkflowStatus is not JSON-safe (it embeds input/output/error), so
-# these steps checkpoint only what we use; the checkpoint keeps the read
-# replay-stable (same as a direct status read, just serializable).
+# Status fields the interpreter reads — all JSON-serializable. A whole
+# WorkflowStatus is not JSON-safe, so these steps checkpoint only what we use.
 def _safe_status(workflow_id: str) -> Any:
     """Checkpointed read of a workflow's JSON-safe status fields, or None."""
     global _safe_status_step
@@ -440,11 +431,8 @@ def _schedule_occurrences(schedule_name: str, before_epoch: int, limit: int) -> 
             )
             occ: List[int] = []
             for f in firings:
-                # Defensive: this returns every firing tagged with the schedule
-                # name, and list_workflows hands back a raw (non-dict) input for
-                # any row it can't deserialize. Skip anything that doesn't parse
-                # as our ``(fired_at, context)`` firing input rather than failing
-                # the whole fire on one bad row.
+                # Defensive: skip any firing whose input doesn't parse as our
+                # ``(fired_at, context)`` form (list_workflows may return raw).
                 try:
                     args = f.input.get("args") if isinstance(f.input, dict) else None
                     if not args:
@@ -641,15 +629,13 @@ class _ActivityExec:
     async_pending: bool = False  # raise_complete_async(): awaiting external
     heartbeat_timeout: Optional[float] = None
     # Whether a completer heartbeat arrived within the current watch window
-    # (the parked heartbeat-timeout check counts envelopes between timer
-    # fires — deterministic, no clock reads).
+    # (the timeout check counts envelopes between timer fires — no clock reads).
     async_hb_seen: bool = False
     # execute_activity(result_type=...) override; falls back to the activity's
     # registered return annotation.
     result_type: Optional[type] = None
-    # execute_activity(task_queue=...): when set and different from the
-    # workflow's own queue, the activity runs on another worker via the
-    # ``__temporal_activity`` queued path (§6.1.2) instead of a local step.
+    # execute_activity(task_queue=...): when set and different from the workflow's
+    # own queue, the activity runs on another worker via the queued path (§6.1.2).
     task_queue: Optional[str] = None
     # The ``__temporal_activity`` workflow id once dispatched on the queued path
     # (None on the local path); cancellation natively cancels this workflow.
@@ -686,22 +672,14 @@ class _ChildExec:
     # Interceptor headers in wire form (str -> payload dict), set by the
     # outbound chain; delivered to the child run as ExecuteWorkflowInput.headers.
     headers: Dict[str, Any] = field(default_factory=dict)
-    # Per-run timeout (seconds) and serialized RetryPolicy for the child,
-    # carried in its RunMeta exactly like a top-level start: run_timeout drives
-    # SetWorkflowTimeout on the enqueue and re-applies across the child's chain;
-    # retry_policy gates the child's own workflow retries (the child-result step
-    # follows the resulting chain, so the parent still sees the final outcome).
+    # Per-run timeout (seconds) and serialized RetryPolicy for the child: drives
+    # SetWorkflowTimeout across its chain and gates the child's workflow retries.
     run_timeout: Optional[float] = None
     retry_policy: Optional[Dict[str, Any]] = None
 
 
-# ---------------------------------------------------------------------------
-# Workflow interceptor chain roots (DEVIATIONS D24). Built fresh per execution
-# in Interpreter._build_interceptor_chains; the inbound root performs the real
-# dispatch into user handlers, the outbound root performs the real activity /
-# child / signal / continue-as-new operations via the interpreter's runtime
-# methods. User interceptors (from Worker(interceptors=...)) wrap these.
-# ---------------------------------------------------------------------------
+# Per-execution interceptor chain roots: inbound dispatches into user handlers,
+# outbound performs the real runtime ops.
 
 
 class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
@@ -720,9 +698,8 @@ class _RootWorkflowInbound(_wfi.WorkflowInboundInterceptor):
         return await input.run_fn(self._interp._instance, *input.args)
 
     async def handle_signal(self, input: _wfi.HandleSignalInput) -> None:
-        # Exact match first, then the dynamic (catch-all) handler — a dynamic
-        # handler is keyed ``None`` and called as ``fn(self, name, args)`` (the
-        # args were shaped to ``[name, Sequence[RawValue]]`` in _decode).
+        # Exact match first, then the dynamic (catch-all) handler, keyed ``None``
+        # and called as ``fn(self, name, args)`` (args shaped in _decode).
         defn = self._interp._resolve_signal(input.signal)
         if defn is None:  # pragma: no cover — _apply_signal resolved it
             return
@@ -876,8 +853,7 @@ class Interpreter(_Runtime):
         self._args = list(args)
         self._meta = meta if meta is not None else RunMeta()
         # AbstractEventLoop stubs mark the loop protocol abstract; we
-        # implement the subset workflow coroutines exercise (the same
-        # approach temporalio's _WorkflowInstance takes).
+        # implement the subset workflow coroutines exercise.
         self._vloop = _VirtualLoop(self)  # type: ignore[abstract]
         self._instance: Any = None
         self._primary_task: Optional["asyncio.Task[Any]"] = None
@@ -890,12 +866,8 @@ class Interpreter(_Runtime):
         self._outbox: List[Tuple[str, Any]] = []
         self._waiters: List[_Waiter] = []
         self._buffered_signals: Dict[str, List[inbox.Envelope]] = {}
-        # Runtime handler overrides (workflow.set_signal/query/update_handler):
-        # name -> (wrapped definition, original callable), or None for an
-        # explicit unset that shadows the @defn handler. Absence falls through
-        # to the decorator handlers; key None is the dynamic (catch-all)
-        # override. In-memory + reconstructed on replay (run() re-registers),
-        # like current details (DEVIATIONS D30).
+        # Runtime handler overrides (set_*_handler): name -> (wrapped defn,
+        # callable), None for an unset that shadows @defn; key None is dynamic.
         self._signal_overrides: Dict[
             Optional[str], Optional[Tuple[Any, Callable[..., Any]]]
         ] = {}
@@ -906,8 +878,7 @@ class Interpreter(_Runtime):
             Optional[str], Optional[Tuple[Any, Callable[..., Any]]]
         ] = {}
         # Signals buffered with no handler, queued for (re)delivery once a
-        # matching handler is registered at runtime (set_signal_handler flush);
-        # drained from _buffered_signals, applied by the main loop.
+        # matching handler is registered at runtime; applied by the main loop.
         self._pending_handler_flush: List[inbox.Envelope] = []
         self._seen_update_ids: Set[str] = set()
         # Live signal/update handler tasks -> {kind, name, id, policy};
@@ -917,9 +888,8 @@ class Interpreter(_Runtime):
         self._cancel_requested = False
         self._cancel_reason: Optional[str] = None
         self._cancelled_activity_seqs: List[int] = []
-        # Queued-activity WAIT_CANCELLATION_COMPLETED requests: the cancel event
-        # is set in the (async) sweep, but the exec stays open until the
-        # activity confirms its unwind via the result step.
+        # Queued-activity WAIT_CANCELLATION_COMPLETED requests: cancel event set
+        # in the sweep, but the exec stays open until the activity's result step.
         self._queued_wait_cancel_seqs: List[int] = []
         self._abandoned_tasks: Set["asyncio.Task[Any]"] = set()
         self._pending_children: Dict[int, _ChildExec] = {}
@@ -930,9 +900,8 @@ class Interpreter(_Runtime):
         )
         self._own_queue_name: Optional[str] = None
         self._own_queue_resolved = False
-        # This process's Worker task queue (one Worker per process): the queue
-        # this workflow runs on, surfaced as info().task_queue and as a local
-        # activity's task_queue. "default" under the in-process Phase-0 harness.
+        # This process's Worker task queue, surfaced as info().task_queue and as a
+        # local activity's task_queue. "default" under the in-process harness.
         from . import registry
         from .namespaces import DEFAULT_NAMESPACE
 
@@ -941,33 +910,26 @@ class Interpreter(_Runtime):
         # info().namespace and on parent/child references.
         self._namespace = registry.worker_namespace or DEFAULT_NAMESPACE
         self._replay_horizon = 0
-        # workflow.patched()/deprecate_patch() state (DESIGN §6.8). Patch ids
-        # whose marker exists in recorded history (rebuilt from the step list at
-        # execute() start); the per-id decision memo (one decision per id per
-        # run, like temporalio); and markers queued for durable write this turn.
+        # workflow.patched()/deprecate_patch() state (DESIGN §6.8): recorded
+        # marker ids, the per-id decision memo, and markers queued for this turn.
         self._patches_recorded: Set[str] = set()
         self._patches_memoized: Dict[str, bool] = {}
         self._pending_patches: Dict[int, str] = {}
         # Set when a rehydrate (query-on-closed replay) scratch run is told to
-        # stop serving queries and complete (see _serve loop in execute()).
+        # stop serving queries and complete.
         self._rehydrate_stop = False
         self._rehydrate_deadline: Optional[float] = None
         self._can_new_run_id: Optional[str] = None
         self._continued_from: Optional[str] = None
-        # The DBOS run id of a real (cross-chain) parent workflow, set at start
-        # when this run was launched as a child; None for top-level/continued
-        # runs. Surfaced as workflow.info().parent.
+        # The DBOS run id of a real (cross-chain) parent workflow when launched as
+        # a child; None for top-level/continued runs. Surfaced as info().parent.
         self._parent_run_id: Optional[str] = None
-        # Decoded memo + search attributes for this run: materialized from the
-        # run envelope at start, mutated in place by upsert_*, and the source
-        # for in-workflow info()/memo() (the durable, queryable copy lives in
-        # the DBOS attributes column).
+        # Decoded memo + search attributes: materialized from the run envelope,
+        # mutated by upsert_*, source for info()/memo() (durable copy in DBOS).
         self._memo: Dict[str, Any] = {}
         self._typed_sa: TypedSearchAttributes = TypedSearchAttributes.empty
         # Free-form UI/CLI details set via workflow.set_current_details(): pure
-        # in-memory state, reconstructed deterministically on recovery by
-        # replaying the same set_current_details calls (no checkpoint needed —
-        # not surfaced to describe()/list in v1, DEVIATIONS D30).
+        # in-memory state, reconstructed deterministically on recovery (DEVIATIONS current-details).
         self._current_details: str = ""
         self._random = Random(0)
         # The deterministic random seed (checkpointed once at run start), exposed
@@ -977,9 +939,8 @@ class Interpreter(_Runtime):
         self._start_time = 0.0
         # ("ok", result) | ("failure", exc) | ("task_failure", exc)
         self._outcome: Optional[Tuple[str, Any]] = None
-        # Workflow interceptor chains (DEVIATIONS D24), built in execute().
-        # _inbound wraps run/handler dispatch; _outbound (installed via
-        # _inbound.init) wraps activity/child/signal/continue-as-new calls.
+        # Workflow interceptor chains, built in execute(): _inbound wraps
+        # run/handler dispatch; _outbound wraps activity/child/signal/CAN calls.
         self._inbound: Optional[_wfi.WorkflowInboundInterceptor] = None
         self._outbound: Optional[_wfi.WorkflowOutboundInterceptor] = None
         # The run's interceptor headers, decoded to Payloads in execute().
@@ -1013,37 +974,23 @@ class Interpreter(_Runtime):
         assert ctx is not None, "interpreter must run inside a DBOS workflow"
         self._workflow_id = ctx.workflow_id
 
-        # The checkpoint horizon: the highest recorded function_id. While our
-        # claim cursor is below it, we are re-executing recorded history —
-        # that is what unsafe.is_replaying() reports. The read must be live
-        # (is_replaying is *about* replay state, exempt from determinism),
-        # but inside a workflow context DBOS checkpoints listWorkflowSteps
-        # itself — it would replay its own first-execution (empty) result.
-        # An executor thread has no DBOS context, so the read stays live.
-        # (Upstream wishlist: a cheap max-function_id query; this fetches
-        # and deserializes the full step list.)
+        # The checkpoint horizon: highest recorded function_id; below it we replay.
+        # Read on an executor thread (no DBOS context) so it stays live, uncheckpointed.
         steps = await asyncio.get_running_loop().run_in_executor(
             None, DBOS.list_workflow_steps, self._workflow_id
         )
         self._replay_horizon = max((step["function_id"] for step in steps), default=0)
 
-        # Rebuild the set of patch ids whose marker is in recorded history, by
-        # id (set membership), not by position — so patched() returns the same
-        # verdict on replay regardless of checkpoint shifts (DESIGN §6.8). Each
-        # marker step's recorded output is its patch id.
+        # Rebuild the set of recorded patch ids by id (set membership), not by
+        # position, so patched() is stable across checkpoint shifts (DESIGN §6.8).
         self._patches_recorded = {
             step["output"]
             for step in steps
             if step["function_name"] == PATCH_STEP_NAME and step["output"] is not None
         }
 
-        # continued_run_id: DBOS threads parent_workflow_id automatically for
-        # in-workflow starts, and our continue-as-new enqueue runs inside the
-        # closing run — so a parent link *within the same chain* is exactly a
-        # continuation link (a real parent points at a different chain base;
-        # client-side reuse starts carry no link). Immutable for the run, so
-        # a live read is replay-safe (executor thread: in-context the call
-        # would be checkpointed, which is unnecessary here).
+        # continued_run_id: a parent link within the same chain is a continuation
+        # link (a real parent points at a different base). Immutable, so read-safe.
         status = await asyncio.get_running_loop().run_in_executor(
             None, DBOS.get_workflow_status, self._workflow_id
         )
@@ -1089,18 +1036,15 @@ class Interpreter(_Runtime):
                     raise WorkflowTaskFailure(self._outcome[1])
                 await self._flush_outbox()
                 if self._outcome is not None:
-                    # A rehydrate (query-on-closed) scratch run keeps serving
-                    # queries against its reconstructed state after the run
-                    # method has completed, until the client signals it is done
-                    # (or a serve deadline elapses). Every other run closes.
+                    # A rehydrate (query-on-closed) scratch run keeps serving queries
+                    # until the client is done or the deadline elapses; others close.
                     if self._rehydrate_guard() is None or self._rehydrate_stop:
                         break
                     if self._rehydrate_deadline_passed():
                         break
                 self._ensure_inbox_waiter()
-                # Let newly created tasks claim their function_ids in
-                # creation order before the checkpointed race (see module
-                # docstring, determinism rule 2).
+                # Let newly created tasks claim their function_ids in creation order
+                # before the checkpointed race (module docstring, determinism rule 2).
                 await asyncio.sleep(0)
                 done, _ = await DBOS.asyncio_wait(
                     [w.task for w in self._waiters],
@@ -1108,29 +1052,16 @@ class Interpreter(_Runtime):
                 )
                 await self._deliver(done)
         finally:
-            # A replay scratch run (verify OR rehydrate) is a read-only
-            # reconstruction of an already-closed workflow: it must NOT emit the
-            # terminal-close side effects below (cancelling the source run's
-            # in-flight activities, applying ParentClosePolicy to its children,
-            # continue-as-new enqueue, failing its abandoned updates, async-gone
-            # events) — those would act on the real chain's runs. Only the
-            # interpreter's own waiter teardown should run.
+            # A replay scratch run (verify/rehydrate) reconstructs a closed workflow
+            # read-only: skip the terminal-close side effects below, only teardown runs.
             is_replay = _replay.current_guard_for(self._workflow_id) is not None
             if (
                 not is_replay
                 and self._outcome is not None
                 and self._outcome[0] != "task_failure"
             ):
-                # Cancel in-flight activities at a terminal close (including
-                # continue-as-new), so a fire-and-forget or still-running
-                # activity does not outlive the workflow. Local attempts are
-                # marked BEFORE tearing down their waiter tasks below (task
-                # cancellation unregisters the attempt's live context, after
-                # which a still-running threaded function could no longer be
-                # reached and would spin forever); a queued activity runs on
-                # another worker, so it gets the cross-process cancel signal
-                # instead — otherwise its `__temporal_activity` workflow would
-                # keep running to completion, orphaned.
+                # Cancel in-flight activities at a terminal close: local attempts marked
+                # before waiter teardown below, queued ones signalled cross-process.
                 for exec_state in self._pending_activities.values():
                     if exec_state.queued_dbos_id is not None:
                         await self._signal_queued_activity_cancel(exec_state)
@@ -1146,10 +1077,8 @@ class Interpreter(_Runtime):
                 and self._outcome is not None
                 and self._outcome[0] == "continue_as_new"
             ):
-                # Enqueue the next run BEFORE tearing down waiters: it must
-                # exist before carryover messages can be forwarded to it
-                # (FK), and the earlier it exists the sooner senders resolve
-                # the chain to it.
+                # Enqueue the next run BEFORE tearing down waiters: it must exist before
+                # carryover messages can be forwarded to it (FK) and for senders to resolve.
                 self._can_new_run_id = await self._begin_continue_as_new(
                     self._outcome[1]
                 )
@@ -1183,10 +1112,8 @@ class Interpreter(_Runtime):
         self._warn_if_unfinished_handlers()
         kind, value = self._outcome
         if kind == "ok":
-            # During a verification replay, a clean completion that consumed
-            # fewer steps than were recorded means the replayed code finished
-            # early (e.g. an activity at the tail was removed) — divergence DBOS
-            # cannot see on its own (no step mismatch ever occurred).
+            # During a verification replay, completing with fewer steps than
+            # recorded means the code finished early — a divergence DBOS can't see.
             guard = _replay.current_guard_for(self._workflow_id)
             if (
                 guard is not None
@@ -1194,9 +1121,8 @@ class Interpreter(_Runtime):
                 and self.runtime_history_length() < guard.horizon
             ):
                 raise NondeterminismError(
-                    "workflow completed before consuming all recorded history "
-                    f"(workflow type {self._defn.name!r}); the replayed code "
-                    "diverged from the recorded execution"
+                    f"workflow type {self._defn.name!r} completed before "
+                    "consuming all recorded history"
                 )
             return value
         if kind == "cancelled":
@@ -1227,16 +1153,11 @@ class Interpreter(_Runtime):
             if queue_name is not None
             else None
         )
-        # Run configuration (cron membership, retry policy, run timeout,
-        # last-completion carry) follows the chain across a continue-as-new;
-        # the attempt counter resets (a CAN run is a fresh execution, as in
-        # Temporal). continue_as_new's own run_timeout/retry_policy
-        # arguments override the carried values for the new run.
+        # Run configuration follows the chain across a CAN (attempt counter resets);
+        # continue_as_new's own run_timeout/retry_policy override carried values.
         carried = self._meta.carried_forward()
-        # Headers do NOT auto-carry across continue-as-new (Temporal semantics):
-        # the outbound chain sets them explicitly (an interceptor re-injects
-        # context). _dbosify_headers holds raw Payloads; codec-encode here (real
-        # loop) into wire form for the next run.
+        # Headers do NOT auto-carry across continue-as-new; the outbound chain sets
+        # them explicitly. _dbosify_headers holds raw Payloads; codec-encode here.
         carried.headers = (
             await conversion.encode_headers(getattr(can, "_dbosify_headers", None))
             or None
@@ -1245,10 +1166,8 @@ class Interpreter(_Runtime):
             carried.run_timeout = can._dbosify_run_timeout.total_seconds()
         if can._dbosify_retry_policy is not None:
             carried.retry_policy = serialize_retry_policy(can._dbosify_retry_policy)
-        # Memo + search attributes carry forward at their CURRENT (post-upsert)
-        # values; continue_as_new's own memo/search_attributes override them
-        # for the new run (matching Temporal). Re-encoded only when overridden;
-        # otherwise the current encoded form is reused as-is.
+        # Memo + search attributes carry forward at their current values;
+        # continue_as_new's own memo/search_attributes override them for the new run.
         if can._dbosify_memo is None and can._dbosify_search_attributes is None:
             carried.attributes = await _attributes.encode_attributes(
                 self._memo or None, self._typed_sa
@@ -1303,12 +1222,8 @@ class Interpreter(_Runtime):
                 "activity_result",
                 "activity_heartbeat",
             ):
-                # Async-activity completions are addressed to THIS run's
-                # activities; the new run numbers its own activities from
-                # scratch, so forwarding could resolve an unrelated
-                # same-id activity with a stale result. The parked
-                # activities die with this run (gone-events tell the
-                # completer); their late envelopes die here too.
+                # Async-activity completions address THIS run's activities; the new
+                # run renumbers from scratch, so they die with this run, not forward.
                 continue
             await DBOS.send_async(new_run_id, message, inbox.INBOX_TOPIC)
 
@@ -1317,12 +1232,8 @@ class Interpreter(_Runtime):
     # ------------------------------------------------------------------
 
     def _instantiate(self) -> None:
-        # Construct the workflow instance with the virtual loop installed as the
-        # running loop. A loop-bound object the user creates in __init__ — most
-        # notably ``asyncio.Future()`` — captures ``get_event_loop()`` eagerly;
-        # without this it would bind to the dispatcher's real loop, and a signal
-        # or update handler awaiting it later (on the vloop) would raise
-        # "got Future attached to a different loop". Mirrors _drain's loop swap.
+        # Construct the workflow instance with the virtual loop installed, so a
+        # loop-bound object created in __init__ binds to the vloop, not the real loop.
         previous_loop = asyncio._get_running_loop()
         asyncio._set_running_loop(self._vloop)
         try:
@@ -1361,11 +1272,8 @@ class Interpreter(_Runtime):
             self._record_workflow_error(err)
 
     def _record_workflow_error(self, err: BaseException) -> None:
-        # During a verification replay, a divergence DBOS detected mid-run
-        # (a different step at a recorded function_id) is terminal — recording
-        # it as a task failure would send the dispatcher into its retry loop
-        # and mask the divergence. Surface it as a workflow failure the engine
-        # recognizes (the dispatcher stamps the nondeterminism marker).
+        # During a verification replay, a divergence DBOS detected mid-run is
+        # terminal: surface it as a workflow failure, not a (retried, masked) task.
         if isinstance(err, (DBOSUnexpectedStepError, NondeterminismError)) and (
             _replay.current_guard_for(self._workflow_id) is not None
         ):
@@ -1425,9 +1333,8 @@ class Interpreter(_Runtime):
         while either makes progress (the structure of temporalio's
         ``_run_once``).
         """
-        # While draining, workflow coroutines must see the virtual loop as
-        # "the" running loop; restore the real loop after (the dispatcher
-        # coroutine keeps running on it).
+        # While draining, workflow coroutines must see the virtual loop as the
+        # running loop; restore the real loop after (the dispatcher uses it).
         previous_loop = asyncio._get_running_loop()
         asyncio._set_running_loop(self._vloop)
         try:
@@ -1466,9 +1373,7 @@ class Interpreter(_Runtime):
 
     def _assert_not_read_only(self, what: str) -> None:
         if self._read_only:
-            raise ReadOnlyContextError(
-                f"Cannot {what} in a read-only context (query or update validator)"
-            )
+            raise ReadOnlyContextError(f"Cannot {what} in a read-only context")
 
     def _create_timer(
         self,
@@ -1491,9 +1396,8 @@ class Interpreter(_Runtime):
     def _cancel_timer(self, handle: _TimerHandle) -> None:
         if self._pending_timers.pop(handle.seq, None) is None:
             return
-        # If its real waiter exists, retire it; both the creation and this
-        # cancellation happen at deterministic points, so replay retires the
-        # same waiter.
+        # If its real waiter exists, retire it; creation and cancellation both
+        # happen at deterministic points, so replay retires the same waiter.
         for waiter in list(self._waiters):
             if waiter.kind == "timer" and waiter.seq == handle.seq:
                 waiter.task.cancel()
@@ -1518,8 +1422,7 @@ class Interpreter(_Runtime):
         self._assert_not_read_only("start an activity")
         if task_queue is None:
             # Local path: the step must already be registered with this worker.
-            # The queued path (task_queue set) targets another worker, where
-            # the step lives — so don't require it here.
+            # The queued path targets another worker, where the step lives.
             activities_mod.attempt_step_for(activity_name)  # raise early if unknown
         seq = self._next_seq("activity")
         resolved_activity_id = activity_id or f"{seq}"
@@ -1527,13 +1430,9 @@ class Interpreter(_Runtime):
             existing.activity_id == resolved_activity_id
             for existing in self._pending_activities.values()
         ):
-            # Temporal's server rejects duplicate open activity ids (which
-            # would also cross-wire our id-keyed async completion routing);
-            # like a rejected command, this fails the workflow task.
-            raise ValueError(
-                f"Activity id {resolved_activity_id!r} is already in use by "
-                "an open activity"
-            )
+            # Reject duplicate open activity ids (which would cross-wire id-keyed
+            # async completion routing); like a rejected command, fails the task.
+            raise ValueError(f"Activity id {resolved_activity_id!r} is already in use")
         policy = retry_policy if retry_policy is not None else RetryPolicy()
         policy._validate()
         exec_state = _ActivityExec(
@@ -1569,9 +1468,8 @@ class Interpreter(_Runtime):
         )
         self._pending_activities[seq] = exec_state
         self._commands.append(("activity", seq))
-        # If the awaiting coroutine is cancelled (workflow cancel, wait_for
-        # timeout, explicit handle cancel), the future enters cancelled state
-        # during a drain; queue the seq for the deterministic real-side sweep.
+        # If the awaiting coroutine is cancelled, the future enters cancelled
+        # state during a drain; queue the seq for the real-side sweep.
         exec_state.future.add_done_callback(
             lambda fut: (
                 self._cancelled_activity_seqs.append(seq)
@@ -1593,10 +1491,8 @@ class Interpreter(_Runtime):
         if exec_state is None:
             return
         if exec_state.cancellation_type == 1 and not exec_state.async_pending:
-            # WAIT_CANCELLATION_COMPLETED: confirmed by the in-flight attempt's
-            # unwind — keep the exec open; the awaiter resolves on confirmation.
-            # (A parked async activity has no attempt to confirm; it degrades to
-            # TRY_CANCEL below and the completer learns via the gone-event.)
+            # WAIT_CANCELLATION_COMPLETED: keep the exec open; the awaiter resolves
+            # on the attempt's unwind. A parked async activity degrades to TRY_CANCEL.
             exec_state.cancel_requested = True
             if exec_state.queued_dbos_id is not None:
                 # Cross-process: set the cancel event in the async sweep, then
@@ -1639,9 +1535,8 @@ class Interpreter(_Runtime):
         ctx = get_local_dbos_context()
         if ctx is not None and ctx.function_id >= guard.horizon:
             raise NondeterminismError(
-                "workflow produced new commands beyond its recorded history "
-                f"(workflow type {self._defn.name!r}); the replayed code diverged "
-                "from the recorded execution"
+                f"workflow type {self._defn.name!r} produced new commands "
+                "beyond its recorded history"
             )
 
     async def _process_commands(self) -> bool:
@@ -1658,9 +1553,8 @@ class Interpreter(_Runtime):
                     continue  # created and cancelled within one drain
                 real_delay = handle.when() - self._vloop.time()
                 if real_delay <= 0:
-                    # Already due in virtual time: fire deterministically
-                    # without a durable sleep (e.g. sleep(0) loops). No
-                    # function_id is claimed, so it is replay-horizon-neutral.
+                    # Already due in virtual time: fire deterministically without a
+                    # durable sleep (e.g. sleep(0) loops), claiming no function_id.
                     del self._pending_timers[seq]
                     self._vloop.ready.append(handle)
                     progressed = True
@@ -1670,21 +1564,15 @@ class Interpreter(_Runtime):
             elif kind == "activity":
                 exec_state = self._pending_activities.get(seq)
                 if exec_state is None:
-                    # Cancelled within the same drain that started it, before
-                    # this dispatch ran: the cancellation sweep already retired
-                    # the exec (TRY_CANCEL cancelled the future, so the awaiter
-                    # saw CancelledError) and nothing was dispatched on either
-                    # path — so there is nothing to launch or cancel.
+                    # Cancelled within the same drain that started it: the sweep
+                    # already retired the exec and dispatched nothing — nothing to do.
                     continue
-                # Encode the args + headers once (reused across retries); the
-                # step decodes them. Done here on the real loop so a codec's
-                # async work stays off the virtual loop (headers held raw Payloads
-                # from the sync outbound root until now).
+                # Encode the args + headers once (reused across retries) here on
+                # the real loop, so a codec's async work stays off the virtual loop.
                 exec_state.args = await conversion.encode_values(exec_state.args)
                 exec_state.headers = await conversion.encode_headers(exec_state.headers)
-                # Resolve our own queue only when a task_queue was requested,
-                # so workflows that never use cross-queue dispatch keep their
-                # exact checkpoint shape (no extra status read).
+                # Resolve our own queue only when a task_queue was requested, so
+                # non-cross-queue workflows keep their exact checkpoint shape.
                 if exec_state.task_queue is not None:
                     await self._resolve_own_queue()
                 self._check_replay_horizon()
@@ -1706,8 +1594,7 @@ class Interpreter(_Runtime):
                 target, envelope, future, resolve_chain = self._pending_sends.pop(seq)
                 if isinstance(envelope, dict) and envelope.get("kind") == "signal":
                     # Encode the signal args + headers here (real loop), not in
-                    # workflow code, so a codec's async work stays off the
-                    # virtual loop (the outbound root left both raw).
+                    # workflow code, so a codec's async work stays off the vloop.
                     envelope = {
                         **envelope,
                         "args": await conversion.encode_values(
@@ -1717,11 +1604,8 @@ class Interpreter(_Runtime):
                             envelope.get("headers")
                         ),
                     }
-                # send_async is checkpointed; awaited inline so its
-                # function_id claim stays at a deterministic position. The
-                # chain resolution is a live read, but that's safe: on
-                # replay send_async returns its recorded checkpoint without
-                # consuming the resolved value.
+                # send_async is checkpointed; awaited inline for a deterministic
+                # function_id. The chain resolution is a live read but replay-safe.
                 try:
                     if resolve_chain:
                         target = await self._resolve_current_run(target)
@@ -1738,12 +1622,8 @@ class Interpreter(_Runtime):
                         future.set_result(None)
                 progressed = True
             elif kind == "attributes":
-                # An upsert_memo / upsert_search_attributes durably wrote the
-                # current attribute state. Encoding (codec) happens here on the
-                # real loop, not in the user's sync upsert call. The write is a
-                # checkpointed DBOS step claimed at a deterministic position
-                # (command order), so it runs once and replays from its
-                # recorded result — same model as the "send" branch above.
+                # Durably write the current attribute state (from upsert_memo /
+                # upsert_search_attributes); the checkpointed write runs once.
                 encoded = await _attributes.encode_attributes(
                     self._memo or None, self._typed_sa
                 )
@@ -1751,12 +1631,7 @@ class Interpreter(_Runtime):
                 await DBOS.update_workflow_attributes_async(self._workflow_id, encoded)
             elif kind == "patch":
                 # A patched()/deprecate_patch() call took the newer path: persist
-                # its marker durably so future replays rediscover it. Awaited
-                # inline (like "send"/"attributes") so the marker step claims its
-                # function_id at this deterministic position; replay reads the id
-                # back without re-running the body. A replay scratch run that
-                # tries to write a marker past the horizon means the replayed code
-                # diverged (it patched where the recording didn't).
+                # its marker durably (awaited inline) so future replays rediscover it.
                 patch_id = self._pending_patches.pop(seq)
                 self._check_replay_horizon()
                 await _patch_marker(patch_id)
@@ -1773,10 +1648,8 @@ class Interpreter(_Runtime):
         try:
             dispatch_fn = registry.dbos_workflow_for(child.type_name)
             if await _child_id_taken(child.child_id):
-                # Temporal raises into the parent when a child id is already
-                # in use; SetWorkflowID would otherwise silently attach to
-                # the foreign workflow. (Checkpointed check; the usual
-                # TOCTOU window between check and start is documented.)
+                # Raise into the parent when a child id is already in use, else
+                # SetWorkflowID silently attaches to it. Checkpointed (TOCTOU remains).
                 del self._pending_children[child.seq]
                 if not child.start_future.cancelled():
                     child.start_future.set_exception(
@@ -1790,12 +1663,8 @@ class Interpreter(_Runtime):
             child_queue = None
             if queue_name is not None:
                 child_queue = await DBOS.retrieve_queue_async(queue_name)
-            # Record intent BEFORE the start commits (claim-then-start): any
-            # child that exists is guaranteed to be in the registry, closing
-            # the terminate-races-child-start orphan window. The reverse
-            # anomaly — a registry entry whose enqueue never happened — is
-            # harmless: policy sweeps skip nonexistent workflows, and
-            # recovery re-runs the enqueue anyway.
+            # Record intent BEFORE the start commits (claim-then-start): any child
+            # that exists is in the registry; a stale entry is harmless (sweeps skip).
             self._children_registry.append(
                 {"id": child.child_id, "policy": child.parent_close_policy}
             )
@@ -1819,11 +1688,8 @@ class Interpreter(_Runtime):
                 "workflow_id": ids.parse_run(self._workflow_id)[0],
                 "run_id": self._workflow_id,
             }
-            # run_timeout / retry_policy ride in the child's RunMeta exactly as a
-            # top-level start: the timeout re-applies across the child's own
-            # chain (cron/retry/CAN) and the retry policy gates its workflow
-            # retries. run_timeout also drives SetWorkflowTimeout on this initial
-            # enqueue (mirroring the continue-as-new path).
+            # run_timeout / retry_policy ride in the child's RunMeta as in a
+            # top-level start: timeout re-applies across its chain, policy gates retries.
             child_meta = RunMeta(
                 attributes=child_attrs,
                 headers=child_headers or None,
@@ -1908,9 +1774,8 @@ class Interpreter(_Runtime):
         retires the waiter. The WAIT variants are approximated (the awaiter
         is already gone once the future is cancelled).
         """
-        # WAIT_CANCELLATION_COMPLETED on the queued path: set the cancel event
-        # but keep the exec/waiter open — the result step delivers the activity's
-        # cancelled envelope to confirm the unwind (see _deliver_queued_activity_event).
+        # WAIT_CANCELLATION_COMPLETED on the queued path: set the cancel event but
+        # keep the exec/waiter open — the result step confirms the unwind.
         wait_seqs, self._queued_wait_cancel_seqs = self._queued_wait_cancel_seqs, []
         for seq in wait_seqs:
             exec_state = self._pending_activities.get(seq)
@@ -1991,9 +1856,8 @@ class Interpreter(_Runtime):
             "workflow_type": self._defn.name,
             "headers": exec_state.headers,
         }
-        # Call step_fn synchronously so its function_id is claimed here (a
-        # deterministic position); the result decode rides outside the
-        # recorded step, replaying from the recorded envelope.
+        # Call step_fn synchronously so its function_id is claimed here; the result
+        # decode rides outside the recorded step, replaying from the envelope.
         step_coro = step_fn(exec_state.args, exec_state.start_to_close, meta)
         self._launch_waiter(
             "activity",
@@ -2068,8 +1932,7 @@ class Interpreter(_Runtime):
             "schedule_to_close": exec_state.schedule_to_close,
             "schedule_to_start": exec_state.schedule_to_start,
             # The activity workflow owns the retry loop (Design A); schedule_to_close
-            # gates retries there, not via SetWorkflowTimeout — matching the local
-            # path, where it bounds the retry sequence, not an in-flight attempt.
+            # gates retries there, not via SetWorkflowTimeout — as on the local path.
             "retry_policy": serialize_retry_policy(exec_state.retry_policy),
             "meta": meta,
         }
@@ -2078,8 +1941,7 @@ class Interpreter(_Runtime):
             queue = await DBOS.retrieve_queue_async(exec_state.task_queue)
             if queue is None:
                 raise RuntimeError(
-                    f"Task queue {exec_state.task_queue!r} is not registered "
-                    "(no worker has declared it)"
+                    f"Task queue {exec_state.task_queue!r} is not registered"
                 )
             with SetWorkflowID(activity_dbos_id):
                 await queue.enqueue_async(dispatch_fn, payload)
@@ -2101,10 +1963,8 @@ class Interpreter(_Runtime):
                 )
                 exec_state.future.set_exception(error)
             return
-        # Record the dispatched id so cancellation can reach the activity on
-        # its own worker (cooperatively — a checkpointed cancel event plus a
-        # completion-topic marker; see _signal_queued_activity_cancel — not a
-        # native DBOS cancel of this workflow).
+        # Record the dispatched id so cancellation can reach the activity on its
+        # own worker cooperatively (see _signal_queued_activity_cancel).
         exec_state.queued_dbos_id = activity_dbos_id
         # Claim the result step's function_id at this deterministic position
         # (like _launch_attempt); the decode rides outside the recorded step.
@@ -2114,21 +1974,15 @@ class Interpreter(_Runtime):
         )
         if exec_state.cancel_requested:
             # A WAIT_CANCELLATION_COMPLETED cancel requested before this dispatch
-            # committed: queued_dbos_id was still None when the sweep ran, so the
-            # cross-process signal was deferred to here (now that the activity
-            # workflow exists and its result waiter is in place to confirm the
-            # unwind). TRY_CANCEL doesn't reach here — it cancels the future,
-            # retiring the exec before dispatch (handled in _process_commands).
+            # committed: the cross-process signal is deferred to here, now confirmable.
             await self._signal_queued_activity_cancel(exec_state)
 
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):
             recv_timeout = inbox.RECV_TIMEOUT_SECONDS
             if self._rehydrate_guard() is not None:
-                # Serving a rehydrate query: poll often so the serve deadline
-                # (re-checked at the loop top) stays effective even if the
-                # client never sends a stop signal — a full RECV_TIMEOUT would
-                # otherwise pin the scratch run alive for an hour.
+                # Serving a rehydrate query: poll often so the serve deadline stays
+                # effective with no stop signal, not pinned for a full RECV_TIMEOUT.
                 recv_timeout = min(recv_timeout, _replay.REHYDRATE_POLL_SECONDS)
             self._launch_waiter(
                 "inbox",
@@ -2137,9 +1991,8 @@ class Interpreter(_Runtime):
             )
 
     async def _flush_outbox(self) -> None:
-        # set_event is checkpointed per call: replay re-flushes identically.
-        # The outbox holds only update/query reply payloads; encode a present
-        # "result" (the client decodes it against the handler's signature).
+        # set_event is checkpointed per call: replay re-flushes identically. The
+        # outbox holds only update/query reply payloads; encode a present "result".
         outbox, self._outbox = self._outbox, []
         for key, value in outbox:
             if isinstance(value, dict) and "result" in value:
@@ -2200,13 +2053,8 @@ class Interpreter(_Runtime):
         envelope: Dict[str, Any] = waiter.task.result()
         self._advance_time(envelope.get("ended_at"))
         if envelope.get("async_pending"):
-            # raise_complete_async(): the function returned but the activity
-            # stays pending; an activity_result inbox envelope resolves it.
-            # The marker is checkpointed, so recovery re-parks identically.
-            # Timeouts keep applying while parked (Temporal semantics),
-            # via durable-sleep waiters: a one-shot start-to-close (measured
-            # from the park, slightly more generous than Temporal's
-            # attempt-start) and a re-arming heartbeat-window check.
+            # raise_complete_async(): the function returned but the activity stays
+            # pending until an activity_result envelope resolves it (checkpointed).
             exec_state.async_pending = True
             if exec_state.start_to_close is not None:
                 elapsed = float(envelope.get("ended_at", 0.0)) - float(
@@ -2236,9 +2084,8 @@ class Interpreter(_Runtime):
         if exec_state.cancel_requested and isinstance(
             deserialize_failure(failure), exceptions.CancelledError
         ):
-            # WAIT_CANCELLATION_COMPLETED confirmation: the attempt observed
-            # the request and unwound; only now does the awaiter see the
-            # cancellation.
+            # WAIT_CANCELLATION_COMPLETED confirmation: the attempt observed the
+            # request and unwound, so only now does the awaiter see cancellation.
             del self._pending_activities[waiter.seq]
             activity_api._forget_attempt_state((self._workflow_id, waiter.seq))
             exec_state.future.cancel()
@@ -2279,9 +2126,7 @@ class Interpreter(_Runtime):
         self._advance_time(envelope.get("ended_at"))
         del self._pending_activities[waiter.seq]
         # No async_pending here: raise_complete_async() parks inside the
-        # __temporal_activity workflow on its own worker (Design A), which only
-        # returns once externally completed — so this is always a terminal
-        # ok/failure envelope.
+        # __temporal_activity workflow (Design A) — always a terminal envelope.
         if envelope["ok"]:
             exec_state.future.set_result(envelope["result"])
             return
@@ -2291,8 +2136,7 @@ class Interpreter(_Runtime):
             deserialize_failure(failure), exceptions.CancelledError
         ):
             # WAIT_CANCELLATION_COMPLETED confirmation: the activity observed the
-            # cancel event, unwound on its worker, and reported cancelled — only
-            # now does the awaiter see the cancellation.
+            # cancel event, unwound on its worker, and reported cancelled.
             exec_state.future.cancel()
             return
         # The activity workflow ran the retry loop and stamped the terminal
@@ -2367,9 +2211,8 @@ class Interpreter(_Runtime):
         if child_id in visited:
             return
         visited.add(child_id)
-        # Operate on the chain's current run: a child that continued as new
-        # lives at a later run, and each closed run already swept the
-        # children *it* started, so only the current run's registry matters.
+        # Operate on the chain's current run: a child that continued as new lives
+        # at a later run, and each closed run already swept its own children.
         current = await self._resolve_current_run(child_id)
         fields = await _safe_status(current)
         if fields is None or fields["status"] not in ("PENDING", "ENQUEUED", "DELAYED"):
@@ -2424,10 +2267,8 @@ class Interpreter(_Runtime):
         self._advance_time(envelope.get("sent_at"))
         kind = envelope["kind"]
         if kind == "signal":
-            # Decode happens inside _apply_signal's handler branch, NOT here: a
-            # signal with no handler is buffered and may be forwarded across a
-            # continue-as-new, so it must keep its *encoded* args for the
-            # consuming run to decode against that run's handler signature.
+            # Decode happens inside _apply_signal, NOT here: a signal with no handler
+            # is buffered/forwarded across a CAN, so it must keep its *encoded* args.
             await self._apply_signal(envelope)
         elif kind == "update":
             # Updates/queries always have a handler (an unknown one is rejected,
@@ -2463,9 +2304,8 @@ class Interpreter(_Runtime):
         elif kind == "query":
             defn = self._resolve_query(name)
         if defn is not None and defn.name is None:
-            # Dynamic (catch-all) handler: deliver (name, Sequence[RawValue]) —
-            # the raw payloads wrapped untouched so the handler converts them
-            # itself via workflow.payload_converter().
+            # Dynamic (catch-all) handler: deliver (name, Sequence[RawValue]) with
+            # raw payloads untouched, so the handler converts them itself.
             raw_args = envelope.get("args", [])
             raw = await conversion.decode_values(raw_args, [RawValue] * len(raw_args))
             return {**envelope, "args": [name, raw]}
@@ -2512,9 +2352,8 @@ class Interpreter(_Runtime):
             result = await conversion.decode_value(envelope.get("result"), ret_type)
             exec_state.future.set_result(result)
         else:
-            # An external fail goes through the retry policy, like Temporal:
-            # the next attempt re-runs the activity function (which may park
-            # async again, yielding a fresh wait under the same token).
+            # An external fail goes through the retry policy: the next attempt
+            # re-runs the function (which may park async again under the same token).
             self._fail_async_attempt(exec_state, envelope["failure"])
 
     def _fail_async_attempt(
@@ -2607,8 +2446,8 @@ class Interpreter(_Runtime):
         events until the unwind produces an outcome.
         """
         if self._cancel_requested:
-            # Temporal dedups cancel requests server-side: a second cancel
-            # must not re-interrupt cleanup code mid-unwind.
+            # Dedup cancel requests: a second cancel must not re-interrupt
+            # cleanup code mid-unwind.
             return
         self._cancel_requested = True
         reason = envelope.get("reason")
@@ -2617,12 +2456,7 @@ class Interpreter(_Runtime):
             self._vloop.call_soon(self._primary_task.cancel)
 
     # -- runtime handler resolution + accessors -----------------------------
-    # Every signal/query/update dispatch resolves its handler through these so
-    # a runtime override (workflow.set_*_handler) takes precedence over the
-    # @defn handler. Resolution order mirrors temporalio: an exact handler
-    # (override beats decorator) else the dynamic handler (override beats
-    # decorator). An explicit unset (override value None) shadows the decorator
-    # handler and falls through to the dynamic one.
+    # A runtime override beats the @defn handler: exact else dynamic, unset (None) falls through.
 
     @staticmethod
     def _resolve(
@@ -2699,9 +2533,8 @@ class Interpreter(_Runtime):
             )
         if category != "signal":
             return
-        # Deliver past signals buffered with no handler (temporalio: "all
-        # unhandled past signals are immediately sent to the handler"). A
-        # specific handler drains its name; the dynamic handler drains all.
+        # Deliver past signals buffered with no handler. A specific handler
+        # drains its name; the dynamic handler drains all.
         if handler is None:
             return
         if name is None:
@@ -2772,12 +2605,8 @@ class Interpreter(_Runtime):
         # registered (name key ``None``).
         defn = self._resolve_signal(envelope["name"])
         if defn is None:
-            # Buffered with its *encoded* args for delivery if a handler is
-            # registered later (dynamic registration arrives in Phase 2) or, more
-            # commonly, for forwarding across a continue-as-new. Decoding here
-            # would corrupt that forward path (the next run re-decodes against
-            # its own handler signature, and the JSON serializer would choke on
-            # raw user values at the send checkpoint).
+            # Buffered with its *encoded* args, for later delivery or forwarding
+            # across a CAN (the next run re-decodes against its handler signature).
             self._buffered_signals.setdefault(envelope["name"], []).append(envelope)
             logger.debug(
                 "Workflow %s: buffering signal %r with no handler",
@@ -2788,11 +2617,8 @@ class Interpreter(_Runtime):
         try:
             decoded = await self._decode_message_args(envelope)
         except Exception as err:  # noqa: BLE001 — a bad payload drops the signal
-            # Temporal logs and drops a signal whose input cannot be deserialized
-            # to the handler's parameter type; the workflow keeps running. The
-            # failure is deterministic (payload + handler signature), so the drop
-            # replays identically — like the malformed-message drop in
-            # _deliver_inbox.
+            # Log and drop a signal whose input cannot be deserialized to the
+            # handler's type; the drop is deterministic, so it replays identically.
             logger.warning(
                 "Workflow %s: Failed deserializing signal input for %r; "
                 "dropping signal (%s)",
@@ -2805,9 +2631,8 @@ class Interpreter(_Runtime):
         # the handler task gets ready Payloads.
         headers = await conversion.decode_headers(envelope.get("headers"))
         self._spawn_handler(
-            # Pass the incoming signal name (not defn.name, which is None for a
-            # dynamic handler): the inbound chain re-resolves it, and an
-            # interceptor sees the real name.
+            # Pass the incoming signal name (not defn.name, None for a dynamic
+            # handler): the inbound chain re-resolves it, so interceptors see it.
             self._run_signal_handler(envelope["name"], decoded["args"], headers),
             kind="signal",
             # A dynamic handler has no name of its own; label it by the
@@ -2828,9 +2653,8 @@ class Interpreter(_Runtime):
             # Handlers may initiate continue-as-new (as in Temporal).
             self._set_outcome(("continue_as_new", can))
         except BaseException as err:  # noqa: BLE001
-            # Same classification as the primary coroutine (Temporal
-            # semantics: a failure exception in a signal handler fails the
-            # workflow; anything else fails the workflow task).
+            # Same classification as the primary coroutine: a failure exception in
+            # a signal handler fails the workflow; anything else fails the task.
             self._record_workflow_error(err)
 
     def _spawn_handler(
@@ -2939,8 +2763,7 @@ class Interpreter(_Runtime):
 
             def run_validator() -> None:
                 # Routed through the inbound chain; the root sets the read-only,
-                # against-current-state context (a rejected update must leave no
-                # trace in workflow state). current_update_info() resolves here.
+                # against-current-state context. current_update_info() resolves here.
                 assert self._inbound is not None
                 token = _current_update_info.set(
                     UpdateInfo(id=envelope["update_id"], name=envelope["name"])
@@ -3037,7 +2860,7 @@ class Interpreter(_Runtime):
             )
             self._reply(reply_key, status="failed", failure=failure)
             return
-        # Queries are synchronous (DEVIATIONS #11): the inbound chain is driven
+        # Queries are synchronous: the inbound chain is driven
         # to completion without suspension (the root invokes the sync handler).
         self._read_only = True
         try:
@@ -3051,10 +2874,8 @@ class Interpreter(_Runtime):
                 )
             )
         except asyncio.CancelledError:
-            # Never swallow cancellation as a query failure: queries are driven
-            # synchronously so this is unreachable in practice, but if a query
-            # interceptor ever suspended, the cancel must propagate, not become
-            # a "failed" reply.
+            # Never swallow cancellation as a query failure: if a query
+            # interceptor ever suspended, the cancel must propagate, not reply.
             raise
         except BaseException as err:  # noqa: BLE001
             self._reply(reply_key, status="failed", failure=err)
@@ -3140,9 +2961,7 @@ class Interpreter(_Runtime):
             task_queue=self._task_queue_name,
             typed_search_attributes=self._typed_sa,
             # The Temporal workflow id is stable across the run chain (the base);
-            # run_id above carries the per-run DBOS id (W--r{n}). They coincide
-            # only for run 0, which is why this surfaced first after a
-            # continue-as-new built a child id from info().workflow_id.
+            # run_id above carries the per-run DBOS id (W--r{n}), equal only at run 0.
             workflow_id=base_id,
             workflow_start_time=start_time,
             workflow_type=self._defn.name,
@@ -3191,13 +3010,8 @@ class Interpreter(_Runtime):
     ) -> None:
         self._assert_not_read_only("upsert search attributes")
         new_sa = _attributes.apply_sa_updates(self._typed_sa, attributes)
-        # Validate eagerly (SA encoding is sync, no codec) so a bad value — e.g.
-        # a tz-naive datetime — raises HERE, synchronously at the user's upsert
-        # call where their try/except can catch it. Deferring to the
-        # "attributes" command flush would surface it as a raw exception that
-        # escapes the dispatcher uncatchably and re-raises on every replay.
-        # Validating before committing self._typed_sa also leaves state
-        # unchanged on failure.
+        # Validate eagerly (SA encoding is sync) so a bad value raises HERE at the
+        # user's upsert call, not uncatchably at the flush; commit only after.
         _attributes.encode_search_attributes(new_sa)
         self._typed_sa = new_sa
         self._commands.append(("attributes", 0))
@@ -3215,7 +3029,7 @@ class Interpreter(_Runtime):
         self, callback: Callable[[int], None]
     ) -> None:
         # Accepted for parity but intentionally a no-op: our seed is fixed per
-        # run, so the callback could never fire (DEVIATIONS D31).
+        # run, so the callback could never fire (DEVIATIONS random-seed).
         return None
 
     def runtime_instance(self) -> Any:
@@ -3243,9 +3057,8 @@ class Interpreter(_Runtime):
         self._assert_not_read_only("start a child workflow")
         seq = self._next_seq("child")
         if child_id is not None:
-            # Explicit child ids obey the same reservation as client-side
-            # starts (auto ids are exempt: they embed this run's id, which
-            # may itself carry a chain suffix — parse_run handles those).
+            # Explicit child ids obey the same reservation as client-side starts
+            # (auto ids are exempt: they embed this run's id, possibly chained).
             ids.validate_workflow_id(child_id)
         resolved_id = child_id or f"{self._workflow_id}_{seq}"
         child = _ChildExec(
@@ -3374,12 +3187,8 @@ class Interpreter(_Runtime):
     def runtime_get_current_deployment_version(
         self,
     ) -> Optional[WorkerDeploymentVersion]:
-        # Deployment name is a process-global set by the Worker; the build_id is
-        # read live from the worker's DBOS application_version (post-launch, so
-        # it reflects an explicit build_id, the pinned default, or a computed
-        # code-hash for auto-versioning) — the version DBOS actually pins
-        # recovery/dequeue to, so reported == enforced (DEVIATIONS D29). None
-        # when no Worker is active (the in-process dispatcher harness).
+        # Deployment name is a process-global set by the Worker; build_id is read
+        # live from the worker's DBOS application_version (DEVIATIONS worker-versioning).
         from . import registry
 
         name = registry.worker_deployment_name

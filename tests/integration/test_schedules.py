@@ -64,10 +64,9 @@ class ScheduledGreeter:
 
 
 # --- overlap-policy probe: counts how many actions actually start ------------
-# Activities run in the in-process worker, so they share this module state. We
-# count *starts* (not instantaneous concurrency): SKIP suppresses most fires
-# while an action is still running, so far fewer actions start than under
-# ALLOW_ALL — a signal robust to the small fire-time TOCTOU race (D22).
+
+# Activities share this module state. Counting *starts* (not concurrency): SKIP
+# suppresses most fires mid-action, so far fewer start than ALLOW_ALL (schedules).
 _overlap = {"started": 0}
 
 
@@ -232,8 +231,8 @@ async def test_trigger_runs_action() -> None:
 
 async def test_action_memo_and_search_attributes_propagate() -> None:
     """A scheduled start applies the action's memo + typed search attributes to
-    the workflow it launches (the memo silent-drop fix + SA propagation), and
-    describe() round-trips the action's typed search attributes."""
+    the workflow it launches, and describe() round-trips the action's typed
+    search attributes."""
     kw = SearchAttributeKey.for_keyword("SchedKeyword")
     schedule = Schedule(
         action=ScheduleActionStartWorkflow(
@@ -295,7 +294,7 @@ async def test_pause_and_unpause() -> None:
         await handle.pause(note="paused now")
         desc = await handle.describe()
         assert desc.schedule.state.paused is True
-        # The pause note is accepted but not persisted (D22); the creation note
+        # The pause note is accepted but not persisted (schedules); the creation note
         # is unchanged.
         assert desc.schedule.state.note == "a note"
 
@@ -341,11 +340,8 @@ async def test_automatic_cron_fire() -> None:
 
 
 async def test_fires_on_schedule_with_right_inputs() -> None:
-    # An every-1s schedule should fire repeatedly, on the 1-second cron grid,
-    # each run receiving the scheduled argument. We collect several completed
-    # actions and check (a) every result reflects the scheduled input and (b) the
-    # occurrence times encoded in the action ids are consecutive whole seconds —
-    # i.e. it fired on time, once per period, not in a burst or with drift.
+    # An every-1s schedule fires repeatedly on the cron grid: check each result
+    # reflects the input and action-id epochs are consecutive whole seconds.
     async with _env(_fast_scheduler_config()) as client:
         await client.create_schedule(
             "sched-ontime",
@@ -367,12 +363,8 @@ async def test_fires_on_schedule_with_right_inputs() -> None:
 
         async def four_completed() -> "list[str]":
             rows = await client._dbos_client.list_workflows_async(name=ACTION_WF_NAME)
-            # Scope to THIS schedule's action runs (id ``ontime-wf-<epoch>``).
-            # The name query is database-global and `ScheduledGreeter` is shared
-            # with other schedule tests (e.g. test_automatic_cron_fire's
-            # ``auto-wf-*`` runs), whose runs can bleed in when the process-global
-            # scheduler / DB-reset lifecycle overlaps across tests — otherwise a
-            # stray "Hello, Auto!" run fails the assertion below.
+            # Scope to THIS schedule's runs (``ontime-wf-<epoch>``): the global
+            # name query shares `ScheduledGreeter` with other tests' runs.
             done = [
                 r.workflow_id
                 for r in rows
@@ -390,9 +382,8 @@ async def test_fires_on_schedule_with_right_inputs() -> None:
             handle = client.get_workflow_handle(wid, result_type=str)
             assert await handle.result() == "Hello, Timely!"
 
-        # On time: action ids are ``ontime-wf-<epoch>`` where epoch is the nominal
-        # cron occurrence. Four consecutive 1s occurrences → a contiguous run of
-        # whole-second epochs (span == count - 1).
+        # On time: action-id epochs are the nominal cron occurrences, so four
+        # consecutive 1s occurrences form a contiguous run (span == count - 1).
         epochs = sorted({int(wid.rsplit("-", 1)[1]) for wid in ids})
         assert epochs[-1] - epochs[0] == len(epochs) - 1, epochs
 
@@ -419,10 +410,8 @@ async def test_pause_stops_firing() -> None:
         await retry_until_success_async(lambda: _wait_for_fire_count(client, 2))
         await handle.pause()
 
-        # The fire count must settle: sample until two reads spaced over several
-        # cron periods agree (a paused schedule produces no new fires; at most one
-        # already-enqueued fire may still land). Polling for *stability* is how we
-        # assert the absence of further fires without a magic sleep.
+        # The fire count must settle: two reads spaced over several cron periods
+        # agree (a paused schedule produces no new fires beyond one already enqueued).
         async def settled() -> int:
             first = await _success_count(client, "__temporal_schedule_fire")
             await asyncio.sleep(2.0)  # > 2 cron periods
@@ -462,17 +451,12 @@ async def test_schedule_persists_across_worker_restart() -> None:
         await handle.delete()
 
 
-# --- overlap policies (DEVIATIONS D22) --------------------------------------
+# --- overlap policies (DEVIATIONS schedules) --------------------------------------
 
 
 async def test_overlap_skip_suppresses_runs() -> None:
-    # Robust SKIP: the first action *blocks forever* (until released), so it stays
-    # running across an unbounded number of occurrences. We wait until many fires
-    # have happened (each runs the dispatcher, which skips), then assert that
-    # despite all those fires only the one blocked action ever started (≤2,
-    # tolerating the documented fire-time TOCTOU race, D22). A broken SKIP would
-    # have started one action *per fire* (~6). The huge margin (≤2 vs ≥6) is what
-    # makes this reliable rather than timing-dependent.
+    # SKIP: the first action blocks forever across many fires, yet only it ever
+    # started (≤2, fire-time TOCTOU race, schedules); broken SKIP starts ~6.
     _overlap.update(started=0)
     async with _env(_fast_scheduler_config()) as client:
         handle = await client.create_schedule(
@@ -563,9 +547,8 @@ async def test_buffer_overlap_rejected() -> None:
 
 
 async def test_trigger_overlap_override_rejected_except_allow_all() -> None:
-    # A per-call overlap override is only accepted as ALLOW_ALL (D22); any other
-    # value raises rather than being silently ignored. ALLOW_ALL is accepted and
-    # the action still fires (under the schedule's configured policy).
+    # A per-call overlap override is only accepted as ALLOW_ALL (schedules); any
+    # other value raises, while ALLOW_ALL still fires under the configured policy.
     async with _env() as client:
         handle = await client.create_schedule("ov-override", _interval_schedule())
         with pytest.raises(NotImplementedError):

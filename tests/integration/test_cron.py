@@ -1,4 +1,4 @@
-"""Legacy cron workflows (Phase 3, DESIGN §6.4): ``start_workflow(
+"""Legacy cron workflows (DESIGN §6.4): ``start_workflow(
 cron_schedule=...)`` creates the first run immediately (delayed to the next
 cron occurrence — Temporal's first-task backoff), and each close enqueues
 run n+1 of the chain at the next occurrence. Tests use the 6-field
@@ -139,9 +139,8 @@ async def test_cron_chain_fires_and_threads_results() -> None:
         # occurrence): describe works before any fire.
         assert (await handle.describe()).status == WorkflowExecutionStatus.RUNNING
 
-        # result() returns the targeted run's result once it fires
-        # (documented deviation: temporalio's would follow the cron chain
-        # forever).
+        # result() returns the targeted run's result once it fires (documented
+        # deviation: temporalio's would follow the cron chain forever).
         first = await handle.result()
         assert first == {
             "count": 1,
@@ -184,8 +183,7 @@ async def test_cron_continues_after_failure_and_result_follows() -> None:
             cron_schedule=EVERY_SECOND,
         )
         # Run 0 fails; the cron successor sees that failure and recovers.
-        # result(follow_runs=True) follows the failed run to it, exactly as
-        # temporalio follows new_execution_run_id on a failure event.
+        # result(follow_runs=True) follows the failed run to it.
         result = await handle.result()
         assert result.startswith("recovered from: first fire fails")
 
@@ -301,9 +299,8 @@ async def test_cron_with_retry_policy() -> None:
             ),
         )
 
-        # Chain layout: r0 fire1/attempt1 (FAILED) -> retry -> r1
-        # fire1/attempt2 (SUCCESS) -> cron -> r2 fire2/attempt1 (FAILED) ->
-        # retry -> r3 fire2/attempt2 (SUCCESS) -> cron -> ...
+        # Chain layout: r0 fire1/a1 (FAILED) -> r1 fire1/a2 (SUCCESS) -> r2
+        # fire2/a1 (FAILED) -> r3 fire2/a2 (SUCCESS) -> cron -> ...
         await _wait_for_chain_index(client, "cron-retry", 3, timeout=12.0)
 
         fire1 = await client.get_workflow_handle(
@@ -321,8 +318,7 @@ async def test_cron_with_retry_policy() -> None:
             "cron-retry", run_id="cron-retry--r3"
         ).result(follow_runs=False)
         # Second fire: attempt reset to 1 then retried to 2; sees fire 1's
-        # completion (carried across the cron hop) AND its own attempt-1
-        # failure — the two coexist, as in Temporal.
+        # completion AND its own attempt-1 failure — the two coexist.
         assert fire2["fire"] == 2
         assert fire2["attempt"] == 2
         assert fire2["had_completion"] is True

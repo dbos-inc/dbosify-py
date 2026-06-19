@@ -42,8 +42,7 @@ class AuAsCompletedWorkflow:
         ]
 
         # asyncio.as_completed would almost always fail with a non-determinism
-        # error because it uses sets internally; workflow.as_completed is the
-        # deterministic replacement.
+        # error (it uses sets); workflow.as_completed is the deterministic replacement.
         return [await task for task in workflow.as_completed(tasks)]
 
 
@@ -110,13 +109,8 @@ async def test_workflow_wait_utility(client: Client) -> None:
         assert len(result) == 10
 
 
-# ---------------------------------------------------------------------------
-# Lock / Semaphore tests  (lines 7252-7363)
-#
-# These exercise asyncio.Lock / asyncio.Semaphore inside workflow code and
-# inside update handlers. There is nothing Temporal-specific about how the
-# primitives are used; the tests assert on observed concurrency.
-# ---------------------------------------------------------------------------
+# Lock / Semaphore tests (lines 7252-7363): exercise asyncio.Lock / Semaphore in
+# workflow code and update handlers, asserting on observed concurrency.
 
 
 @activity.defn
@@ -136,9 +130,8 @@ class AuUseLockOrSemaphoreWorkflowParameters:
     semaphore_initial_value: Optional[int] = None
     sleep: Optional[float] = None
     timeout: Optional[float] = None
-    # If set, update handlers wait at a barrier until this many have been delivered
-    # before contending for the lock/semaphore — recreating Temporal's batch of
-    # Admitted updates so exact-concurrency assertions don't race delivery timing.
+    # If set, handlers barrier until this many are delivered before contending —
+    # recreating Temporal's Admitted batch so exact-concurrency assertions don't race.
     synchronize_handlers: Optional[int] = None
 
 
@@ -236,9 +229,8 @@ class AuHandlerCoroutinesUseLockOrSemaphoreWorkflow(
         if not hasattr(self, "params"):
             self.init(params)
         assert (update_info := workflow.current_update_info())
-        # Optional barrier: wait until all concurrently-fired updates have been
-        # delivered before any contends, so the exact-concurrency expectations don't
-        # depend on the order/timing in which updates are delivered under load.
+        # Optional barrier: wait until all concurrently-fired updates are delivered
+        # before any contends, so exact-concurrency expectations don't race delivery.
         n = params.synchronize_handlers
         if n:
             self._handlers_arrived += 1
@@ -278,10 +270,8 @@ async def _do_update_handler_lock_or_semaphore_test(
     n_updates: int,
     expectation: AuLockOrSemaphoreWorkflowConcurrencySummary,
 ) -> None:
-    # Upstream creates updates in the Admitted state before the worker polls so
-    # they all arrive in one batch. Here we start the worker, fire all the
-    # updates concurrently (they interleave on the workflow's event loop just
-    # like a batch of admitted updates would), then signal the workflow to exit.
+    # Upstream batches Admitted updates before the worker polls; here we start the
+    # worker, fire all updates concurrently (they interleave), then signal exit.
     async with new_worker(
         client,
         AuHandlerCoroutinesUseLockOrSemaphoreWorkflow,
@@ -352,11 +342,8 @@ async def test_update_handler_lock_acquisition_respects_timeout(
 ) -> None:
     await _do_update_handler_lock_or_semaphore_test(
         client,
-        # All 5 handlers synchronize at a barrier (synchronize_handlers=5) before
-        # contending, so they attempt lock.acquire() together: the first holds it for
-        # 0.5s and the rest give up after their 0.1s timeout (ever=1). Without the
-        # barrier this was flaky under load — staggered update delivery let a later
-        # handler acquire only after the holder had already released (ever=2).
+        # All 5 handlers barrier-sync (synchronize_handlers=5) then attempt
+        # lock.acquire() together: first holds 0.5s, rest give up after 0.1s (ever=1).
         AuUseLockOrSemaphoreWorkflowParameters(
             sleep=0.5, timeout=0.1, synchronize_handlers=5
         ),
@@ -545,14 +532,8 @@ async def test_async_loop_ordering(client: Client) -> None:
         await handle.result()
 
 
-# ---------------------------------------------------------------------------
-# test_alternate_async_loop_ordering  (line 7024)
-#
-# Upstream kills and restarts the workflow worker while an activity runs on a
-# separate task queue and signals arrive, to exercise replay ordering. We keep
-# the behavioral core: an activity runs on a separate task queue, two signals
-# arrive, and the workflow then completes with the expected event ordering.
-# ---------------------------------------------------------------------------
+# test_alternate_async_loop_ordering (line 7024): an activity runs on a separate
+# task queue, two signals arrive, workflow completes with expected event ordering.
 
 
 @workflow.defn

@@ -1,7 +1,7 @@
 """Decoration-time behavior of dynamic handlers/activities and handler
 descriptions (DESIGN §6.1/§6.8). End-to-end dispatch lives in
 tests/integration/test_dynamic_handlers.py; dynamic *workflows* are rejected
-(DEVIATIONS D25)."""
+(DEVIATIONS dynamic-handlers)."""
 
 import collections.abc
 import typing
@@ -151,10 +151,8 @@ def test_payload_converter_exposed() -> None:
 
 
 def test_dynamic_handler_accepts_both_sequence_spellings() -> None:
-    # temporalio accepts the dynamic-handler arg typed as either
-    # typing.Sequence[RawValue] or collections.abc.Sequence[RawValue]
-    # (get_type_hints preserves whichever the user wrote, and the two are not
-    # ==). Both must validate.
+    # temporalio accepts the dynamic-handler arg typed as either typing.Sequence
+    # or collections.abc.Sequence of RawValue (not == each other); both must validate.
     for seq in (typing.Sequence[RawValue], collections.abc.Sequence[RawValue]):
 
         @workflow.defn
@@ -181,7 +179,7 @@ def test_dynamic_activity_accepts_both_sequence_spellings() -> None:
 
 def test_dynamic_handler_rejects_wrong_sequence_element() -> None:
     # Sequence of the wrong element type, or a non-Sequence container, is
-    # still rejected (the fix widens the Sequence spelling, not the element).
+    # rejected: the widened Sequence spelling covers the container, not the element.
     with pytest.raises(RuntimeError, match="Dynamic signal handler"):
 
         @workflow.defn
@@ -214,7 +212,7 @@ def test_no_thread_cancel_exception_default_and_true_ok() -> None:
 
 def test_no_thread_cancel_exception_false_rejected() -> None:
     # Asking for Temporal's raise-into-the-thread behavior fails loudly at
-    # decoration time rather than silently degrading (DEVIATIONS D26).
+    # decoration time rather than silently degrading (DEVIATIONS sync-activity-cancel).
     with pytest.raises(NotImplementedError, match="no_thread_cancel_exception"):
 
         @activity.defn(no_thread_cancel_exception=False)

@@ -79,9 +79,8 @@ def test_tolerates_garbage_collected_old_runs() -> None:
     [
         ("W", ("W", 0)),
         ("W--r3", ("W", 3)),
-        # Auto child ids embed their parent RUN id: the suffix has an
-        # underscore, which int() would happily parse ("2_5" -> 25); the
-        # digit guard must treat these as standalone base ids.
+        # Auto child ids embed their parent RUN id (underscore suffix int() would
+        # parse, "2_5" -> 25); the digit guard treats these as standalone base ids.
         ("W--r2_5", ("W--r2_5", 0)),
         ("W--r2_5--r1", ("W--r2_5", 1)),
         ("W--r2_5_3", ("W--r2_5_3", 0)),

@@ -1,6 +1,6 @@
-"""Subprocess worker for Phase 3 recovery tests.
+"""Subprocess worker for recovery tests.
 
-Run as: python phase3_worker.py <scenario>-<start|resume> <workflow_id> <effects_path>
+Run as: python continue_as_new_recovery_worker.py <scenario>-<start|resume> <workflow_id> <effects_path>
 
 Scenarios:
   chain   continue-as-new chain: each run records itself via an activity,
@@ -27,7 +27,7 @@ from dbosify.client import Client, WorkflowFailureError
 from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-TASK_QUEUE = "phase3-recovery-tq"
+TASK_QUEUE = "continue-as-new-recovery-tq"
 
 
 @activity.defn

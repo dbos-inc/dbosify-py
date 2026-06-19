@@ -173,8 +173,7 @@ class TestWorkflowRetryDelay:
 
     def test_cancelled_and_terminated_failures_never_retry(self) -> None:
         # Temporal's isRetryable: cancellation/termination failures end the
-        # retry chain regardless of policy — including a CancelledError that
-        # reaches the failure path without an external cancel request.
+        # retry chain regardless of policy.
         for cls_name in ("CancelledError", "TerminatedError"):
             failure = {"cls": cls_name, "message": "x"}
             assert _workflow_retry_delay(self.POLICY, 1, failure) is None

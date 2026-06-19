@@ -14,7 +14,7 @@ from dbos import DBOSClient
 from tests.dbconfig import system_database_url
 from tests.harness import PythonProcess
 
-WORKER = Path(__file__).parent / "phase2_worker.py"
+WORKER = Path(__file__).parent / "inflight_recovery_worker.py"
 REPO_ROOT = Path(__file__).parents[2]
 ENV = {"PYTHONPATH": str(REPO_ROOT)}
 
@@ -62,12 +62,8 @@ def test_sigkill_mid_child_reattaches(tmp_path: Path) -> None:
 
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_sigkill_mid_child_retry_follows_chain(tmp_path: Path) -> None:
-    # The child fails attempt 1, then a SIGKILL takes out the parent and the
-    # child mid-attempt-1. Recovery must resume the child (which fails, retries
-    # to attempt 2, and records exactly once) AND the parent's child-result
-    # step must follow the failure chain to the retry successor — not surface
-    # attempt 1's failure. This exercises the child retry_policy wiring plus the
-    # child-result step's new failure-follow branch across recovery.
+    # SIGKILL during the child's attempt 1: recovery retries it to attempt 2
+    # (recording once) and the parent's child-result follows the chain to it.
     effects = tmp_path / "effects"
     wf_id = "child-retry-reattach-wf"
 
@@ -104,11 +100,8 @@ def test_sigkill_mid_child_retry_follows_chain(tmp_path: Path) -> None:
 
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_sigkill_mid_child_run_timeout_still_fires(tmp_path: Path) -> None:
-    # A child with a run_timeout is SIGKILLed (along with its parent) while
-    # mid-sleep, before the timeout would fire. The deadline is durable, so
-    # recovery must re-apply it and terminate the child at the original
-    # deadline. If run_timeout were dropped on recovery, the recovered child
-    # would sleep the full 120s and the parent would never return.
+    # A child with a run_timeout is SIGKILLed (with its parent) mid-sleep; the
+    # deadline is durable, so recovery re-applies it and terminates the child.
     effects = tmp_path / "effects"
     wf_id = "child-timeout-reattach-wf"
 

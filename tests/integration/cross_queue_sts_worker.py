@@ -1,5 +1,5 @@
-"""Subprocess worker for the cross-queue schedule_to_start test (Phase 4,
-§6.1.2). The test starts the workflow worker first (enqueueing the activity) and
+"""Subprocess worker for the cross-queue schedule_to_start test (§6.1.2).
+The test starts the workflow worker first (enqueueing the activity) and
 delays the activity worker, so the activity sits in the queue past
 ``schedule_to_start_timeout`` and the activity workflow fails it before running.
 

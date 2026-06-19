@@ -84,8 +84,8 @@ from ._internal.payloads import (
 from ._internal.serializer import TEMPORAL_SERIALIZER
 from ._internal.status import WorkflowExecutionStatus
 
-# Schedule types (DESIGN §6.7) live in _schedule.py and are re-exported here to
-# mirror temporalio.client's namespace.
+# Schedule types (DESIGN §6.7) live in _schedule.py and are re-exported here
+# to mirror temporalio.client's namespace.
 from ._schedule import (  # noqa: E402
     Schedule,
     ScheduleAction,
@@ -127,9 +127,8 @@ from .common import (
 from .converter import DataConverter
 from .workflow import _UpdateMethod
 
-# How often reply waits (update acceptance/result, query replies) re-check
-# newer runs of the chain: a message still unconsumed when its target run
-# continues-as-new is forwarded to (and answered under) a later run's id.
+# How often reply waits re-check newer runs of the chain: a reply may be
+# answered under a later run's id after the target continues-as-new.
 REPLY_SWEEP_INTERVAL_SECONDS = 1.0
 
 __all__ = [
@@ -364,9 +363,8 @@ class AsyncActivityHandle:
         # The original addressing argument, re-used to rebuild this handle at
         # the root of the outbound chain (DESIGN §6.8).
         self._id_or_token = id_or_token
-        # Per-handle converter override for complete/fail/heartbeat encoding. It
-        # rides on each *Input so it survives the chain-root handle rebuild
-        # (which only carries id_or_token).
+        # Per-handle converter override for complete/fail/heartbeat encoding; it
+        # rides on each *Input so it survives the chain-root handle rebuild.
         self._converter = data_converter_override
         self._workflow_id: Optional[str] = None
         self._run_id: Optional[str] = None
@@ -404,9 +402,8 @@ class AsyncActivityHandle:
         await self._send_checked(target, envelope)
 
     async def _send_checked(self, target: str, envelope: Dict[str, Any]) -> None:
-        # The gone-event is set (checkpointed) when the activity is
-        # cancelled or its run closes while parked: raise instead of
-        # delivering into the void.
+        # The gone-event is set when the activity is cancelled or its run closes
+        # while parked: raise instead of delivering into the void.
         gone = await self._client._dbos_client.get_event_async(
             target, inbox.async_activity_gone_key(self._activity_id), 0
         )
@@ -620,21 +617,17 @@ class WithStartWorkflowOperation:
                 # Used, but the workflow start itself raised (e.g. a FAIL /
                 # REJECT_DUPLICATE conflict), so no run was started/attached.
                 raise RuntimeError(
-                    "WithStartWorkflowOperation was used but the workflow "
-                    "start did not complete; no handle is available"
+                    "WithStartWorkflowOperation was used but the workflow start "
+                    "did not complete; no handle is available"
                 )
-            raise RuntimeError(
-                "WithStartWorkflowOperation has not been used in an "
-                "update-with-start call yet"
-            )
+            raise RuntimeError("WithStartWorkflowOperation has not been used yet")
         return self._handle
 
 
 @dataclass(frozen=True)
 class WorkflowExecution:
-    """Info for a single workflow execution run (Phase 1 subset of
-    temporalio's; field order matches theirs). Constructed by the SDK,
-    never by users.
+    """Info for a single workflow execution run (a subset of temporalio's;
+    field order matches theirs). Constructed by the SDK, never by users.
     """
 
     close_time: Optional[datetime] = None
@@ -660,9 +653,7 @@ class WorkflowExecution:
     """Search attributes for the workflow."""
     workflow_type: str = ""
     # The stored (converter-encoded) memo, decoded lazily by ``memo()`` /
-    # ``memo_value()`` — matches temporalio, where memo decode is async. Not a
-    # constructor parameter (temporalio reads memo from ``raw_info`` instead);
-    # describe() sets it via object.__setattr__ on the frozen instance.
+    # ``memo_value()``. Not a constructor parameter; describe() sets it.
     _encoded_memo: Mapping[str, Any] = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
@@ -1085,7 +1076,7 @@ class Client:
 
     Use :py:meth:`connect` — ``Client.connect(system_database_url,
     namespace=...)`` builds the underlying ``dbos.DBOSClient`` pointed at the
-    namespace's schema (DEVIATIONS D1), so you state the namespace once and
+    namespace's schema (DEVIATIONS no-server), so you state the namespace once and
     never touch ``dbos_system_schema``. For full control of the DBOSClient
     (custom engine/pool), build it yourself and use the constructor, where the
     DBOSClient's schema *is* the namespace.
@@ -1100,16 +1091,15 @@ class Client:
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
         """Low-level constructor over a caller-built ``dbos.DBOSClient``. The
-        client's **namespace is its DBOSClient's schema** (DEVIATIONS D1) — the
+        client's **namespace is its DBOSClient's schema** (DEVIATIONS no-server) — the
         single source of truth — so build the DBOSClient with
         ``dbos_system_schema=namespace_schema(<namespace>)``, or just use
         :py:meth:`connect`, which takes a namespace and builds the DBOSClient
         for you. The caller owns this DBOSClient's lifecycle.
         """
         self._dbos_client = dbos_client
-        # The DBOSClient's schema *is* the namespace (no separate, redundant
-        # namespace argument to keep in sync). Raises if it isn't a temporal
-        # namespace schema.
+        # The DBOSClient's schema *is* the namespace; raises if it isn't a
+        # temporal namespace schema.
         self._namespace = namespace_from_schema(dbos_client._sys_db.schema)
         # connect() flips this for the DBOSClient it builds, so close() disposes
         # it; a caller-supplied DBOSClient (this path) is the caller's to close.
@@ -1117,16 +1107,13 @@ class Client:
         self._data_converter = data_converter
         self._default_query_reject_condition = default_workflow_query_reject_condition
         # Build the outbound interceptor chain: user interceptors fold (in
-        # reverse) over the root that performs the actual DBOS operations
-        # (DESIGN §6.8). Public verbs/handles build the matching *Input and
-        # call ``self._impl.<verb>(input)``.
+        # reverse) over the root that performs the DBOS operations (DESIGN §6.8).
         impl: OutboundInterceptor = _ClientOutbound(self)
         for interceptor in reversed(interceptors):
             impl = interceptor.intercept_client(impl)
         self._impl = impl
-        # This process encodes start args / decodes results with this
-        # converter (a separate worker process decodes args / encodes results
-        # with its own — configure both the same, as in Temporal).
+        # This process encodes start args / decodes results with this converter;
+        # the worker process uses its own — configure both the same, as in Temporal.
         conversion.set_converter(data_converter)
         _install_serializer(dbos_client)
 
@@ -1150,7 +1137,7 @@ class Client:
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
-        """Connect to ``system_database_url`` in ``namespace`` (DEVIATIONS D1).
+        """Connect to ``system_database_url`` in ``namespace`` (DEVIATIONS no-server).
 
         Builds the underlying ``dbos.DBOSClient`` for you — pointed at the
         namespace's schema, with the JSON serializer — so the namespace is
@@ -1242,7 +1229,7 @@ class Client:
             "priority": priority,
             "request_id": request_id,
             # PinnedVersioningOverride matches the enforced default; the
-            # auto-upgrade override has no DBOS analog (DEVIATIONS D29).
+            # auto-upgrade override has no DBOS analog (DEVIATIONS worker-versioning).
             "versioning_override": versioning_override,
             **unsupported,
         }.items():
@@ -1315,23 +1302,16 @@ class Client:
             retry_policy._validate()
             meta.retry_policy = serialize_retry_policy(retry_policy)
         if run_timeout is not None:
-            # Carried so chain successors (retries, cron, continue-as-new)
-            # each get a fresh per-run timeout — without it, DBOS propagates
-            # the closing run's *absolute* deadline to the runs it enqueues.
+            # Carried so each chain successor (retry, cron, continue-as-new) gets
+            # a fresh per-run timeout instead of the closing run's deadline.
             meta.run_timeout = run_timeout.total_seconds()
         if cron_schedule:
-            # Validated up front so a bad expression fails the start, not
-            # the first chain hop. The first run is created immediately but
-            # fires at the next cron occurrence (Temporal's first-task
-            # backoff), so describe()/signals/result() work right away.
+            # Validated up front so a bad expression fails the start. Run 0 is
+            # created now but fires at the next occurrence (first-task backoff).
             _schedules.validate_cron(cron_schedule)
             if start_delay is not None:
-                # DEVIATION (DEVIATIONS D19): our cron uses the enqueue delay
-                # internally to back off run 0 to the first occurrence, so a
-                # user start_delay can't ride alongside. temporalio accepts
-                # the combination and silently ignores start_delay ("does not
-                # work with cron_schedule"); we fail fast instead of swallowing
-                # a behavior-changing parameter.
+                # DEVIATION (DEVIATIONS cron-chains): cron uses the enqueue delay
+                # to back off run 0, so a user start_delay can't ride alongside.
                 raise ValueError(
                     "start_delay cannot be used together with cron_schedule"
                 )
@@ -1342,23 +1322,16 @@ class Client:
                 )
             )
 
-        # Memo + search attributes ride in the run envelope (for in-workflow
-        # info()/memo() and chain propagation) and in the DBOS attributes column
-        # (the durable, queryable copy that describe() reads). execute_workflow
-        # and WithStartWorkflowOperation both funnel through here, so the
-        # deprecated-dict-form warning is emitted once, at this chokepoint.
+        # Memo + search attributes ride in the run envelope and the DBOS
+        # attributes column (the durable copy describe() reads).
         _warn_on_deprecated_search_attributes(search_attributes)
         meta.attributes = await _attributes.encode_attributes(memo, search_attributes)
         # Interceptor headers (set by a client interceptor's start_workflow) ride
-        # into the run as ExecuteWorkflowInput.headers (DEVIATIONS D24).
+        # into the run as ExecuteWorkflowInput.headers.
         meta.headers = (await conversion.encode_headers(input.headers)) or None
 
-        # Messages to deliver with the start — Temporal's atomic
-        # signal-/update-with-start (DEVIATIONS D7): the start signal and/or an
-        # update request, each ``(envelope, topic, idempotency_key)``. Built
-        # before conflict resolution so they ride whichever path the start
-        # takes: bundled into the enqueue transaction on a fresh start, or sent
-        # to the run we attach to under USE_EXISTING.
+        # Messages to deliver with the start (DEVIATIONS start-policies): start
+        # signal and/or update, built before conflict resolution to ride either path.
         with_start_msgs: List[Tuple[Any, str, Optional[str]]] = []
         if start_signal is not None:
             with_start_msgs.append(
@@ -1389,11 +1362,8 @@ class Client:
                         await self._dbos_client.send_async(
                             current_status.workflow_id, env, topic, idempotency_key=idem
                         )
-                    # Like a fresh start, the returned handle is NOT run-bound
-                    # (signals/queries/updates resolve the chain's current run);
-                    # result_run_id is the run we attached to (where its result
-                    # lands, so handle.result() works) and first_execution_run_id
-                    # is the chain's first run.
+                    # Like a fresh start, the handle is NOT run-bound;
+                    # result_run_id is the run we attached to.
                     return WorkflowHandle(
                         self,
                         id,
@@ -1441,9 +1411,7 @@ class Client:
             options["attributes"] = meta.attributes
         payload = wrap_input(await conversion.encode_values(workflow_args), meta)
         # Fresh start: bundle the enqueue and any with-start messages into one
-        # system-database transaction so a crash can't leave the run started
-        # without them. The commit runs in a thread, mirroring how
-        # enqueue_async/send_async bridge to the sync DBOS client.
+        # system-database transaction so a crash can't separate them.
         if not with_start_msgs:
             await self._dbos_client.enqueue_async(options, payload)
         else:
@@ -1456,11 +1424,8 @@ class Client:
                         dbos_client.send_in_transaction(conn, dbos_id, env, topic, idem)
 
             await asyncio.to_thread(_enqueue_with_messages)
-        # Like temporalio, the returned handle is NOT run-bound: signals,
-        # queries, and updates resolve the chain's *current* run at call
-        # time, so they keep routing correctly across continue-as-new (a
-        # run-bound handle from get_workflow_handle(run_id=...) pins the
-        # run, also matching temporalio).
+        # Like temporalio, the handle is NOT run-bound: signals/queries/updates
+        # resolve the chain's current run, so they route across continue-as-new.
         return WorkflowHandle(
             self,
             id,
@@ -1622,31 +1587,22 @@ class Client:
         parsed = _visibility.parse_query(query)
         sys_db: Any = getattr(self._dbos_client, "_sys_db", None)
         if sys_db is None:
-            raise RuntimeError(
-                "count_workflows requires DBOS system-database access "
-                "(the wrapped DBOSClient exposes no _sys_db)"
-            )
+            raise RuntimeError("count_workflows requires DBOS system-database access")
 
         if not parsed.aggregate_eligible() or parsed.post_filter() is not None:
             raise _visibility.VisibilityQueryError(
-                "count_workflows runs only what DBOS's aggregate operator can "
-                "express: it cannot filter by exact WorkflowId, a search "
-                "attribute, WorkflowType !=, or an ERROR-family ExecutionStatus "
-                "(Failed/Canceled/TimedOut/ContinuedAsNew, stored as one ERROR "
-                "status). Narrow the query or enumerate with list_workflows."
+                "count_workflows cannot filter by exact WorkflowId, a search "
+                "attribute, WorkflowType !=, or an ERROR-family ExecutionStatus; "
+                "narrow the query or enumerate with list_workflows."
             )
         if parsed.group_by == "ExecutionStatus":
             raise _visibility.VisibilityQueryError(
-                "count_workflows cannot GROUP BY ExecutionStatus: DBOS stores "
-                "Failed/Canceled/TimedOut/ContinuedAsNew under a single ERROR "
-                "status, so distinguishing them would require reading each "
-                "workflow's outcome. GROUP BY WorkflowType is supported."
+                "count_workflows cannot GROUP BY ExecutionStatus; "
+                "GROUP BY WorkflowType is supported."
             )
 
-        # Group by name in every path so we can count only user Temporal
-        # workflows (``wf:{type}``) and exclude DBOS plumbing rows
-        # (``__temporal_activity`` / ``__temporal_schedule_fire``), which the
-        # aggregate operator has no other way to filter out.
+        # Group by name so we count only user workflows (``wf:{type}``) and
+        # exclude DBOS plumbing rows the aggregate operator can't otherwise drop.
         rows = await self._count_aggregate(
             sys_db, "group_by_name", parsed.aggregate_filter_kwargs()
         )
@@ -1696,7 +1652,7 @@ class Client:
         typically USE_EXISTING) and send it an update, waiting for
         ``wait_for_stage``. The update rides the start: on a *fresh* run the
         start enqueue and the update request commit in one system-database
-        transaction (Temporal's atomic update-with-start, DEVIATIONS.md D7); on
+        transaction (Temporal's atomic update-with-start, DEVIATIONS.md start-policies); on
         a USE_EXISTING attach it is sent to the already-running run as part of
         the start. The request is routed through the update outbound
         interceptors first, so their modifications apply on both paths.
@@ -1705,11 +1661,8 @@ class Client:
         if op._used:
             raise RuntimeError("WithStartWorkflowOperation cannot be reused")
         op._used = True
-        # Route through the update interceptor chain; its terminal
-        # (_start_update_impl, with ``with_start_op`` set) builds the
-        # post-interceptor envelope and performs the start that delivers it,
-        # then awaits the reply. The start half still runs the start
-        # interceptors. op._handle is set by the terminal.
+        # Route through the update interceptor chain; its terminal performs the
+        # start that delivers the update, awaits the reply, and sets op._handle.
         return await self._impl.start_workflow_update(
             StartWorkflowUpdateInput(
                 id=op._start_kwargs["id"],
@@ -2044,17 +1997,14 @@ class WorkflowHandle:
                 dbos_id = new_run_id
                 continue
             except SerializedWorkflowFailure as failure:
-                # A failed run with a successor (workflow retry, cron
-                # continuation) is followed like temporalio follows
-                # new_execution_run_id on the failure event; without
-                # follow_runs (or a successor) the failure surfaces.
+                # A failed run with a successor (workflow retry, cron) is followed
+                # under follow_runs; otherwise the failure surfaces.
                 successor = failure.envelope.get("new_run_id")
                 if follow_runs and successor is not None:
                     dbos_id = successor
                     continue
-                # NOTE: `raise ... from X` overwrites __cause__, which the
-                # constructor just set — so the `from` target must be the
-                # cause itself.
+                # NOTE: `raise ... from X` overwrites __cause__ set by the
+                # constructor, so the `from` target must be the cause itself.
                 cause = deserialize_failure(failure.envelope)
                 raise WorkflowFailureError(cause=cause) from cause
             except DBOSAwaitedWorkflowCancelledError:
@@ -2139,12 +2089,8 @@ class WorkflowHandle:
         condition = (
             input.reject_condition or self._client._default_query_reject_condition
         )
-        # Read status once: it gates the reject_condition and decides whether the
-        # query needs a rehydrate replay (closed workflow). Read directly rather
-        # than via describe() so a describe_workflow interceptor is not invoked
-        # as a side effect of a query. (No server arbiter, DEVIATIONS D7 family:
-        # the status read and the query send are not atomic.) A missing run
-        # surfaces as a query failure, not a bare RuntimeError.
+        # Read status directly (not describe(), to skip its interceptor): gates
+        # reject_condition, picks the rehydrate path. DEVIATIONS start-policies.
         try:
             target = await self._target()
             raw = await self._client._status_of(target)
@@ -2178,21 +2124,15 @@ class WorkflowHandle:
             WorkflowExecutionStatus.FAILED,
             WorkflowExecutionStatus.CANCELED,
         ):
-            # Query on a closed workflow: rehydrate by replay — fork the run to
-            # reconstruct its final state, serve the query against it, discard
-            # the scratch run (resolves README deviation #2 / Temporal serving
-            # queries after completion). Requires a worker in this process (the
-            # fork executes locally and consults the in-process rehydrate guard).
+            # Query on a closed workflow: rehydrate by replay (fork, serve,
+            # discard). Requires a worker in this process to drive the fork.
             reply = await self._rehydrate_query(target, envelope, request_id, timeout)
         else:
-            # TERMINATED (native kill, only partial checkpoints), TIMED_OUT, and
-            # CONTINUED_AS_NEW cannot be faithfully replayed to reconstruct a
-            # queryable final state — fail clearly rather than spin up a fork
-            # that diverges (DEVIATIONS D27).
+            # TERMINATED/TIMED_OUT/CONTINUED_AS_NEW can't be faithfully replayed
+            # to a queryable final state — fail clearly (DEVIATIONS replay).
             raise WorkflowQueryFailedError(
                 f"cannot query a workflow in state {status.name}: rehydrate-by-"
-                "replay supports COMPLETED/FAILED/CANCELED runs only "
-                "(see DEVIATIONS D27)"
+                "replay supports COMPLETED/FAILED/CANCELED runs only"
             )
         if reply is None:
             raise WorkflowQueryFailedError(f"query did not complete within {timeout}s")
@@ -2222,22 +2162,17 @@ class WorkflowHandle:
                 scratch_handle, scratch_id, reply_key, timeout
             )
             if reply is None:
-                # The fork reached a terminal state without serving the query:
-                # the reconstruction diverged (the workflow's code changed since
-                # it ran), or no worker for this type is running in *this*
-                # process to drive the rehydrate (DEVIATIONS D27).
+                # Fork terminated without serving the query: it diverged (code
+                # changed) or no in-process worker drove it (DEVIATIONS replay).
                 raise WorkflowQueryFailedError(
                     "rehydrate-by-replay produced no query reply: the workflow's "
                     "code may have changed since it ran, or no worker for this "
-                    "type is running in the querying process (DEVIATIONS D27)"
+                    "type is running in the querying process"
                 )
             return reply
         finally:
-            # Stop the scratch run serving and wait for it to settle BEFORE
-            # unregistering the guard, so the guard stays active for the whole
-            # time the fork is executing — a fork that is still replaying must
-            # never run a real op past the horizon while unguarded. Cancel it if
-            # it overruns the settle window, then unregister and delete.
+            # Stop the scratch run and let it settle BEFORE unregistering the
+            # guard; cancel if it overruns the settle window, then delete.
             try:
                 await client.send_async(
                     scratch_id, inbox.rehydrate_stop_envelope(), inbox.INBOX_TOPIC
@@ -2258,9 +2193,8 @@ class WorkflowHandle:
                 pass
             _replay.unregister_guard(scratch_id)
             try:
-                # delete_children stays False: the rehydrated fork starts no
-                # real children (they replay from checkpoints), so it owns none
-                # — and we must never delete the source run's subtree.
+                # delete_children stays False: the fork owns no real children and
+                # we must never delete the source run's subtree.
                 await client.delete_workflow_async(scratch_id, delete_children=False)
             except Exception:  # noqa: BLE001 — cleanup is best-effort
                 logger.warning(
@@ -2348,9 +2282,8 @@ class WorkflowHandle:
             raise ValueError("Admitted wait stage not supported")
         update_id = input.update_id or str(uuid_mod.uuid4())
         timeout = input.rpc_timeout.total_seconds() if input.rpc_timeout else 60.0
-        # Built from the (post-interceptor) input, so interceptor modifications
-        # ride along whether the update is delivered atomically with a fresh
-        # start or sent to an already-running run.
+        # Built from the (post-interceptor) input, so modifications ride along on
+        # either path (atomic with a fresh start, or sent to a running run).
         envelope = inbox.update_envelope(
             input.update,
             await conversion.encode_values(input.args),
@@ -2359,9 +2292,8 @@ class WorkflowHandle:
         )
         op = input.with_start_op
         if op is not None:
-            # update-with-start: the start delivers the update — atomically in
-            # the enqueue transaction on a fresh run, or to the attached run
-            # under USE_EXISTING (see Client._start_workflow_impl).
+            # update-with-start: the start delivers the update (atomically on a
+            # fresh run, or to the attached run under USE_EXISTING).
             start_args = op._start_kwargs["args"]
             start_kwargs = {k: v for k, v in op._start_kwargs.items() if k != "args"}
             op._handle = await self._client.start_workflow(
@@ -2539,7 +2471,7 @@ class WorkflowHandle:
         :class:`WorkflowHistory`."""
         raise NotImplementedError(
             "dbosify has no Temporal event history; use "
-            "WorkflowHandle.fetch_history() for a DBOS-step-derived history"
+            "WorkflowHandle.fetch_history() instead"
         )
 
     async def cancel(
@@ -2554,7 +2486,7 @@ class WorkflowHandle:
         code runs and may still execute activities. The workflow may also
         swallow the cancel and complete normally. Raises if the targeted
         run is already closed (as in Temporal); the status check is
-        client-side, so a tiny race window remains (D7 family).
+        client-side, so a tiny race window remains (start-policies family).
         """
         _ignore_rpc_options("cancel", rpc_metadata, rpc_timeout)
         await self._client._impl.cancel_workflow(
@@ -2608,14 +2540,8 @@ class WorkflowHandle:
         if input.args or input.reason:
             logger.debug("terminate: reason/details are not stored")
         target = await self._target()
-        # Terminate must land on a LIVE run. Two hazards (Temporal's server
-        # handles both atomically): a DBOS cancel on a closed run would
-        # CLOBBER its recorded status (eating a continue-as-new marker), so
-        # closed targets raise instead; and a workflow hopping via
-        # continue-as-new mid-request must not escape, so after each cancel
-        # we follow any CAN-created successor (identified by its same-chain
-        # parent link — a reuse-created successor is a new logical
-        # execution and is left alone) and terminate it too.
+        # Terminate must land on a LIVE run (cancelling a closed one clobbers its
+        # status), following any continue-as-new successor and terminating it.
         bound = self._run_id is not None
         cancelled_any = False
         for _ in range(64):
@@ -2624,9 +2550,8 @@ class WorkflowHandle:
             if mapped == WorkflowExecutionStatus.CONTINUED_AS_NEW and (
                 not bound or cancelled_any
             ):
-                # Unbound terminates address the workflow: follow the hop.
-                # (A run-bound terminate on a closed run raises below, as in
-                # Temporal.)
+                # Unbound terminates address the workflow: follow the hop. (A
+                # run-bound terminate on a closed run raises below, as in Temporal.)
                 base, index = ids.parse_run(target)
                 target = ids.run_dbos_id(base, index + 1)
                 continue
@@ -2635,9 +2560,8 @@ class WorkflowHandle:
                     f"Workflow run already closed: {target!r} ({mapped.name})"
                 )
             await self._client._dbos_client.cancel_workflow_async(target)
-            # Termination runs no workflow code, so the close sweep never
-            # fires: apply the durably-recorded ParentClosePolicy of each
-            # child (recursively) from here.
+            # Termination runs no workflow code, so apply each child's durably-
+            # recorded ParentClosePolicy (recursively) from here.
             await self._client._apply_parent_close_policies(target, set())
             cancelled_any = True
             base, index = ids.parse_run(target)

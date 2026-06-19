@@ -1,8 +1,8 @@
 """Workflow-side interceptors, mirroring the workflow portion of
 ``temporalio.worker`` (``temporalio/worker/_interceptor.py``).
 
-This is the Phase-4 surface: workflow inbound/outbound interception. The
-classes are re-exported from :py:mod:`dbosify.worker` so user code
+Workflow inbound/outbound interception. The classes are re-exported from
+:py:mod:`dbosify.worker` so user code
 extends ``dbosify.worker.WorkflowInboundInterceptor`` /
 ``WorkflowOutboundInterceptor`` exactly as it would the ``temporalio.worker``
 ones. A worker interceptor advertises a workflow interceptor by overriding
@@ -23,13 +23,12 @@ The ``*Input`` dataclasses are copied field-for-field from the SDK (DESIGN
 inert. Annotations use our own types or ``Any`` (the parity test checks
 parameter names/kind/default/order, not annotations).
 
-Unlike the always-empty activity/client ``headers`` of Phase 3, these
-``headers`` carry a real value end-to-end: the run's headers reach
+These ``headers`` carry a real value end-to-end: the run's headers reach
 ``ExecuteWorkflowInput``; an inbound message's headers reach the matching
 ``Handle*Input``; and headers set on an outbound ``*Input`` propagate to the
 activity attempt / child run / signalled workflow (header-based context
-propagation — tracing, baggage — DEVIATIONS D24). Nexus interception is
-unsupported (corollary of D1) and intentionally absent.
+propagation — tracing, baggage). Nexus interception is
+unsupported (corollary of no-server) and intentionally absent.
 """
 
 from __future__ import annotations
@@ -79,7 +78,7 @@ class WorkflowInterceptorClassInput:
     """Input for :py:meth:`dbosify.worker.Interceptor.workflow_interceptor_class`.
 
     ``unsafe_extern_functions`` is carried for parity; dbosify has no
-    workflow sandbox (DEVIATIONS D3), so there is nothing to expose extern
+    workflow sandbox (DEVIATIONS dbos-native-management), so there is nothing to expose extern
     functions *into* — the mapping is inert.
     """
 
@@ -292,7 +291,7 @@ class WorkflowInboundInterceptor:
     async def handle_query(self, input: HandleQueryInput) -> Any:
         """Called to handle a query.
 
-        Queries are synchronous in dbosify (DEVIATIONS #11): the chain is
+        Queries are synchronous in dbosify: the chain is
         driven to completion without suspension, so an override must not
         ``await`` anything that would park the event loop.
         """

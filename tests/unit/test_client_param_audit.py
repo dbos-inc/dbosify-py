@@ -1,6 +1,6 @@
 """Accepted-parameter audit for ``Client`` (DESIGN §9), mirroring the Worker
 audit. Every parameter of ``temporalio.client.Client.connect`` / ``__init__`` is
-classified — honored, subsumed by the ``DBOSClient`` we wrap (D2), or a
+classified — honored, subsumed by the ``DBOSClient`` we wrap (connection-surface), or a
 fundamental deviation. Unlike the Worker, our ``Client`` has no ``**kwargs``
 catch-all, so a temporalio connection option we don't accept raises a loud
 ``TypeError`` rather than being silently swallowed; the audit asserts exactly
@@ -34,26 +34,24 @@ HONORED: Set[str] = {
 }
 
 # The connection itself — ``target_host`` is replaced by ``connect``'s
-# ``system_database_url``, ``service_client`` by the ``dbos_client`` the
-# constructor takes (D2).
+# ``system_database_url``, ``service_client`` by the ``dbos_client`` (connection-surface).
 DEVIATION: Set[str] = {"target_host", "service_client"}
 
 # Carried by the DBOSClient you pass, or with no analog (no Temporal server /
-# gRPC). Not accepted by our Client → passing one raises TypeError (never
-# silently ignored). Each with a defensible reason.
+# gRPC). Not accepted by our Client → passing one raises TypeError, with a reason.
 SUBSUMED: Dict[str, str] = {
-    "api_key": "no Temporal-server auth (D1)",
-    "plugins": "Client plugins not supported; use interceptors= (D24)",
-    "tls": "connection security is the DBOSClient's Postgres connection (D2)",
-    "retry_config": "gRPC RPC retry; no Temporal gRPC (D1)",
-    "keep_alive_config": "gRPC keep-alive; no Temporal gRPC (D1)",
-    "rpc_metadata": "gRPC call metadata; no Temporal gRPC (D1)",
-    "identity": "client identity is a Temporal-server visibility concept; no server (D1)",
-    "lazy": "the DBOSClient is built eagerly; no lazy gRPC connection (D2)",
-    "runtime": "telemetry/metrics runtime not provided (D33)",
-    "http_connect_proxy_config": "gRPC HTTP proxy; no Temporal gRPC (D1)",
-    "dns_load_balancing_config": "gRPC DNS load balancing; no Temporal gRPC (D1)",
-    "header_codec_behavior": "header codec application follows our interceptor model (D24)",
+    "api_key": "no Temporal-server auth (no-server)",
+    "plugins": "Client plugins not supported; use interceptors=",
+    "tls": "connection security is the DBOSClient's Postgres connection (connection-surface)",
+    "retry_config": "gRPC RPC retry; no Temporal gRPC (no-server)",
+    "keep_alive_config": "gRPC keep-alive; no Temporal gRPC (no-server)",
+    "rpc_metadata": "gRPC call metadata; no Temporal gRPC (no-server)",
+    "identity": "client identity is a Temporal-server visibility concept; no server (no-server)",
+    "lazy": "the DBOSClient is built eagerly; no lazy gRPC connection (connection-surface)",
+    "runtime": "telemetry/metrics runtime not provided (no-metrics)",
+    "http_connect_proxy_config": "gRPC HTTP proxy; no Temporal gRPC (no-server)",
+    "dns_load_balancing_config": "gRPC DNS load balancing; no Temporal gRPC (no-server)",
+    "header_codec_behavior": "header codec application follows our interceptor model",
 }
 
 
@@ -99,8 +97,7 @@ def test_honored_params_are_accepted() -> None:
 
 def test_unsupported_params_are_not_silently_accepted() -> None:
     # No **kwargs catch-all: every non-honored temporalio param is *not* a
-    # parameter on our Client, so passing one raises TypeError (loud) rather
-    # than being silently ignored.
+    # parameter on our Client, so passing one raises TypeError rather than ignoring it.
     ours = _our_client_params()
     silently_accepted = (DEVIATION | set(SUBSUMED)) & ours
     assert (

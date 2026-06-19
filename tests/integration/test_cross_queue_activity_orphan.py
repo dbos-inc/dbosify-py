@@ -45,9 +45,8 @@ def test_continue_as_new_cancels_pending_cross_queue_activity(tmp_path: Path) ->
         workflow_worker.start()
         try:
             activity_worker.wait_for_line("ACTIVITY_STARTED", timeout=90)
-            # Fixed: the CAN close cancels the activity within a few seconds.
-            # Orphaned (unfixed): the activity sleeps its full 60s and prints
-            # ACTIVITY_COMPLETED, so this 30s wait would time out.
+            # The CAN close cancels the activity within a few seconds (else it
+            # would sleep its full 60s and print ACTIVITY_COMPLETED, orphaned).
             activity_worker.wait_for_line("ACTIVITY_CANCELLED", timeout=30)
         finally:
             workflow_worker.terminate_and_wait()

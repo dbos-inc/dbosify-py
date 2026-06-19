@@ -1,6 +1,6 @@
 """Subprocess worker hosting the §4.3 exit-criteria workflows.
 
-Run as: python phase0_worker.py <mode> <workflow_id> [extra]
+Run as: python interpreter_recovery_worker.py <mode> <workflow_id> [extra]
 
 Modes (X-start launches and starts the workflow; X-resume launches and lets
 DBOS recovery re-execute it):

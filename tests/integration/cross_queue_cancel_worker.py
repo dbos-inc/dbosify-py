@@ -1,5 +1,5 @@
 """Subprocess worker for cross-queue activity *cancellation* tests
-(Phase 3, §6.1.2). The activity runs on a different worker than the workflow, so
+(§6.1.2). The activity runs on a different worker than the workflow, so
 cancellation must reach it cross-process: the interpreter sets a checkpointed
 cancel event, the activity's attempt step polls it on the other worker and
 delivers an ``asyncio.CancelledError`` into the (async) activity.
@@ -41,9 +41,8 @@ async def cancellable_activity() -> str:
     except asyncio.CancelledError:
         with open(path, "a") as f:
             f.write("cancelled\n")
-        # Announce the cross-process cleanup so a TRY_CANCEL test (whose workflow
-        # resolves without waiting for this worker) can synchronize on it before
-        # tearing the worker down.
+        # Announce cleanup so a TRY_CANCEL test (whose workflow resolves without
+        # waiting for this worker) can synchronize before tearing it down.
         print("ACTIVITY_CANCELLED", flush=True)
         raise
 
@@ -65,11 +64,8 @@ class CancelCrossQueueWorkflow:
         if cancel_when == "delayed":
             # Give the activity time to start on its worker, then cancel it.
             await workflow.sleep(3)
-        # "immediate": cancel before the cross-queue dispatch has even committed
-        # (no awaiting boundary between start and cancel) — the cancel-before-
-        # dispatch path. It must still take effect rather than being dropped:
-        # TRY_CANCEL retires the never-dispatched activity; WAIT_CANCELLATION_
-        # COMPLETED is signalled across to the worker at dispatch time.
+        # "immediate": cancel before dispatch commits. TRY_CANCEL retires the
+        # never-dispatched activity; WAIT_CANCELLATION_COMPLETED signals across.
         handle.cancel()
         try:
             await handle

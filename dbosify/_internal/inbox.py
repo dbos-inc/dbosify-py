@@ -22,8 +22,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 INBOX_TOPIC = "__dbosify_inbox"
 
 # The topic a queued activity workflow parks on for external completion
-# (raise_complete_async on the cross-queue path, §6.1.2): AsyncActivityHandle
-# sends the completion envelope here, addressed to the activity workflow id.
+# (raise_complete_async, §6.1.2): AsyncActivityHandle sends the envelope here.
 ASYNC_COMPLETE_TOPIC = "__dbosify_async_complete"
 
 # recv timeout per wait; on (checkpointed, deterministic) timeout the
@@ -136,10 +135,8 @@ def query_envelope(
     }
 
 
-# Durable registry of a workflow's children and their ParentClosePolicy:
-# [{"id": child_id, "policy": int}, ...]. Written (checkpointed set_event) as
-# children start, so parent-close policies survive the parent — including
-# termination, where no workflow code runs and the *client* applies them.
+# Durable registry of a workflow's children and their ParentClosePolicy, written as
+# children start so the policies survive the parent (including client-applied termination).
 CHILDREN_EVENT_KEY = "__dbosify_children"
 
 

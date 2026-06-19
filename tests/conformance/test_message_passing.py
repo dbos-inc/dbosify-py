@@ -1,14 +1,10 @@
-"""Conformance: the samples-python ``message_passing/`` corpus — the
-Phase 2 exit gate (DESIGN §9).
+"""Conformance: the samples-python ``message_passing/`` corpus (DESIGN §9).
 
 Unlike ``hello/``, these are multi-file packages run as two processes: a
 worker (runs until interrupted) and a starter (drives the workflow and
 prints results). The harness rewrites the whole package tree, launches the
 worker via the runner in module mode, waits for its ready line, runs the
 starter to completion, and asserts on the starter's output.
-
-The xfail reasons are the Phase 2 round-out worklist, in corpus-priority
-order.
 """
 
 import os

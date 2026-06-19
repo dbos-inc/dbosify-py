@@ -1,8 +1,7 @@
-"""Subprocess worker for Phase 1 recovery tests, written entirely against
-the public API (Client.connect + Worker), the way a real Temporal worker
-process is.
+"""Subprocess worker for recovery tests, written entirely against the public
+API (Client.connect + Worker), the way a real Temporal worker process is.
 
-Run as: python phase1_worker.py <start|resume> <workflow_id>
+Run as: python client_recovery_worker.py <start|resume> <workflow_id>
 """
 
 import asyncio
@@ -18,7 +17,7 @@ from dbosify.client import Client
 from dbosify.worker import Worker
 from tests.dbconfig import default_config, system_database_url
 
-TASK_QUEUE = "phase1-recovery-tq"
+TASK_QUEUE = "client-recovery-tq"
 
 
 @activity.defn

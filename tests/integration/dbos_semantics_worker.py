@@ -53,10 +53,8 @@ CHAOS_STEPS = {
 
 @DBOS.workflow()
 async def chaos_workflow(effects_path: str) -> dict[str, Any]:
-    # Launch four steps whose completion order (d, b, c, a) differs from
-    # launch order, then race them in FIRST_COMPLETED rounds, chaining a
-    # follow-up step after each initial step completes — the interpreter's
-    # event-loop pattern.
+    # Launch four steps (completion order differs from launch order), race them
+    # in FIRST_COMPLETED rounds, chaining a follow-up after each completes.
     pending: list[asyncio.Task[str]] = []
     names: dict[asyncio.Task[str], str] = {}
 

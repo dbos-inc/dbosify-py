@@ -3,17 +3,17 @@
 Worker is constructed from a ``dbos.DBOSConfig`` and owns the process's DBOS
 lifecycle outright.
 
-Exactly **one Worker per process** is supported for now: DBOS's launchable
+Exactly **one Worker per process** is supported: DBOS's launchable
 runtime (queue listeners, notification listener, recovery) is process-global,
 so multiple in-process Workers would share lifecycle and registrations in
-ways that diverge from Temporal's worker-isolation model (see README
-deviations). One worker per process is also the dominant production layout.
+ways that diverge from Temporal's worker-isolation model. One worker per
+process is also the dominant production layout.
 
 ``await worker.run()`` launches DBOS — recovering this executor's pending
 workflows, mirroring Temporal worker restart semantics — and blocks until
 ``shutdown()``. ``async with`` is supported and is what tests use constantly.
 
-Parameter mapping onto DBOS (DEVIATIONS D34): ``max_concurrent_workflow_tasks``
+Parameter mapping onto DBOS: ``max_concurrent_workflow_tasks``
 -> the workflow task queue's ``worker_concurrency``; ``max_concurrent_activities``
 / ``max_concurrent_local_activities`` -> a per-process semaphore around activity
 execution (and the activity queue's ``worker_concurrency`` for an activities-only
@@ -102,30 +102,17 @@ __all__ = [
 
 logger = logging.getLogger("dbosify.worker")
 
-# A stable default DBOS application version. DBOS scopes workflow recovery and
-# queue dequeuing by ``application_version`` and otherwise auto-computes it from
-# a hash of the registered code — so any code change would change the version
-# and strand every in-flight workflow under the old one (a new-code worker never
-# recovers or re-dequeues it), cooperating workers that register different
-# function sets (e.g. a workflow worker and an activity-only worker) would never
-# share a version, and ``workflow.patched()`` — whose whole purpose is to let
-# redeployed code keep serving pre-patch runs — would never reach those runs.
-# Pinning a constant makes all workers agree by default and deploys preserve
-# in-flight work; a genuinely incompatible change then surfaces as a replay
-# ``NondeterminismError`` (the same contract as Temporal, managed with
-# ``workflow.patched()``). See DESIGN §6.8 / DEVIATIONS D28. Distinct apps
-# sharing one database should set ``application_version`` explicitly to keep
-# their versions apart.
+# A stable default DBOS application version. Pinning a constant (vs DBOS's code-hash
+# auto-version) lets workers agree and deploys preserve in-flight work (DESIGN §6.8).
 DEFAULT_APP_VERSION = "0.1"
 
-# Worker options that are behavior-changing AND unsupported: passing them (a
-# non-default value) raises rather than silently no-ops. arg name -> hint. They
-# arrive via the ``**unsupported`` catch-all (not explicit params).
+# Behavior-changing AND unsupported options: passing a non-default value raises
+# rather than silently no-ops. arg name -> hint; arrive via ``**unsupported``.
 _REJECTED_OPTIONS = {
     "nexus_service_handlers": "Nexus is not supported (DESIGN §1)",
     "tuner": "resource-based slot tuning has no DBOS analog; use "
-    "max_concurrent_workflow_tasks / max_concurrent_activities (DEVIATIONS D34)",
-    "plugins": "Worker plugins are not supported; use interceptors= (DEVIATIONS D24)",
+    "max_concurrent_workflow_tasks / max_concurrent_activities",
+    "plugins": "Worker plugins are not supported; use interceptors=",
 }
 
 # The one live Worker in this process (see module docstring).
@@ -177,7 +164,7 @@ class WorkerDeploymentConfig:
     The ``version.build_id`` becomes the DBOS ``application_version``, which DBOS
     uses to pin workflow recovery/dequeue — i.e. Temporal's PINNED behavior,
     enforced. ``default_versioning_behavior`` / ``use_worker_versioning`` are
-    accepted for parity; AUTO_UPGRADE has no DBOS analog (DEVIATIONS D29).
+    accepted for parity; AUTO_UPGRADE has no DBOS analog (DEVIATIONS worker-versioning).
     """
 
     version: WorkerDeploymentVersion
@@ -227,7 +214,7 @@ class Worker:
         and continued only on workers of its build ID. That pinning *is*
         Temporal's PINNED versioning behavior, enforced. What DBOS has no analog
         for is AUTO_UPGRADE (moving a running workflow to a newer version) and
-        the cluster routing-fleet / ramping concepts; see DEVIATIONS D29.
+        the cluster routing-fleet / ramping concepts; see DEVIATIONS worker-versioning.
         ``use_worker_versioning`` is accepted for parity. When neither build_id
         nor deployment_config is given, the deployment version is derived from
         the DBOS application name + application_version.
@@ -237,8 +224,7 @@ class Worker:
             raise ValueError("task_queue must be a non-empty string")
         if _live_worker is not None:
             raise RuntimeError(
-                "Only one Worker per process is supported (an existing "
-                "Worker owns this process's DBOS runtime)"
+                "Only one Worker per process is supported; one already exists"
             )
         if not workflows and not activities:
             raise ValueError("At least one workflow and/or activity must be specified")
@@ -257,8 +243,7 @@ class Worker:
                 "build_id must be specified when use_worker_versioning is True"
             )
         # Behavior-changing options we can't fulfil are *rejected*, not silently
-        # ignored (the accepted-param audit's whole point — DEVIATIONS D34): a
-        # user passing these expects an effect we can't deliver.
+        # ignored: a user passing these expects an effect we can't deliver.
         for key, hint in _REJECTED_OPTIONS.items():
             if unsupported.get(key):
                 raise NotImplementedError(
@@ -277,35 +262,28 @@ class Worker:
         self._namespace = namespace
         self._max_concurrent_workflow_tasks = max_concurrent_workflow_tasks
         self._graceful_shutdown_timeout = graceful_shutdown_timeout
-        # Activity concurrency cap: max_concurrent_activities, else (an
-        # activities-only worker that set only) max_concurrent_local_activities.
-        # In our model regular and local activities both run as steps, sharing
-        # one cap (DEVIATIONS D34).
+        # Activity concurrency cap: max_concurrent_activities, else
+        # max_concurrent_local_activities (both kinds run as steps, sharing one cap).
         self._activity_concurrency = (
             max_concurrent_activities
             if max_concurrent_activities is not None
             else max_concurrent_local_activities
         )
-        # Whether the worker dequeues activities (vs. only workflows) — its task
-        # queue carries __temporal_activity items, so its worker_concurrency is
-        # the activity cap rather than the workflow-task cap.
+        # Whether the worker dequeues activities (vs. only workflows): its
+        # worker_concurrency is then the activity cap, not the workflow-task cap.
         self._activities_only = bool(activities) and not workflows
-        # Activity rate limit → DBOS queue limiter. DBOS's limiter is queue-wide,
-        # so the task-queue-wide knob maps exactly; the per-worker knob is applied
-        # as a queue-wide approximation when it's the only one set (D34).
+        # Activity rate limit → DBOS queue limiter (queue-wide): the task-queue
+        # knob maps exactly; the per-worker knob is a queue-wide approximation.
         self._activity_rate_per_second = (
             max_task_queue_activities_per_second
             if max_task_queue_activities_per_second is not None
             else max_activities_per_second
         )
-        # The interpreter (in this process) decodes run args / encodes results
-        # with this converter; configure the Client the same.
+        # The interpreter decodes run args / encodes results with this
+        # converter; configure the Client the same.
         conversion.set_converter(data_converter)
-        # The namespace owns the DBOS system schema (DEVIATIONS D1): this
-        # process serves one namespace, and its workflows live in that schema —
-        # isolated from other namespaces. The Worker owns the runtime, so it
-        # sets the schema; a conflicting explicit dbos_system_schema is an error
-        # (configure the namespace, not the schema).
+        # The namespace owns the DBOS system schema (DEVIATIONS no-server); a
+        # conflicting explicit dbos_system_schema is an error.
         schema = namespace_schema(namespace)
         configured_schema = config.get("dbos_system_schema")
         if configured_schema is not None and configured_schema != schema:
@@ -321,18 +299,12 @@ class Worker:
             "serializer": TEMPORAL_SERIALIZER,
             "dbos_system_schema": schema,
         }
-        # Worker identity → DBOS executor_id (surfaced in DBOS views / list
-        # filters). Note: executor_id also *scopes recovery* in DBOS (D6), so a
-        # custom identity should be stable per fleet, not unique per process.
+        # Worker identity → DBOS executor_id, which also *scopes recovery*
+        # (failover): a custom identity should be stable per fleet, not per process.
         if identity is not None:
             config = {**config, "executor_id": identity}
         # An explicit build_id / deployment_config IS the DBOS application_version
-        # (build IDs map to DBOS versions, DEVIATIONS D29): DBOS scopes both
-        # workflow recovery and queue dequeue to application_version, so setting
-        # it here makes the requested build ID the version DBOS actually pins to
-        # — that pinning *is* Temporal's PINNED behavior, enforced. Without an
-        # explicit build, pin a stable default so redeploys don't strand in-flight
-        # workflows and workflow.patched() reaches pre-patch runs (DEFAULT_APP_VERSION).
+        # (DEVIATIONS worker-versioning); without one, pin DEFAULT_APP_VERSION.
         explicit_build = (
             deployment_config.version.build_id
             if deployment_config is not None
@@ -341,36 +313,28 @@ class Worker:
         if explicit_build is not None:
             if not explicit_build:
                 raise ValueError("build_id must be a non-empty string")
-            # A build id IS the DBOS application_version, so a build id alongside
-            # *any* explicitly-set application_version (including ``None`` to opt
-            # into auto-versioning) is contradictory — check key presence, not
-            # just a non-None value, so the auto-versioning combo is caught too.
+            # A build id IS the application_version, so an explicitly-set
+            # application_version is contradictory (check key presence to catch ``None``).
             if (
                 "application_version" in config
                 and config["application_version"] != explicit_build
             ):
                 raise ValueError(
-                    f"build id {explicit_build!r} (from build_id/deployment_config) "
-                    f"conflicts with the application_version "
-                    f"{config['application_version']!r} already set in the "
-                    "DBOSConfig (a build id IS the DBOS application_version); set "
-                    "only one"
+                    f"build id {explicit_build!r} conflicts with the DBOSConfig "
+                    f"application_version {config['application_version']!r}; set only one"
                 )
             config = {**config, "application_version": explicit_build}
         config = _with_default_app_version(config)
         DBOS(config=config)
-        # Deployment name surfaced via workflow.Info.get_current_deployment_version():
-        # the explicit deployment_config name, else the DBOS app name. The build_id
-        # half is read live from the DBOS application_version at access time, so the
-        # surfaced version always equals the one DBOS enforces (DEVIATIONS D29).
+        # Deployment name surfaced via get_current_deployment_version(): the
+        # explicit deployment_config name, else the DBOS app name.
         _registry.set_worker_deployment_name(
             deployment_config.version.deployment_name
             if deployment_config is not None
             else config.get("name", "")
         )
-        # Arm activity worker-lifecycle state (activity.is_worker_shutdown(),
-        # activity.client()) for this run, with the activity concurrency cap and
-        # sync-activity executor.
+        # Arm activity worker-lifecycle state (is_worker_shutdown(), client())
+        # for this run, with the concurrency cap and sync-activity executor.
         _activity._on_worker_start(
             config,
             activity_concurrency=self._activity_concurrency,
@@ -384,10 +348,8 @@ class Worker:
             task_queue=task_queue,
             namespace=namespace,
         )
-        # The task queue is a database-backed DBOS queue; this process
-        # dequeues only from its declared listen set (plus DBOS's internal
-        # queue). The queue itself is registered in run(), after launch,
-        # since persisting its config needs the system database.
+        # The task queue is a database-backed DBOS queue; this process dequeues
+        # only from its listen set. It's registered in run(), since config needs the DB.
         DBOS.listen_queues([task_queue])
         self._shutdown_event: Optional["asyncio.Event"] = None
         self._run_task: Optional["asyncio.Task[None]"] = None
@@ -427,22 +389,14 @@ class Worker:
         if self._finished:
             raise RuntimeError("Worker already shut down; create a new one")
         self._shutdown_event = asyncio.Event()
-        # DBOS launched with a running loop adopts it: workflow coroutines
-        # and our own DBOS async calls all run here, and every DBOS async
-        # API installs DBOS's thread pool as this loop's *default executor*
-        # — which destroy() shuts down without restoring. Capture the
-        # original so the loop's asyncio.to_thread still works after the
-        # worker exits.
+        # DBOS adopts the running loop, installing its thread pool as the *default
+        # executor*. Capture the original so asyncio.to_thread works after exit.
         loop = asyncio.get_running_loop()
         original_executor = getattr(loop, "_default_executor", None)
         DBOS.launch()
         try:
-            # Persist this worker's queue configuration. The default
-            # conflict policy (update_if_latest_version) keeps an older
-            # worker in a rolling deploy from clobbering newer queue config.
-            # An activities-only worker dequeues __temporal_activity items, so
-            # its per-worker concurrency is the activity cap; a workflow worker's
-            # is the workflow-task cap.
+            # Persist this worker's queue config. Per-worker concurrency is the
+            # activity cap for an activities-only worker, else the workflow-task cap.
             worker_concurrency = (
                 self._activity_concurrency
                 if self._activities_only
@@ -456,29 +410,15 @@ class Worker:
             await self._shutdown_event.wait()
         except Exception as exc:
             # Surface an unrecoverable worker error to on_fatal_error before it
-            # propagates (the teardown finally still runs). A normal shutdown
-            # returns from wait() without raising, so the callback never fires;
-            # cancellation (a BaseException) is excluded.
+            # propagates. Normal shutdown / cancellation don't fire the callback.
             if self._on_fatal_error is not None:
                 await self._on_fatal_error(exc)
             raise
         finally:
             self._shutdown_event = None
             self._finished = True
-            # TODO(dbos-destroy-deadlock): remove the dedicated-thread dance
-            # below (run destroy() inline) once DBOS.destroy no longer
-            # self-deadlocks when called from its adopted main loop. Not yet
-            # filed upstream — needs a minimal repro first; track here until
-            # there is an issue/PR number to reference.
-            # destroy() must not run ON the loop DBOS adopted: when any
-            # workflow-timeout task is still pending (every run_timeout
-            # workflow parks one until its deadline), destroy submits a
-            # cancellation coroutine to the main loop and blocks on its
-            # result — a self-deadlock if called from that loop. Run it on
-            # a dedicated thread so the loop stays free to execute the
-            # cancellation. A fresh single-use thread, not asyncio.to_thread:
-            # the loop's default executor is DBOS's own pool, which destroy
-            # shuts down.
+            # destroy() can't run on DBOS's adopted loop (self-deadlock); run it on a fresh thread.
+            # TODO(dbos-destroy-deadlock): drop this once DBOS.destroy no longer self-deadlocks.
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="dbosify-worker-shutdown"
             ) as shutdown_pool:
@@ -490,10 +430,8 @@ class Worker:
                         )
                     ),
                 )
-                # Detach the activity client only AFTER the graceful drain above,
-                # so an activity reacting to shutdown could still use
-                # activity.client() while draining; dispose it off the loop
-                # (destroy() does blocking pool I/O), reusing this thread.
+                # Detach the activity client only AFTER the graceful drain, so a
+                # draining activity could still use client(); dispose it off the loop.
                 detached_client = _activity._teardown_worker_state()
                 if detached_client is not None:
                     await loop.run_in_executor(
@@ -512,10 +450,8 @@ class Worker:
 
     async def shutdown(self) -> None:
         """Initiate shutdown and wait for :py:meth:`run` to return."""
-        # Trip activity worker-lifecycle observers (is_worker_shutdown() /
-        # wait_for_worker_shutdown*) NOW, so draining activities can observe it;
-        # the activity client is torn down later, after the graceful drain in
-        # run()'s finally, so it stays usable while activities wind down.
+        # Trip activity worker-lifecycle observers NOW so draining activities see
+        # it; the client is torn down later so it stays usable while they wind down.
         _activity._signal_worker_shutdown()
         if self._shutdown_event is not None:
             self._shutdown_event.set()

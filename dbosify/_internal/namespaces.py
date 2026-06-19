@@ -1,4 +1,4 @@
-"""Temporal namespaces backed by DBOS system schemas (DEVIATIONS D1).
+"""Temporal namespaces backed by DBOS system schemas (DEVIATIONS no-server).
 
 Each Temporal namespace maps to its own Postgres schema holding the DBOS
 system tables (``dbos_system_schema``), so workflows in different namespaces
@@ -21,18 +21,15 @@ from typing import Optional
 # Default namespace, matching Temporal.
 DEFAULT_NAMESPACE = "default"
 
-# Every namespace's schema is ``dbosify_<namespace>`` (no namespace is
-# privileged — ``default`` maps to ``dbosify_default``, not the bare ``dbos``
-# schema). The prefix keeps namespace schemas clear of DBOS's own ``dbos``
-# schema and of reserved words (e.g. ``default``).
+# Every namespace's schema is ``dbosify_<namespace>`` (``default`` maps to
+# ``dbosify_default``); the prefix keeps these clear of DBOS's own ``dbos`` schema.
 _SCHEMA_PREFIX = "dbosify_"
 
 # Postgres identifiers are capped at 63 bytes; reserve room for the prefix.
 _MAX_NAMESPACE_LEN = 63 - len(_SCHEMA_PREFIX)
 
 # A namespace must be a plain lowercase identifier so it maps to an unambiguous,
-# unquoted Postgres schema (case-folding and quoting hazards avoided). Temporal
-# namespace names are typically already this shape.
+# unquoted Postgres schema (avoiding case-folding and quoting hazards).
 _NAMESPACE_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 
 
@@ -45,10 +42,8 @@ def namespace_schema(namespace: str) -> str:
     """
     if not _NAMESPACE_RE.match(namespace) or len(namespace) > _MAX_NAMESPACE_LEN:
         raise ValueError(
-            f"namespace {namespace!r} cannot back a Postgres schema: a namespace "
-            f"must match [a-z_][a-z0-9_]* and be at most {_MAX_NAMESPACE_LEN} "
-            "characters (each namespace maps to its own DBOS system schema "
-            f"{_SCHEMA_PREFIX}<namespace>)"
+            f"namespace {namespace!r} cannot back a Postgres schema: it must match "
+            f"[a-z_][a-z0-9_]* and be at most {_MAX_NAMESPACE_LEN} characters"
         )
     return f"{_SCHEMA_PREFIX}{namespace}"
 
@@ -68,7 +63,7 @@ def namespace_from_schema(schema: Optional[str]) -> str:
             return namespace
     raise ValueError(
         f"DBOS system schema {schema!r} is not a temporal namespace schema "
-        f"({_SCHEMA_PREFIX}<namespace>); build the DBOSClient with "
-        "dbos_system_schema=namespace_schema(<namespace>), or use "
-        "Client.connect(system_database_url, namespace=...) which does it for you"
+        f"({_SCHEMA_PREFIX}<namespace>); use Client.connect(system_database_url, "
+        "namespace=...) or build the DBOSClient with "
+        "dbos_system_schema=namespace_schema(<namespace>)"
     )

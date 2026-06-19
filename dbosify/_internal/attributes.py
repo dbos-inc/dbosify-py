@@ -49,9 +49,8 @@ def _sa_value_to_json(key: SearchAttributeKey[Any], value: Any) -> Any:
     """Flatten a typed search-attribute value to a JSON scalar."""
     t = key.indexed_value_type
     if t == SearchAttributeIndexedValueType.DATETIME:
-        # A real check, not an assert (which `python -O` strips). Timezone is
-        # required — like temporalio, naive datetimes are rejected rather than
-        # stored as offset-less strings the JSONB index can't compare.
+        # A real check, not an assert (which `python -O` strips). Timezone is required
+        # — like temporalio, naive datetimes are rejected so the JSONB index can compare.
         if not isinstance(value, datetime):
             raise TypeError(
                 f"Search attribute {key.name!r} expects a datetime, "
@@ -110,9 +109,8 @@ def encode_search_attributes(attrs: SearchAttributeInput) -> Dict[str, Any]:
 def decode_search_attributes(stored: Mapping[str, Any]) -> TypedSearchAttributes:
     pairs: List[SearchAttributePair[Any]] = []
     for name, entry in stored.items():
-        # Skip malformed entries rather than failing the whole decode (which
-        # backs describe() and run-start): a single bad/externally-written key
-        # must not take down recovery or every describe() for the workflow.
+        # Skip malformed entries rather than failing the whole decode: a single
+        # bad/externally-written key must not take down recovery or describe().
         if not isinstance(entry, dict) or "t" not in entry or "v" not in entry:
             continue
         key = SearchAttributeKey._from_metadata_type(name, str(entry["t"]))

@@ -1,4 +1,4 @@
-"""Stage 2 (data conversion): workflow run arguments flow through the
+"""Data conversion: workflow run arguments flow through the
 DataConverter.
 
 The crux: a typed run signature rebuilds the original Python type from the
@@ -86,10 +86,8 @@ class DefaultArgWorkflow:
         req: GreetRequest,
         extra: GreetRequest = GreetRequest(greeting="def", name="ault"),
     ) -> str:
-        # The run signature has two typed params but is called with one arg.
-        # Regression: a whole-list arity check would drop *all* hints, so the
-        # provided arg would arrive as a plain dict; per-position slicing keeps
-        # the hint for the arg that *is* present (extra uses its default).
+        # Two typed params called with one arg: per-position slicing keeps the
+        # hint for the arg present (extra uses its default).
         assert isinstance(req, GreetRequest)
         assert isinstance(extra, GreetRequest)
         return f"{req.greeting} {extra.name}"
@@ -103,9 +101,8 @@ async def transform(req: GreetRequest) -> GreetRequest:
 
 @activity.defn
 async def make_greeting() -> dict:  # type: ignore[type-arg]
-    # Annotated to return a bare dict: the registry's return type would *not*
-    # reconstruct a GreetRequest. Only an explicit execute_activity(result_type=)
-    # override does.
+    # Annotated to return a bare dict: only an explicit
+    # execute_activity(result_type=) override reconstructs a GreetRequest.
     return {"greeting": "Hi", "name": "Ovr"}
 
 
@@ -189,7 +186,7 @@ async def test_untyped_arg_is_plain_dict() -> None:
             id="untyped-arg",
             task_queue=TASK_QUEUE,
         )
-    # Without a type hint the dataclass round-trips as a dict (deviation #12).
+    # Without a type hint the dataclass round-trips as a dict.
     assert result == "dict"
 
 
@@ -236,9 +233,8 @@ async def test_typed_update_and_query_results() -> None:
 
 
 async def test_default_valued_arg_keeps_per_position_hint() -> None:
-    # Called with one arg against a two-typed-param signature: the provided
-    # arg must still be reconstructed (the second param falls back to its
-    # default). Guards the per-position hint slice in decode_values.
+    # Called with one arg against a two-typed-param signature: the provided arg
+    # is still reconstructed (the second param falls back to its default).
     async with _env() as client:
         result = await client.execute_workflow(
             DefaultArgWorkflow.run,
@@ -251,8 +247,7 @@ async def test_default_valued_arg_keeps_per_position_hint() -> None:
 
 async def test_execute_activity_result_type_override() -> None:
     # execute_activity(result_type=GreetRequest) reconstructs the activity's
-    # bare-dict result into the requested type, overriding the registry's
-    # `-> dict` return annotation.
+    # bare-dict result, overriding the registry's `-> dict` return annotation.
     async with _env() as client:
         result = await client.execute_workflow(
             ResultTypeOverrideWorkflow.run,

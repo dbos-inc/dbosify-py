@@ -11,7 +11,7 @@ them, but they are invaluable for fast tests and cost nothing to support.
 expressions) down to a single cron string + timezone for ``DBOS.create_schedule``.
 Interval periods that don't divide a cron boundary evenly, calendar fields
 beyond cron's expressiveness, and interval offsets are approximated with a
-logged deviation (DEVIATIONS D22).
+logged deviation (DEVIATIONS schedules).
 """
 
 import logging
@@ -84,8 +84,7 @@ def interval_to_cron(every: timedelta, offset: Optional[timedelta] = None) -> st
         raise ValueError("ScheduleIntervalSpec.every must be positive")
     if offset is not None and offset.total_seconds():
         logger.debug(
-            "schedule interval offset %s is not representable in cron; ignored "
-            "(DEVIATIONS D22)",
+            "schedule interval offset %s is not representable in cron; ignored",
             offset,
         )
     secs = int(round(total))
@@ -118,7 +117,7 @@ def interval_to_cron(every: timedelta, offset: Optional[timedelta] = None) -> st
 def _approx(every: timedelta) -> None:
     logger.debug(
         "schedule interval every=%s does not divide a cron boundary evenly; "
-        "approximated to the nearest cron expression (DEVIATIONS D22)",
+        "approximated to the nearest cron expression",
         every,
     )
 
@@ -138,12 +137,12 @@ def calendar_to_cron(
 
     Emits a 6-field (seconds-first) expression when any second range is
     non-default, else 5-field. The ``year`` field has no cron equivalent and
-    is dropped with a deviation when constraining (DEVIATIONS D22).
+    is dropped with a deviation when constraining (DEVIATIONS schedules).
     """
     if year:
         logger.debug(
             "schedule calendar year constraint is not representable in cron; "
-            "ignored (DEVIATIONS D22)",
+            "ignored",
         )
     sec_field = _ranges_to_field(second, 0, 59)
     fields: List[str] = [

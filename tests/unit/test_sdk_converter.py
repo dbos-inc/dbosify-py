@@ -275,8 +275,7 @@ class MyTypedDictNotTotal(TypedDict, total=False):
 
 
 # Sentinel for "no explicit expected result" in the json-type-hints helper.
-# Adapted: temporalio uses temporalio.common._arg_unset, which has no analog
-# here; a local sentinel object serves the same purpose.
+# Adapted: a local sentinel stands in for temporalio.common._arg_unset.
 _arg_unset = object()
 
 
@@ -379,9 +378,8 @@ def test_json_type_hints() -> None:
         MyTypedDict,
         MyTypedDict(foo="somestr", bar=MyDataClass("foo", 5, SerializableEnum.FOO)),
     )
-    # TypedDict allows all sorts of dicts, even if they are missing required
-    # fields or have unknown fields. This matches Python runtime behavior of
-    # just accepting any dict.
+    # TypedDict allows all sorts of dicts, even missing-required/unknown fields,
+    # matching Python runtime behavior of just accepting any dict.
     ok(MyTypedDictNotTotal, {"foo": "bar"})
     ok(MyTypedDict, {"foo": "bar", "blah": "meh"})
 
@@ -447,10 +445,8 @@ async def test_exception_format() -> None:
         actual_err = err
     assert actual_err
 
-    # Convert to failure and back.
-    # Adapted: our encode_failure(exc) returns the Failure envelope (a dict)
-    # rather than mutating a passed-in protobuf Failure; decode_failure takes
-    # that envelope.
+    # Convert to failure and back. Adapted: encode_failure(exc) returns the
+    # Failure envelope (a dict) that decode_failure takes.
     failure = await DataConverter.default.encode_failure(actual_err)
     failure_error = await DataConverter.default.decode_failure(failure)
     # Confirm type is prepended

@@ -1,4 +1,4 @@
-"""Namespaces backed by DBOS schemas (DEVIATIONS D1): a Worker/Client pair runs
+"""Namespaces backed by DBOS schemas (DEVIATIONS no-server): a Worker/Client pair runs
 in a namespace's own schema, and clients for different namespaces coexist in one
 process (per-engine schema isolation). The low-level constructor's rejection of
 a non-namespace schema is unit-tested in tests/unit/test_namespaces.py."""
@@ -59,11 +59,8 @@ async def test_workflow_runs_in_named_namespace() -> None:
 
 
 async def test_clients_for_different_namespaces_coexist() -> None:
-    # Run the same workflow id in two namespaces (workers are one per process,
-    # so in turn, fully resetting between), then read both back through two
-    # clients that are LIVE at the same time. Pre-#728 the second client's
-    # schema clobbered the first's process-wide; now each engine isolates its
-    # own schema, so each client reads its own namespace.
+    # Run one workflow id in two namespaces, then read both back through two live
+    # clients: each engine isolates its schema, so neither client clobbers the other.
     wf_id = "shared-wf"
     for namespace in ("alpha", "beta"):
         worker = Worker(

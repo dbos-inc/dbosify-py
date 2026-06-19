@@ -69,8 +69,7 @@ class QueryPatchWorkflow:
     @workflow.query
     def is_patched(self) -> bool:
         # Illegal: patched() mutates durable state (records a marker), so it
-        # cannot run in the read-only query context (mirrors temporalio, which
-        # raises ReadOnlyContextError).
+        # cannot run in the read-only query context (raises ReadOnlyContextError).
         return workflow.patched("v2")
 
     @workflow.run

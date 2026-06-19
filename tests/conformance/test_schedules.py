@@ -1,5 +1,4 @@
-"""Conformance: the samples-python ``schedules/`` corpus — part of the Phase 3
-exit gate (DESIGN §9).
+"""Conformance: the samples-python ``schedules/`` corpus (DESIGN §9).
 
 Unlike ``hello/`` and ``message_passing/``, this corpus is a long-running
 worker (``run_worker.py``) plus a series of independent operation scripts

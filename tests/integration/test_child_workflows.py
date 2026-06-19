@@ -28,7 +28,7 @@ from tests.dbconfig import default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
-TASK_QUEUE = "phase2-child-tq"
+TASK_QUEUE = "child-tq"
 
 
 @activity.defn
@@ -261,7 +261,7 @@ class TimeoutParent:
             return "no-timeout"
         except ChildWorkflowError as err:
             # run_timeout natively cancels the child → TERMINATED in our scheme
-            # (D19), surfaced to the parent as a terminated child.
+            # (cron-chains), surfaced to the parent as a terminated child.
             return f"timed-out:{type(err.cause).__name__}"
 
 
@@ -339,7 +339,7 @@ async def test_parent_child_result_and_default_id() -> None:
             ParentWorkflow.run, "World", id="parent-basic", task_queue=TASK_QUEUE
         )
         assert result == "Hello, World!"
-        # Default child id: {parent_dbos_id}_{seq} (README deviation #5).
+        # Default child id: {parent_dbos_id}_{seq}.
         child = client.get_workflow_handle("parent-basic_1")
         description = await child.describe()
         assert description.status == WorkflowExecutionStatus.COMPLETED
@@ -369,9 +369,8 @@ async def test_parent_signals_child() -> None:
 
 
 async def test_child_retry_policy_honored() -> None:
-    # The child fails twice and succeeds on attempt 3. The parent receives the
-    # winning attempt only if (a) the child's retry_policy drove the retries and
-    # (b) the child-result step followed the retry chain to the final run.
+    # The child fails twice then succeeds on attempt 3; the parent receives the
+    # winning attempt via its retry_policy and the child-result step's chain follow.
     async with _env() as client:
         result = await client.execute_workflow(
             RetryParent.run, id="parent-child-retry", task_queue=TASK_QUEUE
@@ -383,9 +382,8 @@ async def test_child_retry_policy_honored() -> None:
 
 
 async def test_child_run_timeout_honored() -> None:
-    # The child would sleep 30s; a 1s run_timeout fires first and terminates it.
-    # If run_timeout were silently dropped, the parent would hang past the test
-    # timeout instead of catching a ChildWorkflowError within ~1s.
+    # The child would sleep 30s; a 1s run_timeout fires first and terminates it,
+    # so the parent catches a ChildWorkflowError within ~1s.
     async with _env() as client:
         result = await client.execute_workflow(
             TimeoutParent.run, id="parent-child-timeout", task_queue=TASK_QUEUE
@@ -395,9 +393,7 @@ async def test_child_run_timeout_honored() -> None:
 
 async def test_child_retry_exhaustion_surfaces_last_failure() -> None:
     # The child always fails; with maximum_attempts=2 the chain runs attempts 1
-    # and 2, then the terminal failure surfaces. The parent must see attempt 2's
-    # failure (the child-result step followed the chain to the end), not the
-    # first attempt's.
+    # and 2, and the parent must see attempt 2's failure, not the first attempt's.
     async with _env() as client:
         result = await client.execute_workflow(
             RetryExhaustParent.run, id="parent-child-exhaust", task_queue=TASK_QUEUE

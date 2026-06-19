@@ -129,9 +129,9 @@ class CtCancelActivityWorkflow:
 
 
 @pytest.mark.skip(
-    reason="ActivityCancellationType semantics (D32 family): TRY_CANCEL / "
+    reason="ActivityCancellationType semantics (activity-cancel-details family): TRY_CANCEL / "
     "WAIT_CANCELLATION_COMPLETED / ABANDON are not faithfully reproduced. Our "
-    "activity cancellation is cooperative (D26) and the activity's swallow-and-"
+    "activity cancellation is cooperative (sync-activity-cancel) and the activity's swallow-and-"
     "return outcome wins, so the per-mode result strings ('Error: CancelledError' "
     "vs 'Got cancelled error...') don't match. Same root cause as the skipped "
     "test_workflow_cancel_multi."
@@ -384,7 +384,7 @@ class CtCancelChildWorkflow:
 
 
 @pytest.mark.skip(
-    reason="Child-workflow cancellation cause shape (D32 family): cancelling a "
+    reason="Child-workflow cancellation cause shape (activity-cancel-details family): cancelling a "
     "started child via task.cancel()/handle.cancel() does not surface as "
     "WorkflowFailureError(cause=ChildWorkflowError(cause=CancelledError)) in our "
     "model. Same family as the skipped test_workflow_child_cancel_reason."
@@ -400,9 +400,8 @@ async def test_workflow_cancel_child_started(client: Client, use_execute: bool) 
             task_queue=worker.task_queue,
         )
 
-        # Adapted: replaced assert_workflow_exists_eventually (server-only history
-        # lookup) with polling the parent's ready() query, which is set only after
-        # the child workflow has been started.
+        # Adapted: poll the parent's ready() query (set only after the child has
+        # been started) instead of a server-only history lookup.
         async def ready() -> bool:
             return bool(await handle.query(CtCancelChildWorkflow.ready))
 
@@ -561,10 +560,8 @@ class CtConcurrentSleepsWorkflow:
 
 
 async def test_concurrent_sleeps_use_proper_options(client: Client) -> None:
-    # Adapted: dropped the timer-summary history assertions (server-only:
-    # get_workflow_execution_history / EventType / user_metadata). The behavioral
-    # core kept here is that many concurrent sleeps/wait_conditions with summaries
-    # and timeouts run to completion without error.
+    # Adapted: dropped timer-summary history assertions (server-only). Core: many
+    # concurrent sleeps/wait_conditions with summaries and timeouts complete without error.
     async with new_worker(client, CtConcurrentSleepsWorkflow) as worker:
         handle = await client.start_workflow(
             CtConcurrentSleepsWorkflow.run,
@@ -665,7 +662,7 @@ class CtTimeoutSupportWorkflow:
 
 @pytest.mark.skip(
     reason="Timeout-cancels-activity surfaces as a workflow CancelledError rather "
-    "than ActivityError(cause=CancelledError) (D26/D32 cooperative-cancel / "
+    "than ActivityError(cause=CancelledError) (sync-activity-cancel/activity-cancel-details cooperative-cancel / "
     "eager-dispatch family): wrapping execute_activity in asyncio.timeout/wait_for/"
     "call_later cancels the awaiting workflow coroutine, and the cooperatively-"
     "cancelled activity's own outcome doesn't surface as an ActivityError."
@@ -691,8 +688,7 @@ async def test_workflow_timeout_support(client: Client, approach: str) -> None:
         assert isinstance(err.value.cause, ActivityError)
         assert isinstance(err.value.cause.cause, CancelledError)
         # Adapted: dropped the timer_started_event_attributes history assertion
-        # (server-only). The behavioral half — each approach cancels the activity —
-        # is kept above.
+        # (server-only); the behavioral half — each approach cancels the activity — is kept.
 
 
 # ---------------------------------------------------------------------------

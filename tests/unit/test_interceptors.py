@@ -1,4 +1,4 @@
-"""Unit coverage for the interceptor header channel (DEVIATIONS D24): the
+"""Unit coverage for the interceptor header channel: the
 wire-form header codec round-trip and the interceptor base-class delegation.
 The end-to-end propagation is exercised under Postgres in
 tests/integration/test_interceptors.py.
@@ -41,7 +41,7 @@ def test_encode_decode_headers_empty() -> None:
 
 def test_encode_headers_applies_codec() -> None:
     """A configured PayloadCodec transforms header bytes at rest and the
-    round-trip restores them (the codec-protection fix)."""
+    round-trip restores them."""
     from dbosify.converter import DataConverter, PayloadCodec
 
     class _XorCodec(PayloadCodec):

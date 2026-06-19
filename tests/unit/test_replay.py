@@ -66,9 +66,8 @@ class _UnregisteredReplayProbe:
 
 
 def test_replayer_requires_registered_workflow() -> None:
-    # The Replayer reuses a running Worker's registered dispatchers; a type no
-    # Worker has registered cannot be replayed, and construction must say so
-    # rather than silently (re-)registering it into the process.
+    # The Replayer reuses a running Worker's registered dispatchers; an
+    # unregistered type cannot be replayed, and construction must say so loudly.
     with pytest.raises(RuntimeError, match="not registered"):
         Replayer(workflows=[_UnregisteredReplayProbe])
 

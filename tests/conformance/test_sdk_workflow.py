@@ -417,9 +417,8 @@ class AsyncUtilWorkflow:
 
 
 async def test_workflow_async_utils(client: Client) -> None:
-    # Adapted: the SDK test also reads timestamps out of Temporal history at the
-    # end (server-only); we keep the behavioral half — now()/time()/time_ns()
-    # plus asyncio.Event / wait_condition sequencing under signals & queries.
+    # Adapted: the SDK test also reads timestamps out of Temporal history (server-only);
+    # we keep now()/time()/time_ns() plus Event / wait_condition sequencing.
     async with new_worker(client, AsyncUtilWorkflow) as worker:
         handle = await client.start_workflow(
             AsyncUtilWorkflow.run, id=_wid(), task_queue=worker.task_queue
@@ -588,7 +587,7 @@ class MultiCancelWorkflow:
 
 
 @pytest.mark.skip(
-    reason="DEVIATIONS D26/D32 (cooperative cancellation): a cancelled `wait_cancel` "
+    reason="DEVIATIONS sync-activity-cancel/activity-cancel-details (cooperative cancellation): a cancelled `wait_cancel` "
     "activity catches asyncio.CancelledError and *returns a value*, so our model "
     "records it as a successful completion rather than ActivityError(CancelledError). "
     "Temporal's hard cancellation discards the late result. The 4-way "
@@ -650,11 +649,8 @@ class TrapCancelWorkflow:
 
 
 async def test_workflow_cancel_before_run(client: Client) -> None:
-    # Start the workflow _and_ send cancel before the worker even exists.
-    # warm_schema pre-migrates the namespace schema (our Worker owns schema
-    # creation, DESIGN §5; production always has it) so client start/cancel can
-    # run before the workflow's own worker launches — modelling Temporal's
-    # always-up server.
+    # Start the workflow and cancel it before the worker exists; warm_schema
+    # pre-migrates the namespace schema (our Worker owns schema creation, DESIGN §5).
     await warm_schema(client)
     task_queue = str(uuid.uuid4())
     handle = await client.start_workflow(
@@ -948,7 +944,7 @@ async def test_workflow_signal_and_query_errors(client: Client) -> None:
 
 
 @pytest.mark.skip(
-    reason="DEVIATIONS D38: the legacy `(name, *args)` dynamic-handler signature "
+    reason="DEVIATIONS dynamic-handler-signature: the legacy `(name, *args)` dynamic-handler signature "
     "is not supported; we require `(name, args: Sequence[RawValue])`. The "
     "new-style equivalent is covered by test_workflow_signal_and_query. The "
     "workflow can't even be defined (registration rejects the signature), so "
@@ -959,9 +955,7 @@ async def test_workflow_signal_and_query_old_dynamic_style() -> None:
 
 
 # --- runtime handler accessors (set_signal_handler / set_query_handler / dynamic) ---
-# Directly exercises the runtime handler-accessor surface and the buffered-signal
-# flush: a signal that arrives before its handler is registered must be delivered
-# when set_signal_handler later installs it.
+# Exercises runtime handler accessors and buffered-signal flush: a signal arriving before its handler exists is delivered when set_signal_handler installs it.
 
 
 @workflow.defn
@@ -1100,7 +1094,7 @@ class PostPatchWorkflow(PatchWorkflowBase):
 
 
 @pytest.mark.skip(
-    reason="DEVIATIONS D27: this test queries a *completed* workflow after the "
+    reason="DEVIATIONS replay: this test queries a *completed* workflow after the "
     "worker's registered code for that type name has been swapped (PrePatch -> "
     "Patch). Queries on closed runs rehydrate-by-replay under the currently-"
     "registered code; when that code differs from what the run executed, our "
@@ -1193,10 +1187,8 @@ class PatchMemoizedWorkflowPatched(PatchMemoizedWorkflowUnpatched):
 
 
 async def test_workflow_patch_memoized(client: Client) -> None:
-    # Start unpatched, park halfway, stop the worker (workflow persists), then
-    # bring up a worker running the *patched* code. The parked run must memoize
-    # that it did NOT take the patch (so it stays unpatched on replay), while a
-    # fresh run under the patched worker does take it.
+    # Start unpatched, park halfway, then bring up a worker running the *patched*
+    # code: the parked run stays unpatched on replay while a fresh run takes the patch.
     task_queue = f"tq-{uuid.uuid4()}"
     async with new_worker(
         client,
@@ -1278,7 +1270,7 @@ class ChildCancelReasonWorkflow:
 
 
 @pytest.mark.skip(
-    reason="Cancellation-type / D32 family (the child-workflow analog of "
+    reason="Cancellation-type / activity-cancel-details family (the child-workflow analog of "
     "cancel_multi): the parent cancels a child that catches CancelledError and "
     "RETURNS a value. Temporal completes that child successfully, so `await child` "
     "yields the value; our model resolves the parent's awaiter as cancelled "
@@ -1341,9 +1333,8 @@ class CancelDuringChildStartWorkflow:
     @workflow.run
     async def run(self) -> None:
         await workflow.wait_condition(lambda: self._proceed)
-        # Start a child on a task queue with no worker: its first task never
-        # starts, so the start loop would block forever if cancellation in that
-        # window were mishandled (temporalio regression #1445).
+        # Start a child on a task queue with no worker: its first task never starts,
+        # so the start loop would block forever if cancellation there were mishandled.
         await workflow.start_child_workflow(
             LongSleepWorkflow.run,
             id=f"{workflow.info().workflow_id}_child",
@@ -1353,9 +1344,8 @@ class CancelDuringChildStartWorkflow:
 
 
 async def test_workflow_cancel_child_unstarted(client: Client) -> None:
-    # Our worker must host the child type (unlike Temporal, where it can live on
-    # another worker); the child is still started on a task queue THIS worker
-    # does not poll, so it stays unstarted while the parent is cancelled.
+    # Our worker must host the child type, but the child is started on a task queue
+    # THIS worker does not poll, so it stays unstarted while the parent is cancelled.
     async with new_worker(
         client, CancelDuringChildStartWorkflow, LongSleepWorkflow
     ) as worker:
@@ -1543,10 +1533,8 @@ class LocalActivityBackoffWorkflow:
 
 
 async def test_workflow_local_activity_backoff(client: Client) -> None:
-    # Adapted: the SDK test also asserts on history (one TIMER_FIRED, two
-    # MARKER_RECORDED) which is server-only. We keep the behavioral half — the
-    # local activity fails on attempt 1, backs off past local_retry_threshold,
-    # and succeeds on attempt 2, so the workflow completes.
+    # Adapted: dropped the server-only history assertions. The local activity fails
+    # on attempt 1, backs off past local_retry_threshold, and succeeds on attempt 2.
     async with new_worker(
         client, LocalActivityBackoffWorkflow, activities=[fail_until_attempt_activity]
     ) as worker:
@@ -1668,11 +1656,8 @@ async def test_workflow_update_handlers_unhappy(client: Client) -> None:
             await handle.execute_update(UpdateHandlersWorkflow.last_event_async, "fail")
         assert isinstance(err.value.cause, ApplicationError)
         assert "AsyncFail" == err.value.cause.message
-        # NOTE: temporalio's suite also asserts that cancelling an activity
-        # inside the handler surfaces CancelledError. That relies on a cancel
-        # before the task first yields *removing the un-sent command*; we
-        # dispatch activities eagerly (the cancel_unsent / cancel_multi
-        # deviation), so it is omitted here.
+        # Omitted: temporalio's cancel-an-activity-inside-handler -> CancelledError
+        # assertion relies on cancel-before-first-yield; we dispatch activities eagerly.
 
         # Dynamic handler registered, then rejected by its validator
         await handle.execute_update(UpdateHandlersWorkflow.set_dynamic)
@@ -1798,10 +1783,8 @@ class BadSignalParamWorkflow:
 
 
 async def test_workflow_bad_signal_param(client: Client) -> None:
-    # Adapted: the SDK test also asserts on the captured "Failed deserializing
-    # signal input" log record (impl-internal). We keep the behavioral half — a
-    # badly-typed signal payload is dropped and the workflow keeps running,
-    # collecting only the well-typed signals.
+    # Adapted: dropped the captured-log-record assertion. A badly-typed signal
+    # payload is dropped and the workflow keeps running, collecting well-typed signals.
     async with new_worker(client, BadSignalParamWorkflow) as worker:
         handle = await client.start_workflow(
             BadSignalParamWorkflow.run, id=_wid(), task_queue=worker.task_queue
@@ -1818,9 +1801,7 @@ async def test_workflow_bad_signal_param(client: Client) -> None:
 
 
 # --- dataclass-typed handlers + interface (Protocol / ABC) references ---------
-# One workflow scaffold drives three tests: typed dataclass round-tripping
-# through activities/child/signals/queries, plus using a Protocol and an
-# abstract base as the typed "interface" reference when the impl is absent.
+# One scaffold drives three tests: typed dataclass round-tripping, plus a Protocol and an ABC as the typed "interface" reference when the impl is absent.
 
 
 @activity.defn
@@ -1913,7 +1894,7 @@ class DataClassTypedWorkflow(DataClassTypedWorkflowAbstract):
         return param
 
     # temporalio declares this async (a deprecated form); we require sync query
-    # handlers (DEVIATIONS D17), so it is a normal def here.
+    # handlers (DEVIATIONS sync-queries), so it is a normal def here.
     @workflow.query
     def query_async(self, param: MyDataClass) -> MyDataClass:
         return param

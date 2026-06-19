@@ -61,7 +61,7 @@ def install_shim() -> None:
     from dbosify.client import Client
     from dbosify.worker import Worker
 
-    # The default namespace maps to its own DBOS schema (DEVIATIONS D1); the
+    # The default namespace maps to its own DBOS schema (DEVIATIONS no-server); the
     # client must use it, and the Worker derives the same from namespace="default".
     schema = namespace_schema(DEFAULT_NAMESPACE)
 
@@ -82,9 +82,8 @@ def install_shim() -> None:
     async def patched_connect(cls: Any, *args: Any, **kwargs: Any) -> Any:
         target = args[0] if args else kwargs.get("target_host")
         if isinstance(target, str) or target is None:
-            # Forward the connection options that are real migration surface
-            # (not gRPC plumbing): a custom DataConverter / PayloadCodec and
-            # interceptors. Our Client.__init__ accepts both.
+            # Forward the connection options that are real migration surface (not
+            # gRPC plumbing): a custom DataConverter / PayloadCodec and interceptors.
             forwarded = {
                 k: kwargs[k] for k in ("data_converter", "interceptors") if k in kwargs
             }
@@ -92,25 +91,16 @@ def install_shim() -> None:
                 DBOSClient(system_database_url=url, dbos_system_schema=schema),
                 **forwarded,
             )
-            # Stash interceptors so the adapted ``Worker(client, ...)`` can
-            # harvest them: temporalio Workers inherit the client's
-            # interceptors, but ours take them via ``Worker(interceptors=)``
-            # (DEVIATIONS D24). Bridging it here lets the sample run unmodified.
+            # Stash interceptors so the adapted ``Worker(client, ...)`` can harvest
+            # them: temporalio Workers inherit them; ours take ``Worker(interceptors=)``.
             client._conformance_interceptors = list(forwarded.get("interceptors", []))
             return client
         return await original_connect(cls, *args, **kwargs)
 
     Client.connect = classmethod(patched_connect)  # type: ignore[assignment, method-assign]
 
-    # -- dbosify.api.common.v1 stand-in --------------------------------
-    # Some samples import ``temporalio.api.common.v1.Payload`` purely for type
-    # annotations (e.g. context_propagation's interceptor, under
-    # ``from __future__ import annotations`` so it is never evaluated). The
-    # protobuf API is a non-goal (DEVIATIONS D1) and our Payload is a
-    # lightweight dict; register the module chain so annotation-only imports
-    # resolve. Samples that actually *construct* a protobuf Payload
-    # (custom_converter, encryption) still fail at runtime — correctly, since
-    # they depend on protobuf semantics we do not provide.
+    # -- dbosify.api.common.v1 stand-in: register the module chain so samples'
+    # annotation-only Payload imports resolve. Protobuf API is a non-goal (DEVIATIONS no-server).
     import dbosify as _dbosify_pkg
     from dbosify import converter as _dbosify_converter
 
@@ -131,7 +121,7 @@ def install_shim() -> None:
     def patched_worker_init(self: Any, first: Any, *args: Any, **kwargs: Any) -> None:
         if isinstance(first, Client):
             # Harvest the client's interceptors (temporalio Workers inherit
-            # them; ours take them explicitly — DEVIATIONS D24).
+            # them; ours take them explicitly).
             harvested = getattr(first, "_conformance_interceptors", None)
             if harvested and "interceptors" not in kwargs:
                 kwargs["interceptors"] = harvested
@@ -142,15 +132,8 @@ def install_shim() -> None:
                 "notification_listener_polling_interval_sec": 0.01,
             }
             original_worker_init(self, config, *args, **kwargs)
-            # Opt-in, ONE sample (hello_search_attributes): it upserts 2s into
-            # the workflow and describes 3s later — a 1s margin that DBOS's ~1s
-            # queue-dispatch latency (the queue worker's first-poll wait) races.
-            # Declaring the queue with a short poll BEFORE launch makes the
-            # worker thread dispatch near-immediately. Gated by env so it
-            # touches ONLY that sample: applied broadly, this in-memory
-            # declaration races the Worker's own post-launch database-backed
-            # registration and breaks the cancellation/terminate-reuse dequeue
-            # path (it regressed message_passing once).
+            # Opt-in, ONE sample (hello_search_attributes): declaring the queue with a
+            # short poll before launch makes dispatch near-immediate. Env-gated.
             if os.environ.get("DBOSIFY_CONFORMANCE_FAST_QUEUE"):
                 from dbos import Queue
 
@@ -164,9 +147,8 @@ def install_shim() -> None:
 def main() -> None:
     install_shim()
     target = sys.argv[1]
-    # Present the sample a clean argv: its own target as argv[0], then any
-    # extra args the test passed after the target (e.g. dsl's YAML file) — but
-    # not the runner's own target argument.
+    # Present the sample a clean argv: its own target as argv[0], then any extra
+    # args the test passed (e.g. dsl's YAML file), not the runner's own target.
     sys.argv = [target, *sys.argv[2:]]
     if target.endswith(".py"):
         runpy.run_path(target, run_name="__main__")
