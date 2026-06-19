@@ -1432,9 +1432,7 @@ class Interpreter(_Runtime):
         ):
             # Reject duplicate open activity ids (which would cross-wire id-keyed
             # async completion routing); like a rejected command, fails the task.
-            raise ValueError(
-                f"Activity id {resolved_activity_id!r} is already in use"
-            )
+            raise ValueError(f"Activity id {resolved_activity_id!r} is already in use")
         policy = retry_policy if retry_policy is not None else RetryPolicy()
         policy._validate()
         exec_state = _ActivityExec(

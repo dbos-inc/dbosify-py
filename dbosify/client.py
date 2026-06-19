@@ -620,9 +620,7 @@ class WithStartWorkflowOperation:
                     "WithStartWorkflowOperation was used but the workflow start "
                     "did not complete; no handle is available"
                 )
-            raise RuntimeError(
-                "WithStartWorkflowOperation has not been used yet"
-            )
+            raise RuntimeError("WithStartWorkflowOperation has not been used yet")
         return self._handle
 
 
@@ -1589,9 +1587,7 @@ class Client:
         parsed = _visibility.parse_query(query)
         sys_db: Any = getattr(self._dbos_client, "_sys_db", None)
         if sys_db is None:
-            raise RuntimeError(
-                "count_workflows requires DBOS system-database access"
-            )
+            raise RuntimeError("count_workflows requires DBOS system-database access")
 
         if not parsed.aggregate_eligible() or parsed.post_filter() is not None:
             raise _visibility.VisibilityQueryError(
