@@ -65,5 +65,5 @@ def test_namespace_schema_round_trips(namespace: str) -> None:
     ],
 )
 def test_non_namespace_schema_rejected(schema: object) -> None:
-    with pytest.raises(ValueError, match="not a temporal namespace schema"):
+    with pytest.raises(ValueError, match="not a valid namespace schema"):
         namespace_from_schema(schema)  # type: ignore[arg-type]
