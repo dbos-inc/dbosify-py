@@ -493,3 +493,25 @@ async def test_query_reject_condition() -> None:
         strict_handle = strict_client.get_workflow_handle("qrc-wf")
         with pytest.raises(WorkflowQueryRejectedError):
             await strict_handle.query(AccumulatorWorkflow.total_so_far)
+
+
+async def test_worker_from_url_string() -> None:
+    """The Worker accepts a bare Postgres URL in place of a DBOSConfig,
+    synthesizing a minimal config (and forcing the admin server off); an
+    end-to-end workflow runs on it exactly as on a config-built worker."""
+    worker = Worker(
+        system_database_url(),
+        task_queue=TASK_QUEUE,
+        workflows=[GreetingWorkflow],
+        activities=[compose_greeting],
+    )
+    async with worker:
+        dbos_client = DBOSClient(system_database_url=system_database_url())
+        try:
+            client = Client(dbos_client)
+            result = await client.execute_workflow(
+                GreetingWorkflow.run, "URL", id="url-wf", task_queue=TASK_QUEUE
+            )
+        finally:
+            dbos_client.destroy()
+    assert result == "Hello, URL! (wf=url-wf)"

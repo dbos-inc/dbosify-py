@@ -314,12 +314,14 @@ facade takes DBOS machinery directly.)
   `dbos_system_schema`). Client mode is exactly DBOSClient mode: enqueue-by-name, send,
   get_event, list/cancel/fork — everything a starter needs, with no workflow registration
   or recovery.
-- `Worker(config: DBOSConfig, task_queue=..., workflows=[...], activities=[...])` owns the
-  process's DBOS lifecycle outright: construction creates `DBOS(config=config)`, registers
-  dispatchers + the named queue with mapped concurrency + user definitions; `await
-  worker.run()` performs `DBOS.launch()` (recovery of pending workflows happens here,
-  mirroring Temporal worker restart semantics) and blocks until `shutdown()`, which
-  destroys DBOS. Support `async with Worker(...)` — tests use it constantly.
+- `Worker(config: str | DBOSConfig, task_queue=..., workflows=[...], activities=[...])` owns
+  the process's DBOS lifecycle outright: `config` is either a Postgres URL (expanded into a
+  minimal `DBOSConfig` under a default app name) or a full `DBOSConfig`; the DBOS admin
+  server is forced off either way (no admin-port story — DESIGN §1). Construction creates
+  `DBOS(config=config)`, registers dispatchers + the named queue with mapped concurrency +
+  user definitions; `await worker.run()` performs `DBOS.launch()` (recovery of pending
+  workflows happens here, mirroring Temporal worker restart semantics) and blocks until
+  `shutdown()`, which destroys DBOS. Support `async with Worker(...)` — tests use it constantly.
 - **Exactly one Worker per process** (v1): DBOS's launchable runtime is process-global, so
   multiple in-process Workers would share lifecycle/registrations in ways that diverge
   from Temporal's worker-isolation model. Multi-worker support can be revisited later
