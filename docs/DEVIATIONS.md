@@ -1,16 +1,5 @@
 # Fundamental deviations from Temporal
 
-Deviations **inherent to the architecture** — consequences of building on DBOS
-Transact and Postgres with no Temporal server — or deliberate design decisions
-we don't intend to reverse. Not-yet-implemented features are tracked separately
-as conformance xfails (`tests/conformance/`) and parameter ledgers
-(`tests/unit/test_signature_parity.py`), and summarized in the README.
-
-Each entry has a **stable slug** — the identifier before the `—` in its
-heading. Code and tests reference a deviation as `(DEVIATIONS <slug>)`. Slugs
-never change and are independent of order, so entries can be reordered, added, or
-removed without renumbering anything.
-
 ## Architecture
 
 ### no-server — No Temporal server, no wire protocol
