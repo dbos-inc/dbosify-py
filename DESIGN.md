@@ -685,7 +685,7 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   `patch_async` (`enable_patching` in `dbos/_dbos_config.py`): it is async and assumes
   function_id == sequential code position, which our virtual-loop/command-queue split
   decouples, and it pins `app_version` to `"PATCHING_ENABLED"`. See `_internal/interpreter.py`
-  (`_patch`, `_patch_marker`, the `execute()` scan) and [DEVIATIONS.md](DEVIATIONS.md) D28.
+  (`_patch`, `_patch_marker`, the `execute()` scan) and [DEVIATIONS.md](docs/DEVIATIONS.md) D28.
 - `workflow.unsafe.*`: `imports_passed_through()` → no-op context manager; `is_replaying()`
   real (§4.2); `in_sandbox()` → False; the rest no-ops.
 - Interceptors (client `Interceptor/OutboundInterceptor`, worker
@@ -701,7 +701,7 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   workflows, riding the run meta-envelope (`RunMeta.headers`) and inbox envelopes as
   payload dicts; `workflow.payload_converter()`/`activity.payload_converter()` encode the
   values. `handle_query`/`handle_update_validator` are driven synchronously (queries are
-  sync, #11). See [DEVIATIONS.md](DEVIATIONS.md) D24.
+  sync, #11). See [DEVIATIONS.md](docs/DEVIATIONS.md) D24.
 
 ### 6.9 Data conversion
 
