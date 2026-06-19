@@ -13,7 +13,7 @@ deviations). One worker per process is also the dominant production layout.
 workflows, mirroring Temporal worker restart semantics — and blocks until
 ``shutdown()``. ``async with`` is supported and is what tests use constantly.
 
-Parameter mapping onto DBOS (DEVIATIONS D34): ``max_concurrent_workflow_tasks``
+Parameter mapping onto DBOS: ``max_concurrent_workflow_tasks``
 -> the workflow task queue's ``worker_concurrency``; ``max_concurrent_activities``
 / ``max_concurrent_local_activities`` -> a per-process semaphore around activity
 execution (and the activity queue's ``worker_concurrency`` for an activities-only
@@ -113,7 +113,7 @@ logger = logging.getLogger("dbosify.worker")
 # Pinning a constant makes all workers agree by default and deploys preserve
 # in-flight work; a genuinely incompatible change then surfaces as a replay
 # ``NondeterminismError`` (the same contract as Temporal, managed with
-# ``workflow.patched()``). See DESIGN §6.8 / DEVIATIONS D28. Distinct apps
+# ``workflow.patched()``). See DESIGN §6.8. Distinct apps
 # sharing one database should set ``application_version`` explicitly to keep
 # their versions apart.
 DEFAULT_APP_VERSION = "0.1"
@@ -124,8 +124,8 @@ DEFAULT_APP_VERSION = "0.1"
 _REJECTED_OPTIONS = {
     "nexus_service_handlers": "Nexus is not supported (DESIGN §1)",
     "tuner": "resource-based slot tuning has no DBOS analog; use "
-    "max_concurrent_workflow_tasks / max_concurrent_activities (DEVIATIONS D34)",
-    "plugins": "Worker plugins are not supported; use interceptors= (DEVIATIONS D24)",
+    "max_concurrent_workflow_tasks / max_concurrent_activities",
+    "plugins": "Worker plugins are not supported; use interceptors=",
 }
 
 # The one live Worker in this process (see module docstring).
@@ -177,7 +177,7 @@ class WorkerDeploymentConfig:
     The ``version.build_id`` becomes the DBOS ``application_version``, which DBOS
     uses to pin workflow recovery/dequeue — i.e. Temporal's PINNED behavior,
     enforced. ``default_versioning_behavior`` / ``use_worker_versioning`` are
-    accepted for parity; AUTO_UPGRADE has no DBOS analog (DEVIATIONS D29).
+    accepted for parity; AUTO_UPGRADE has no DBOS analog (DEVIATIONS worker-versioning).
     """
 
     version: WorkerDeploymentVersion
@@ -227,7 +227,7 @@ class Worker:
         and continued only on workers of its build ID. That pinning *is*
         Temporal's PINNED versioning behavior, enforced. What DBOS has no analog
         for is AUTO_UPGRADE (moving a running workflow to a newer version) and
-        the cluster routing-fleet / ramping concepts; see DEVIATIONS D29.
+        the cluster routing-fleet / ramping concepts; see DEVIATIONS worker-versioning.
         ``use_worker_versioning`` is accepted for parity. When neither build_id
         nor deployment_config is given, the deployment version is derived from
         the DBOS application name + application_version.
@@ -257,7 +257,7 @@ class Worker:
                 "build_id must be specified when use_worker_versioning is True"
             )
         # Behavior-changing options we can't fulfil are *rejected*, not silently
-        # ignored (the accepted-param audit's whole point — DEVIATIONS D34): a
+        # ignored (the accepted-param audit's whole point): a
         # user passing these expects an effect we can't deliver.
         for key, hint in _REJECTED_OPTIONS.items():
             if unsupported.get(key):
@@ -280,7 +280,7 @@ class Worker:
         # Activity concurrency cap: max_concurrent_activities, else (an
         # activities-only worker that set only) max_concurrent_local_activities.
         # In our model regular and local activities both run as steps, sharing
-        # one cap (DEVIATIONS D34).
+        # one cap.
         self._activity_concurrency = (
             max_concurrent_activities
             if max_concurrent_activities is not None
@@ -292,7 +292,7 @@ class Worker:
         self._activities_only = bool(activities) and not workflows
         # Activity rate limit → DBOS queue limiter. DBOS's limiter is queue-wide,
         # so the task-queue-wide knob maps exactly; the per-worker knob is applied
-        # as a queue-wide approximation when it's the only one set (D34).
+        # as a queue-wide approximation when it's the only one set.
         self._activity_rate_per_second = (
             max_task_queue_activities_per_second
             if max_task_queue_activities_per_second is not None
@@ -301,7 +301,7 @@ class Worker:
         # The interpreter (in this process) decodes run args / encodes results
         # with this converter; configure the Client the same.
         conversion.set_converter(data_converter)
-        # The namespace owns the DBOS system schema (DEVIATIONS D1): this
+        # The namespace owns the DBOS system schema (DEVIATIONS no-server): this
         # process serves one namespace, and its workflows live in that schema —
         # isolated from other namespaces. The Worker owns the runtime, so it
         # sets the schema; a conflicting explicit dbos_system_schema is an error
@@ -322,12 +322,12 @@ class Worker:
             "dbos_system_schema": schema,
         }
         # Worker identity → DBOS executor_id (surfaced in DBOS views / list
-        # filters). Note: executor_id also *scopes recovery* in DBOS (D6), so a
+        # filters). Note: executor_id also *scopes recovery* in DBOS (failover), so a
         # custom identity should be stable per fleet, not unique per process.
         if identity is not None:
             config = {**config, "executor_id": identity}
         # An explicit build_id / deployment_config IS the DBOS application_version
-        # (build IDs map to DBOS versions, DEVIATIONS D29): DBOS scopes both
+        # (build IDs map to DBOS versions, DEVIATIONS worker-versioning): DBOS scopes both
         # workflow recovery and queue dequeue to application_version, so setting
         # it here makes the requested build ID the version DBOS actually pins to
         # — that pinning *is* Temporal's PINNED behavior, enforced. Without an
@@ -362,7 +362,7 @@ class Worker:
         # Deployment name surfaced via workflow.Info.get_current_deployment_version():
         # the explicit deployment_config name, else the DBOS app name. The build_id
         # half is read live from the DBOS application_version at access time, so the
-        # surfaced version always equals the one DBOS enforces (DEVIATIONS D29).
+        # surfaced version always equals the one DBOS enforces (DEVIATIONS worker-versioning).
         _registry.set_worker_deployment_name(
             deployment_config.version.deployment_name
             if deployment_config is not None

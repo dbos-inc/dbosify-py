@@ -24,7 +24,7 @@ from dbosify._internal.serializer import TEMPORAL_SERIALIZER
 
 TEST_SYSTEM_DB_NAME = "dbosify_test_dbos_sys"
 
-# Every namespace maps to its own DBOS system schema (DEVIATIONS D1). Tests run
+# Every namespace maps to its own DBOS system schema (DEVIATIONS no-server). Tests run
 # in the default namespace, so all components — the product Worker/Client and
 # the raw-DBOS test drivers — must agree on its schema.
 TEST_SCHEMA = namespace_schema(DEFAULT_NAMESPACE)
@@ -67,7 +67,7 @@ def default_config() -> DBOSConfig:
         # JSON transport (matches the Worker/Client and the raw-DBOS test
         # workers that build on default_config()).
         "serializer": TEMPORAL_SERIALIZER,
-        # Default-namespace schema (DEVIATIONS D1); matches Worker(namespace=
+        # Default-namespace schema (DEVIATIONS no-server); matches Worker(namespace=
         # "default") and the patched DBOSClient above. Raw-DBOS test drivers
         # that launch on this config land in the same schema as the product.
         "dbos_system_schema": TEST_SCHEMA,

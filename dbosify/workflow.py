@@ -254,7 +254,7 @@ class ContinueAsNewVersioningBehavior(IntEnum):
 
     A continue-as-new run is a fresh DBOS workflow enqueued by the current
     worker, so it takes that worker's build ID (pinned). ``AUTO_UPGRADE`` /
-    ``USE_RAMPING_VERSION`` have no DBOS analog (DEVIATIONS D29).
+    ``USE_RAMPING_VERSION`` have no DBOS analog (DEVIATIONS worker-versioning).
     """
 
     UNSPECIFIED = 0
@@ -297,11 +297,11 @@ def defn(
     ``versioning_behavior`` is accepted and stored. ``PINNED`` is what
     dbosify enforces anyway (DBOS pins recovery/dequeue to the build ID =
     ``application_version``); ``AUTO_UPGRADE`` has no DBOS analog and degrades to
-    pinned (DEVIATIONS D29).
+    pinned (DEVIATIONS worker-versioning).
 
     ``dynamic`` is **not supported**: a catch-all workflow has no
     ``wf:{type}`` registration to dispatch to, which conflicts with the
-    one-DBOS-workflow-per-type model (DESIGN §10.1, DEVIATIONS D25). Passing
+    one-DBOS-workflow-per-type model (DESIGN §10.1, DEVIATIONS dynamic-handlers). Passing
     ``dynamic=True`` raises ``NotImplementedError``. (Dynamic *signal/query/
     update* handlers and dynamic *activities* are supported.)
     """
@@ -310,7 +310,7 @@ def defn(
             "dbosify does not support dynamic workflows "
             "(@workflow.defn(dynamic=True)): a catch-all workflow type has no "
             "per-type DBOS registration to dispatch to (DESIGN §10.1, "
-            "DEVIATIONS D25). Register each workflow type explicitly. Dynamic "
+            "DEVIATIONS dynamic-handlers). Register each workflow type explicitly. Dynamic "
             "signal/query/update handlers and dynamic activities are supported."
         )
 
@@ -653,7 +653,7 @@ class Info:
     continued_run_id: Optional[str] = None
     cron_schedule: Optional[str] = None
     # Whole-execution (run-chain) timeout: accepted but not enforced (pending,
-    # DEVIATIONS D35). Surfaced for parity / so user code can read it; always
+    # DEVIATIONS start-params). Surfaced for parity / so user code can read it; always
     # None today (not threaded into the run meta).
     execution_timeout: Optional[timedelta] = None
     # The run id of the first execution in this run chain (run 0's DBOS id =
@@ -712,7 +712,7 @@ class Info:
 
     def get_current_build_id(self) -> str:
         """The build id of the worker executing this run — the DBOS
-        ``application_version`` DBOS pins recovery/dequeue to (DEVIATIONS D29).
+        ``application_version`` DBOS pins recovery/dequeue to (DEVIATIONS worker-versioning).
         Empty string when no worker deployment version is set.
 
         .. warning::
@@ -732,7 +732,7 @@ class Info:
         name = DBOS application/deployment name, build id = the DBOS
         ``application_version`` DBOS pins recovery/dequeue to). None when no
         worker deployment version is set (e.g. the in-process dispatcher
-        harness). DEVIATIONS D29.
+        harness). DEVIATIONS worker-versioning.
 
         .. warning::
             Read *live* from the executing worker, so it is **not replay-stable**
@@ -744,7 +744,7 @@ class Info:
     def is_target_worker_deployment_version_changed(self) -> bool:
         """Whether the target worker deployment version has changed
         (upgrade-on-continue-as-new). Always False in dbosify: workflows
-        are pinned to their build id and never auto-upgrade (DEVIATIONS D29)."""
+        are pinned to their build id and never auto-upgrade (DEVIATIONS worker-versioning)."""
         return False
 
 
@@ -1147,7 +1147,7 @@ def get_current_details() -> str:
     the life of the workflow via :py:func:`set_current_details`. It is in-memory
     workflow state — reconstructed deterministically on recovery by replaying
     the same :py:func:`set_current_details` calls — and is not surfaced to
-    ``describe()``/``list_workflows`` in v1 (DEVIATIONS D30). Empty string if
+    ``describe()``/``list_workflows`` in v1 (DEVIATIONS current-details). Empty string if
     never set.
     """
     return _runtime().runtime_get_current_details()
@@ -1257,7 +1257,7 @@ def register_random_seed_callback(callback: Callable[[int], None]) -> None:
     """Register a callback invoked when the workflow's random seed changes,
     mirroring ``temporalio.workflow.register_random_seed_callback``. In
     dbosify the seed is fixed for a run's lifetime (it never changes
-    mid-run), so the callback is stored but never invoked (DEVIATIONS D31)."""
+    mid-run), so the callback is stored but never invoked (DEVIATIONS random-seed)."""
     _runtime().runtime_register_random_seed_callback(callback)
 
 
@@ -1654,7 +1654,7 @@ def continue_as_new(
 
     ``versioning_intent``/``initial_versioning_behavior`` are accepted for
     parity; the new run is pinned to the enqueuing worker's build ID, and the
-    auto-upgrade/ramping variants have no DBOS analog (DEVIATIONS D29).
+    auto-upgrade/ramping variants have no DBOS analog (DEVIATIONS worker-versioning).
     """
     for key, value in {
         "task_timeout": task_timeout,
@@ -1732,7 +1732,7 @@ async def start_child_workflow(
     task_queue, parent_close_policy, cancellation_type, and (matching top-level
     starts) ``run_timeout`` and ``retry_policy``. ``cron_schedule`` and
     ``id_reuse_policy`` are accepted-but-pending for children (see the verb
-    audit / DEVIATIONS D35); the remaining parameters are accepted and ignored
+    audit / DEVIATIONS start-params); the remaining parameters are accepted and ignored
     (debug-logged).
     """
     for key, value in {
@@ -2220,7 +2220,7 @@ class unsafe:
     @staticmethod
     def imports_passed_through() -> "AbstractContextManager[None]":
         """No-op context manager: there is no sandbox to pass imports
-        through (DEVIATIONS.md D13)."""
+        through (DEVIATIONS.md no-sandbox)."""
         return nullcontext()
 
     @staticmethod

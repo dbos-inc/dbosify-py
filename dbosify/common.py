@@ -568,7 +568,7 @@ def _warn_on_deprecated_search_attributes(
 # workers of its build ID — which *is* Temporal's PINNED behavior, enforced.
 # What DBOS has no analog for is AUTO_UPGRADE (migrating a running workflow to a
 # newer version) and the cluster routing-fleet / ramping concepts. See
-# DEVIATIONS D29.
+# DEVIATIONS worker-versioning.
 
 
 class VersioningBehavior(IntEnum):
@@ -577,7 +577,7 @@ class VersioningBehavior(IntEnum):
 
     ``PINNED`` is dbosify's enforced behavior (DBOS pins recovery/dequeue
     to ``application_version`` = the build ID). ``AUTO_UPGRADE`` has no DBOS
-    analog and degrades to pinned. See DEVIATIONS D29.
+    analog and degrades to pinned. See DEVIATIONS worker-versioning.
     """
 
     UNSPECIFIED = 0
@@ -625,7 +625,7 @@ class VersioningOverride(ABC):
     execution, mirroring ``temporalio.common.VersioningOverride``.
 
     ``PinnedVersioningOverride`` matches dbosify's enforced default;
-    ``AutoUpgradeVersioningOverride`` has no DBOS analog (DEVIATIONS D29).
+    ``AutoUpgradeVersioningOverride`` has no DBOS analog (DEVIATIONS worker-versioning).
     """
 
 

@@ -13,7 +13,7 @@ The ``*Input`` dataclasses are copied field-for-field from the SDK (DESIGN
 inert. ``headers`` is *not* inert: a header set on ``start_workflow`` /
 ``signal_workflow`` / ``query_workflow`` / ``start_workflow_update`` propagates
 into the workflow as ``ExecuteWorkflowInput.headers`` / the matching
-``Handle*Input.headers`` (header-based context propagation, DEVIATIONS D24).
+``Handle*Input.headers`` (header-based context propagation).
 Annotations use our own types or ``Any`` (the parity test checks parameter
 names/kind/default/order, not annotations).
 

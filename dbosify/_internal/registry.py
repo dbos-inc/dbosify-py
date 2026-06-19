@@ -99,7 +99,7 @@ class WorkflowDefinition:
     ret_type: Optional[type] = None
     # @workflow.defn(versioning_behavior=...): stored for parity. PINNED is what
     # DBOS enforces anyway (recovery/dequeue scoped to application_version);
-    # AUTO_UPGRADE has no DBOS analog (DEVIATIONS D29).
+    # AUTO_UPGRADE has no DBOS analog (DEVIATIONS worker-versioning).
     versioning_behavior: Optional[int] = None
 
 
@@ -220,7 +220,7 @@ def set_worker_namespace(namespace: Optional[str]) -> None:
 # accessors return None. The build_id half is NOT stored here: it is read live
 # from the DBOS application_version at access time (the version DBOS actually
 # pins recovery/dequeue to, including a code-hash for auto-versioning), so the
-# surfaced version always equals the enforced one (DEVIATIONS D29).
+# surfaced version always equals the enforced one (DEVIATIONS worker-versioning).
 worker_deployment_name: Optional[str] = None
 
 

@@ -8,7 +8,7 @@ runs and by ``dbosify.testing.ActivityEnvironment`` for unit tests.
 ``heartbeat`` raises CancelledError when cancellation of the activity has
 been requested (how sync activities observe cancellation, as in Temporal)
 and records details for the next retry attempt — in worker memory, not
-durably (DEVIATIONS D6). ``raise_complete_async`` parks the activity for
+durably (DEVIATIONS failover). ``raise_complete_async`` parks the activity for
 external completion via ``client.get_async_activity_handle``.
 """
 
@@ -123,7 +123,7 @@ def defn(
     *cooperatively* and never raises into their worker thread, so it always
     behaves as ``True``. Setting it ``False`` — asking for Temporal's
     raise-into-the-thread behavior — raises ``NotImplementedError`` rather than
-    silently doing something else (DEVIATIONS D37).
+    silently doing something else (DEVIATIONS sync-activity-cancel).
     """
     if name is not None and dynamic:
         raise RuntimeError("Cannot provide name and dynamic boolean")
@@ -134,7 +134,7 @@ def defn(
             "supported — dbosify delivers activity cancellation "
             "cooperatively. Leave it True (the default here) and observe "
             "cancellation via activity.is_cancelled() / activity.heartbeat() / "
-            "activity.wait_for_cancelled_sync() (DEVIATIONS D37)."
+            "activity.wait_for_cancelled_sync() (DEVIATIONS sync-activity-cancel)."
         )
 
     def decorator(fn: _F) -> _F:
@@ -216,7 +216,7 @@ class Info:
 class ActivityCancellationDetails:
     """The reasons for an activity's cancellation, mirroring
     ``temporalio.activity.ActivityCancellationDetails``. Accepted for parity;
-    dbosify never populates it (DEVIATIONS D32), so
+    dbosify never populates it (DEVIATIONS activity-cancel-details), so
     :py:func:`cancellation_details` always returns ``None``."""
 
     not_found: bool = False
@@ -563,8 +563,8 @@ def wait_for_cancelled_sync(
 
 def cancellation_details() -> Optional["ActivityCancellationDetails"]:
     """The reasons for this activity's cancellation, mirroring
-    ``temporalio.activity.cancellation_details``. **DEVIATION (D32):**
-    dbosify delivers cancellation cooperatively (D26) and does not track
+    ``temporalio.activity.cancellation_details``. **DEVIATION (activity-cancel-details):**
+    dbosify delivers cancellation cooperatively (sync-activity-cancel) and does not track
     *why* an activity was cancelled, so this always returns ``None``."""
     return None
 
@@ -611,7 +611,7 @@ def shield_thread_cancel_exception() -> Iterator[None]:
 
     In dbosify this is always a no-op: cancellation is delivered
     cooperatively (via ``is_cancelled()``/``heartbeat()``) and never raised into
-    a sync activity's worker thread (DEVIATIONS D26), so there is nothing to
+    a sync activity's worker thread (DEVIATIONS sync-activity-cancel), so there is nothing to
     shield against — matching temporalio's own no-op behavior for async and
     multiprocess activities.
     """

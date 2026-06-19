@@ -28,8 +28,8 @@ Unlike the always-empty activity/client ``headers`` of Phase 3, these
 ``ExecuteWorkflowInput``; an inbound message's headers reach the matching
 ``Handle*Input``; and headers set on an outbound ``*Input`` propagate to the
 activity attempt / child run / signalled workflow (header-based context
-propagation — tracing, baggage — DEVIATIONS D24). Nexus interception is
-unsupported (corollary of D1) and intentionally absent.
+propagation — tracing, baggage). Nexus interception is
+unsupported (corollary of no-server) and intentionally absent.
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ class WorkflowInterceptorClassInput:
     """Input for :py:meth:`dbosify.worker.Interceptor.workflow_interceptor_class`.
 
     ``unsafe_extern_functions`` is carried for parity; dbosify has no
-    workflow sandbox (DEVIATIONS D3), so there is nothing to expose extern
+    workflow sandbox (DEVIATIONS dbos-native-management), so there is nothing to expose extern
     functions *into* — the mapping is inert.
     """
 

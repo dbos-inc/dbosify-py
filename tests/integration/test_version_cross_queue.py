@@ -1,4 +1,4 @@
-"""Cross-queue (queued) activities under a build id (DEVIATIONS D29). A
+"""Cross-queue (queued) activities under a build id (DEVIATIONS worker-versioning). A
 cross-queue activity is enqueued in-workflow as a ``__temporal_activity``
 workflow, stamped with the workflow worker's build id; only an activity worker
 on the same build id dequeues it. With both workers on ``cq-build`` the activity

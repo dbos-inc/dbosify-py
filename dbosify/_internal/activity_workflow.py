@@ -181,7 +181,7 @@ async def _await_async_completion(
 
     Heartbeats sent by the completer are not completions: they are skipped so the
     park keeps waiting (detail forwarding to the workflow side remains a
-    documented gap, D23). On a definitely-terminal outcome (complete / cancel) we
+    documented gap). On a definitely-terminal outcome (complete / cancel) we
     set the gone-event so a later completer raises rather than sending into the
     void.
 

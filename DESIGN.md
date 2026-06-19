@@ -47,7 +47,7 @@ guarantees (a workflow survives process crashes and resumes correctly).
 - Nexus and advanced visibility (full query language, custom indexed search attributes)
   — partial support only, see §8. Namespaces are supported as per-namespace DBOS system
   schemas; clients for different namespaces coexist in one process, while a worker process
-  serves one namespace (its launched runtime is process-global) — DEVIATIONS D1.
+  serves one namespace (its launched runtime is process-global) — DEVIATIONS no-server.
 
 **Why this is feasible.** Both systems use deterministic re-execution with checkpointed
 effects. Temporal replays workflow code against an event history held by the server; DBOS
@@ -345,7 +345,7 @@ Registration populates `_internal/registry.py` keyed by workflow type name (defa
 unqualified class name; `name=` override). **Dynamic *workflows*
 (`@workflow.defn(dynamic=True)`) are not supported and raise `NotImplementedError`:**
 a catch-all workflow has no per-type `wf:{type}` DBOS registration to dispatch to,
-which conflicts with the one-workflow-per-type model (§10.1, DEVIATIONS D25); the
+which conflicts with the one-workflow-per-type model (§10.1, DEVIATIONS dynamic-handlers); the
 `dynamic` parameter is accepted only for signature parity. Dynamic *signal/query/update
 handlers* (`dynamic=True` → a single catch-all per category, invoked as
 `(self, name, Sequence[RawValue])` when no exact handler matches), `description=` handler
@@ -409,7 +409,7 @@ under the currently-registered code to detect non-determinism: it forks the sour
 step past its last checkpoint (copying every recorded step) and re-runs it, mapping DBOS's
 `DBOSUnexpectedStepError` (plus an interpreter guard for "new step past the horizon" and
 "finished early") to `workflow.NondeterminismError`. Histories come from
-`WorkflowHandle.fetch_history()` (DB-bound; no offline JSON in v1 — DEVIATIONS D27).
+`WorkflowHandle.fetch_history()` (DB-bound; no offline JSON in v1 — DEVIATIONS replay).
 
 ### 6.2 Client, handles, status, visibility
 
@@ -439,7 +439,7 @@ step past its last checkpoint (copying every recorded step) and re-runs it, mapp
   event key. **DEVIATION:** a RUNNING workflow is queried directly; a *closed* workflow is
   served by rehydrate-by-replay — fork the run, replay its checkpoints to reconstruct final
   state, serve the one query against it (reusing the live query path), then discard the
-  scratch run. Requires a worker for the type in the querying process (DEVIATIONS D27).
+  scratch run. Requires a worker for the type in the querying process (DEVIATIONS replay).
 - `handle.cancel(reason)` / `handle.terminate(reason)` → §6.5.
 - `handle.describe()` → synthesize `WorkflowExecutionDescription` from DBOS
   `get_workflow_status`. **Status mapping** (`_internal/status.py`):
@@ -587,7 +587,7 @@ Scheme (`_internal/ids.py`):
   hop, for runs that never park — ends the chain; unconsumed inbox messages otherwise
   carry over to the successor like the CAN carryover. Cron evaluation uses DBOS's
   vendored croniter: 5-field UTC with `CRON_TZ=`/`TZ=` prefixes, plus 6/7-field
-  (seconds/year) accepted as an extension (DEVIATIONS D19).
+  (seconds/year) accepted as an extension (DEVIATIONS cron-chains).
 
 ### 6.5 Cancellation matrix
 
@@ -627,7 +627,7 @@ BUFFER_ONE/ALLOW_ALL via id suffixing + a small state event; CANCEL_OTHER/TERMIN
 via cancel-then-start. `ScheduleHandle.pause/unpause/trigger/backfill/delete/describe/update`
 → DBOS `pause_schedule/resume_schedule/trigger_schedule/backfill_schedule/delete_schedule/
 get_schedule` (+ re-create for update). **Done** as sketched, with v1 scope cuts
-(DEVIATIONS D22): the `ScheduleSpec` compiles to one cron (intervals dividing a boundary
+(DEVIATIONS schedules): the `ScheduleSpec` compiles to one cron (intervals dividing a boundary
 are exact, others approximate; calendar `year`/interval `offset` dropped); overlap honors
 SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL (the fire dispatcher finds a still-running
 prior via an indexed `schedule_name` lookup over recent fires — DBOS tags every fire with
@@ -656,17 +656,17 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   recovered/continued only on workers of its build ID and never auto-migrates. **AUTO_UPGRADE**
   (move a running workflow to a newer version) and cluster ramping/routing have no DBOS
   analog and degrade to pinned; `is_target_worker_deployment_version_changed()` is always
-  `False`. See DEVIATIONS D29.
+  `False`. See DEVIATIONS worker-versioning.
 - **Current details (done).** `workflow.set_current_details()`/`get_current_details()` back
   free-form UI/CLI metadata as in-memory workflow state, reconstructed on replay (no
   checkpoint); settable on the deterministic loop (run/handlers), rejected in read-only
-  contexts, not surfaced to `describe()` in v1. See DEVIATIONS D30.
+  contexts, not surfaced to `describe()` in v1. See DEVIATIONS current-details.
 - **Activity context helpers (done).** `activity.is_worker_shutdown()` /
   `wait_for_worker_shutdown()` / `wait_for_worker_shutdown_sync()` read a *per-Worker* shutdown
   event (fresh per Worker, latched once the Worker trips it on `shutdown()`, so a straggler
   activity never observes a later Worker's flag); `ActivityEnvironment.worker_shutdown()` trips
   the env's own event for tests. `activity.shield_thread_cancel_exception()` is a no-op
-  (cancellation is cooperative — DEVIATIONS D26); `activity.client()` returns a Temporal client
+  (cancellation is cooperative — DEVIATIONS sync-activity-cancel); `activity.client()` returns a Temporal client
   lazily built from the Worker's `DBOSConfig` (or one passed to `ActivityEnvironment(client=)`).
   The per-Worker shutdown event + lazy client live on one `_ActivityWorkerState` object whose
   lifecycle is bound to the Worker run (built at construction, disposed off-loop after the
@@ -685,7 +685,7 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   `patch_async` (`enable_patching` in `dbos/_dbos_config.py`): it is async and assumes
   function_id == sequential code position, which our virtual-loop/command-queue split
   decouples, and it pins `app_version` to `"PATCHING_ENABLED"`. See `_internal/interpreter.py`
-  (`_patch`, `_patch_marker`, the `execute()` scan) and [DEVIATIONS.md](docs/DEVIATIONS.md) D28.
+  (`_patch`, `_patch_marker`, the `execute()` scan)
 - `workflow.unsafe.*`: `imports_passed_through()` → no-op context manager; `is_replaying()`
   real (§4.2); `in_sandbox()` → False; the rest no-ops.
 - Interceptors (client `Interceptor/OutboundInterceptor`, worker
@@ -701,7 +701,7 @@ samples-python `schedules/` corpus runs unmodified (conformance suite).
   workflows, riding the run meta-envelope (`RunMeta.headers`) and inbox envelopes as
   payload dicts; `workflow.payload_converter()`/`activity.payload_converter()` encode the
   values. `handle_query`/`handle_update_validator` are driven synchronously (queries are
-  sync, #11). See [DEVIATIONS.md](docs/DEVIATIONS.md) D24.
+  sync, #11).
 
 ### 6.9 Data conversion
 
@@ -719,7 +719,7 @@ envelope structure (`_internal/payloads.py`) wraps user payloads:
 user-payload bytes. All of this is Phase 3 (default JSON was moved out of Phase 1: nothing
 in the hello conformance corpus needs it, and the pipeline should be built once, together
 with codecs). **Done:** the converter, the per-boundary conversion, and the JSON DBOS
-serializer (`_internal/serializer.py`) all shipped; pickle is gone (see DEVIATIONS D21).
+serializer (`_internal/serializer.py`) all shipped; pickle is gone (see DEVIATIONS json-conversion).
 The realized envelope is a small payload dict (`{encoding, json|b64, meta?}`,
 `_internal/conversion.py`) — readable on disk — rather than the `{type_name, payloads}`
 sketch above; type hints come from signatures, codecs run at the async boundaries.
@@ -851,12 +851,12 @@ mid-update-handler (accepted-but-parked), and the is_replaying probe.
 **Phase 3 — Operational surface.** Schedules + cron + `start_delay` (cron done via
 delayed-enqueue chain hops — flipped `hello_cron`, hello 16/19; `create_schedule` +
 the full ScheduleHandle surface **done** — the samples-python `schedules/` corpus runs
-8/8, DEVIATIONS D22), continue-as-new
+8/8, DEVIATIONS schedules), continue-as-new
 (done: chain hops, carryover, follow_runs, child chains; flipped
 `hello_continue_as_new` and `safe_message_handlers` — `message_passing/` is 5/5),
 dynamic *signal/query/update* handlers + handler descriptions + dynamic activities
 (**done**; dynamic *workflows* are out of scope — rejected with a clear
-`NotImplementedError`, DEVIATIONS D25 / §10.1),
+`NotImplementedError`, DEVIATIONS dynamic-handlers / §10.1),
 workflow retry policies (done: attempt counts, backoff, non-retryable types,
 follow-on-failure, last-failure threading; the run input grew a meta-envelope that
 carries per-run chain state — the same envelope later carries memo/search attributes),
@@ -874,7 +874,7 @@ via a checkpointed gone-event their heartbeat/complete polls
 (AsyncActivityCancelledError) — flipped `hello_cancellation` and
 `hello_async_activity_completion`, hello 15/19), `list_workflows` query parser +
 `count_workflows`, client + activity interceptors (**done**: client outbound +
-activity inbound/outbound, DEVIATIONS D24; workflow in/outbound is Phase 4), the
+activity inbound/outbound; workflow in/outbound is Phase 4), the
 data-conversion pipeline
 (**done**: default JSON conversion — moved from Phase 1 — plus custom DataConverters +
 PayloadCodec, per-boundary conversion, and the JSON DBOS serializer that replaces pickle;
@@ -885,8 +885,8 @@ pydantic), memo/search-attribute storage. **Exit:** `samples-python` `schedules/
 **Phase 4 — Ecosystem & polish.** `Replayer` over
 DBOS step checkpoints via `fork_workflow` (**done**: non-determinism verification +
 `WorkflowHandle.fetch_history`, plus rehydrate-by-replay answering queries on closed
-workflows — flipped `hello_query`, DEVIATIONS D27), `patched()`/versioning, workflow
-interceptors (**done**: inbound/outbound + header propagation, DEVIATIONS D24),
+workflows — flipped `hello_query`, DEVIATIONS replay), `patched()`/versioning, workflow
+interceptors (**done**: inbound/outbound + header propagation),
 perf work
 (micro-checkpoint batching), signature-parity CI (introspect installed `temporalio` as a
 dev-dep and diff public signatures against ours — this test is the API-drift alarm).

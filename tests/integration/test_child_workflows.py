@@ -261,7 +261,7 @@ class TimeoutParent:
             return "no-timeout"
         except ChildWorkflowError as err:
             # run_timeout natively cancels the child → TERMINATED in our scheme
-            # (D19), surfaced to the parent as a terminated child.
+            # (cron-chains), surfaced to the parent as a terminated child.
             return f"timed-out:{type(err.cause).__name__}"
 
 

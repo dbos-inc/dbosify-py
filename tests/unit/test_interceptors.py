@@ -1,4 +1,4 @@
-"""Unit coverage for the interceptor header channel (DEVIATIONS D24): the
+"""Unit coverage for the interceptor header channel: the
 wire-form header codec round-trip and the interceptor base-class delegation.
 The end-to-end propagation is exercised under Postgres in
 tests/integration/test_interceptors.py.

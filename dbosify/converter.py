@@ -9,7 +9,7 @@ written against temporalio work unchanged.
 Deliberate omissions (kept lean):
 
 * **Protobuf payloads** — the ``json/protobuf`` and ``binary/protobuf``
-  encoders are not provided (a corollary of D1: no non-Python clients, so a
+  encoders are not provided (a corollary of no-server: no non-Python clients, so a
   cross-language proto schema buys nothing here). A raw ``protobuf.Message``
   passed as a payload falls through to the JSON encoder and fails *loudly* at
   encode time rather than being silently mishandled.

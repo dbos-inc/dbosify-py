@@ -61,7 +61,7 @@ def install_shim() -> None:
     from dbosify.client import Client
     from dbosify.worker import Worker
 
-    # The default namespace maps to its own DBOS schema (DEVIATIONS D1); the
+    # The default namespace maps to its own DBOS schema (DEVIATIONS no-server); the
     # client must use it, and the Worker derives the same from namespace="default".
     schema = namespace_schema(DEFAULT_NAMESPACE)
 
@@ -95,7 +95,7 @@ def install_shim() -> None:
             # Stash interceptors so the adapted ``Worker(client, ...)`` can
             # harvest them: temporalio Workers inherit the client's
             # interceptors, but ours take them via ``Worker(interceptors=)``
-            # (DEVIATIONS D24). Bridging it here lets the sample run unmodified.
+            # Bridging it here lets the sample run unmodified.
             client._conformance_interceptors = list(forwarded.get("interceptors", []))
             return client
         return await original_connect(cls, *args, **kwargs)
@@ -106,7 +106,7 @@ def install_shim() -> None:
     # Some samples import ``temporalio.api.common.v1.Payload`` purely for type
     # annotations (e.g. context_propagation's interceptor, under
     # ``from __future__ import annotations`` so it is never evaluated). The
-    # protobuf API is a non-goal (DEVIATIONS D1) and our Payload is a
+    # protobuf API is a non-goal (DEVIATIONS no-server) and our Payload is a
     # lightweight dict; register the module chain so annotation-only imports
     # resolve. Samples that actually *construct* a protobuf Payload
     # (custom_converter, encryption) still fail at runtime — correctly, since
@@ -131,7 +131,7 @@ def install_shim() -> None:
     def patched_worker_init(self: Any, first: Any, *args: Any, **kwargs: Any) -> None:
         if isinstance(first, Client):
             # Harvest the client's interceptors (temporalio Workers inherit
-            # them; ours take them explicitly — DEVIATIONS D24).
+            # them; ours take them explicitly).
             harvested = getattr(first, "_conformance_interceptors", None)
             if harvested and "interceptors" not in kwargs:
                 kwargs["interceptors"] = harvested

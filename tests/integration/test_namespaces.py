@@ -1,4 +1,4 @@
-"""Namespaces backed by DBOS schemas (DEVIATIONS D1): a Worker/Client pair runs
+"""Namespaces backed by DBOS schemas (DEVIATIONS no-server): a Worker/Client pair runs
 in a namespace's own schema, and clients for different namespaces coexist in one
 process (per-engine schema isolation). The low-level constructor's rejection of
 a non-namespace schema is unit-tested in tests/unit/test_namespaces.py."""

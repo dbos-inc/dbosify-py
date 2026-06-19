@@ -129,9 +129,9 @@ class CtCancelActivityWorkflow:
 
 
 @pytest.mark.skip(
-    reason="ActivityCancellationType semantics (D32 family): TRY_CANCEL / "
+    reason="ActivityCancellationType semantics (activity-cancel-details family): TRY_CANCEL / "
     "WAIT_CANCELLATION_COMPLETED / ABANDON are not faithfully reproduced. Our "
-    "activity cancellation is cooperative (D26) and the activity's swallow-and-"
+    "activity cancellation is cooperative (sync-activity-cancel) and the activity's swallow-and-"
     "return outcome wins, so the per-mode result strings ('Error: CancelledError' "
     "vs 'Got cancelled error...') don't match. Same root cause as the skipped "
     "test_workflow_cancel_multi."
@@ -384,7 +384,7 @@ class CtCancelChildWorkflow:
 
 
 @pytest.mark.skip(
-    reason="Child-workflow cancellation cause shape (D32 family): cancelling a "
+    reason="Child-workflow cancellation cause shape (activity-cancel-details family): cancelling a "
     "started child via task.cancel()/handle.cancel() does not surface as "
     "WorkflowFailureError(cause=ChildWorkflowError(cause=CancelledError)) in our "
     "model. Same family as the skipped test_workflow_child_cancel_reason."
@@ -665,7 +665,7 @@ class CtTimeoutSupportWorkflow:
 
 @pytest.mark.skip(
     reason="Timeout-cancels-activity surfaces as a workflow CancelledError rather "
-    "than ActivityError(cause=CancelledError) (D26/D32 cooperative-cancel / "
+    "than ActivityError(cause=CancelledError) (sync-activity-cancel/activity-cancel-details cooperative-cancel / "
     "eager-dispatch family): wrapping execute_activity in asyncio.timeout/wait_for/"
     "call_later cancels the awaiting workflow coroutine, and the cooperatively-"
     "cancelled activity's own outcome doesn't surface as an ActivityError."

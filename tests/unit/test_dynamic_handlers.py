@@ -1,7 +1,7 @@
 """Decoration-time behavior of dynamic handlers/activities and handler
 descriptions (DESIGN §6.1/§6.8). End-to-end dispatch lives in
 tests/integration/test_dynamic_handlers.py; dynamic *workflows* are rejected
-(DEVIATIONS D25)."""
+(DEVIATIONS dynamic-handlers)."""
 
 import collections.abc
 import typing
@@ -214,7 +214,7 @@ def test_no_thread_cancel_exception_default_and_true_ok() -> None:
 
 def test_no_thread_cancel_exception_false_rejected() -> None:
     # Asking for Temporal's raise-into-the-thread behavior fails loudly at
-    # decoration time rather than silently degrading (DEVIATIONS D26).
+    # decoration time rather than silently degrading (DEVIATIONS sync-activity-cancel).
     with pytest.raises(NotImplementedError, match="no_thread_cancel_exception"):
 
         @activity.defn(no_thread_cancel_exception=False)

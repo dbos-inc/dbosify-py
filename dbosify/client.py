@@ -1085,7 +1085,7 @@ class Client:
 
     Use :py:meth:`connect` — ``Client.connect(system_database_url,
     namespace=...)`` builds the underlying ``dbos.DBOSClient`` pointed at the
-    namespace's schema (DEVIATIONS D1), so you state the namespace once and
+    namespace's schema (DEVIATIONS no-server), so you state the namespace once and
     never touch ``dbos_system_schema``. For full control of the DBOSClient
     (custom engine/pool), build it yourself and use the constructor, where the
     DBOSClient's schema *is* the namespace.
@@ -1100,7 +1100,7 @@ class Client:
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
         """Low-level constructor over a caller-built ``dbos.DBOSClient``. The
-        client's **namespace is its DBOSClient's schema** (DEVIATIONS D1) — the
+        client's **namespace is its DBOSClient's schema** (DEVIATIONS no-server) — the
         single source of truth — so build the DBOSClient with
         ``dbos_system_schema=namespace_schema(<namespace>)``, or just use
         :py:meth:`connect`, which takes a namespace and builds the DBOSClient
@@ -1150,7 +1150,7 @@ class Client:
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
-        """Connect to ``system_database_url`` in ``namespace`` (DEVIATIONS D1).
+        """Connect to ``system_database_url`` in ``namespace`` (DEVIATIONS no-server).
 
         Builds the underlying ``dbos.DBOSClient`` for you — pointed at the
         namespace's schema, with the JSON serializer — so the namespace is
@@ -1242,7 +1242,7 @@ class Client:
             "priority": priority,
             "request_id": request_id,
             # PinnedVersioningOverride matches the enforced default; the
-            # auto-upgrade override has no DBOS analog (DEVIATIONS D29).
+            # auto-upgrade override has no DBOS analog (DEVIATIONS worker-versioning).
             "versioning_override": versioning_override,
             **unsupported,
         }.items():
@@ -1326,7 +1326,7 @@ class Client:
             # backoff), so describe()/signals/result() work right away.
             _schedules.validate_cron(cron_schedule)
             if start_delay is not None:
-                # DEVIATION (DEVIATIONS D19): our cron uses the enqueue delay
+                # DEVIATION (DEVIATIONS cron-chains): our cron uses the enqueue delay
                 # internally to back off run 0 to the first occurrence, so a
                 # user start_delay can't ride alongside. temporalio accepts
                 # the combination and silently ignores start_delay ("does not
@@ -1350,11 +1350,11 @@ class Client:
         _warn_on_deprecated_search_attributes(search_attributes)
         meta.attributes = await _attributes.encode_attributes(memo, search_attributes)
         # Interceptor headers (set by a client interceptor's start_workflow) ride
-        # into the run as ExecuteWorkflowInput.headers (DEVIATIONS D24).
+        # into the run as ExecuteWorkflowInput.headers.
         meta.headers = (await conversion.encode_headers(input.headers)) or None
 
         # Messages to deliver with the start — Temporal's atomic
-        # signal-/update-with-start (DEVIATIONS D7): the start signal and/or an
+        # signal-/update-with-start (DEVIATIONS start-policies): the start signal and/or an
         # update request, each ``(envelope, topic, idempotency_key)``. Built
         # before conflict resolution so they ride whichever path the start
         # takes: bundled into the enqueue transaction on a fresh start, or sent
@@ -1696,7 +1696,7 @@ class Client:
         typically USE_EXISTING) and send it an update, waiting for
         ``wait_for_stage``. The update rides the start: on a *fresh* run the
         start enqueue and the update request commit in one system-database
-        transaction (Temporal's atomic update-with-start, DEVIATIONS.md D7); on
+        transaction (Temporal's atomic update-with-start, DEVIATIONS.md start-policies); on
         a USE_EXISTING attach it is sent to the already-running run as part of
         the start. The request is routed through the update outbound
         interceptors first, so their modifications apply on both paths.
@@ -2142,7 +2142,7 @@ class WorkflowHandle:
         # Read status once: it gates the reject_condition and decides whether the
         # query needs a rehydrate replay (closed workflow). Read directly rather
         # than via describe() so a describe_workflow interceptor is not invoked
-        # as a side effect of a query. (No server arbiter, DEVIATIONS D7 family:
+        # as a side effect of a query. (No server arbiter, DEVIATIONS start-policies family:
         # the status read and the query send are not atomic.) A missing run
         # surfaces as a query failure, not a bare RuntimeError.
         try:
@@ -2188,11 +2188,11 @@ class WorkflowHandle:
             # TERMINATED (native kill, only partial checkpoints), TIMED_OUT, and
             # CONTINUED_AS_NEW cannot be faithfully replayed to reconstruct a
             # queryable final state — fail clearly rather than spin up a fork
-            # that diverges (DEVIATIONS D27).
+            # that diverges (DEVIATIONS replay).
             raise WorkflowQueryFailedError(
                 f"cannot query a workflow in state {status.name}: rehydrate-by-"
                 "replay supports COMPLETED/FAILED/CANCELED runs only "
-                "(see DEVIATIONS D27)"
+                "(see DEVIATIONS replay)"
             )
         if reply is None:
             raise WorkflowQueryFailedError(f"query did not complete within {timeout}s")
@@ -2225,11 +2225,11 @@ class WorkflowHandle:
                 # The fork reached a terminal state without serving the query:
                 # the reconstruction diverged (the workflow's code changed since
                 # it ran), or no worker for this type is running in *this*
-                # process to drive the rehydrate (DEVIATIONS D27).
+                # process to drive the rehydrate (DEVIATIONS replay).
                 raise WorkflowQueryFailedError(
                     "rehydrate-by-replay produced no query reply: the workflow's "
                     "code may have changed since it ran, or no worker for this "
-                    "type is running in the querying process (DEVIATIONS D27)"
+                    "type is running in the querying process (DEVIATIONS replay)"
                 )
             return reply
         finally:
@@ -2554,7 +2554,7 @@ class WorkflowHandle:
         code runs and may still execute activities. The workflow may also
         swallow the cancel and complete normally. Raises if the targeted
         run is already closed (as in Temporal); the status check is
-        client-side, so a tiny race window remains (D7 family).
+        client-side, so a tiny race window remains (start-policies family).
         """
         _ignore_rpc_options("cancel", rpc_metadata, rpc_timeout)
         await self._client._impl.cancel_workflow(

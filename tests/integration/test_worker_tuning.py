@@ -1,4 +1,4 @@
-"""Worker tuning options honored onto DBOS (DEVIATIONS D34):
+"""Worker tuning options honored onto DBOS:
 max_concurrent_activities (semaphore), identity (executor_id), and
 activity_executor (sync-activity thread pool)."""
 

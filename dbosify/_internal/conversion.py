@@ -156,7 +156,7 @@ def decode_value_sync(value: Any, type_hint: Optional[type] = None) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Headers (interceptor header-propagation channel, DEVIATIONS D24).
+# Headers (interceptor header-propagation channel).
 #
 # At the interceptor boundary a header value is a :py:class:`Payload` (as in
 # temporalio — the user encodes/decodes it with ``workflow.payload_converter``/

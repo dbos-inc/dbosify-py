@@ -1,4 +1,4 @@
-"""Temporal namespaces backed by DBOS system schemas (DEVIATIONS D1).
+"""Temporal namespaces backed by DBOS system schemas (DEVIATIONS no-server).
 
 Each Temporal namespace maps to its own Postgres schema holding the DBOS
 system tables (``dbos_system_schema``), so workflows in different namespaces

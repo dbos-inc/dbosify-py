@@ -10,7 +10,7 @@ workflow with a per-occurrence deterministic id (see
 the schedule's ``context`` so ``describe``/``list``/``update`` can reconstruct
 it; ``ScheduleSpec`` itself compiles down to a cron string + timezone for DBOS.
 
-Deviations (DEVIATIONS D22): interval periods that don't divide a cron
+Deviations (DEVIATIONS schedules): interval periods that don't divide a cron
 boundary, calendar ``year`` constraints, and interval offsets are approximated;
 overlap policy honors SKIP / CANCEL_OTHER / TERMINATE_OTHER / ALLOW_ALL (via a
 bounded backward walk of prior occurrences at fire time) but rejects
@@ -173,7 +173,7 @@ class SchedulePolicy:
 
     ``overlap`` defaults to ``SKIP`` (matching Temporal). SKIP, CANCEL_OTHER,
     TERMINATE_OTHER, and ALLOW_ALL are honored; BUFFER_ONE/BUFFER_ALL are
-    rejected at ``create_schedule`` time (DEVIATIONS D22)."""
+    rejected at ``create_schedule`` time (DEVIATIONS schedules)."""
 
     overlap: ScheduleOverlapPolicy = field(
         default_factory=lambda: ScheduleOverlapPolicy.SKIP
@@ -464,7 +464,7 @@ class ScheduleHandle:
     ) -> None:
         """Update this schedule. The ``updater`` (sync or async) receives the
         current description and returns the new ``ScheduleUpdate`` (or ``None``
-        to skip). Implemented as delete-then-recreate (DEVIATIONS D22)."""
+        to skip). Implemented as delete-then-recreate (DEVIATIONS schedules)."""
         await self._client._impl.update_schedule(
             UpdateScheduleInput(
                 id=self.id,
@@ -497,7 +497,7 @@ class ScheduleHandle:
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
         """Pause this schedule (DBOS ``pause_schedule``). ``note`` is accepted
-        but not persisted (DEVIATIONS D22)."""
+        but not persisted (DEVIATIONS schedules)."""
         await self._client._impl.pause_schedule(
             PauseScheduleInput(
                 id=self.id,
@@ -518,7 +518,7 @@ class ScheduleHandle:
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
         """Unpause this schedule (DBOS ``resume_schedule``). ``note`` is accepted
-        but not persisted (DEVIATIONS D22)."""
+        but not persisted (DEVIATIONS schedules)."""
         await self._client._impl.unpause_schedule(
             UnpauseScheduleInput(
                 id=self.id,
@@ -540,7 +540,7 @@ class ScheduleHandle:
     ) -> None:
         """Trigger an immediate action on this schedule. The action runs under
         the schedule's configured overlap policy; a per-call ``overlap`` override
-        is accepted only as ``ALLOW_ALL`` (others raise — DEVIATIONS D22)."""
+        is accepted only as ``ALLOW_ALL`` (others raise — DEVIATIONS schedules)."""
         await self._client._impl.trigger_schedule(
             TriggerScheduleInput(
                 id=self.id,
@@ -563,7 +563,7 @@ class ScheduleHandle:
         """Backfill this schedule over the given time periods. Backfilled actions
         run under the schedule's configured overlap policy; a per-backfill
         ``overlap`` override is accepted only as ``ALLOW_ALL`` (others raise —
-        DEVIATIONS D22)."""
+        DEVIATIONS schedules)."""
         await self._client._impl.backfill_schedule(
             BackfillScheduleInput(
                 id=self.id,
@@ -843,27 +843,27 @@ def compile_spec(spec: ScheduleSpec) -> "tuple[str, Optional[str]]":
     """Compile a ``ScheduleSpec`` to a (cron, timezone_name) pair for DBOS.
 
     cron_expressions win, then intervals, then calendars. Extra entries beyond
-    the first are dropped with a deviation (DEVIATIONS D22)."""
+    the first are dropped with a deviation (DEVIATIONS schedules)."""
     tz_name = spec.time_zone_name
     if spec.cron_expressions:
         if len(spec.cron_expressions) > 1:
             _schedules.logger.debug(
                 "multiple cron_expressions on a schedule; using the first "
-                "(DEVIATIONS D22)"
+                "(DEVIATIONS schedules)"
             )
         fields, tz = _schedules.parse_cron(spec.cron_expressions[0])
         return fields, tz_name or (None if str(tz) == "UTC" else str(tz))
     if spec.intervals:
         if len(spec.intervals) > 1:
             _schedules.logger.debug(
-                "multiple intervals on a schedule; using the first (DEVIATIONS D22)"
+                "multiple intervals on a schedule; using the first (DEVIATIONS schedules)"
             )
         i = spec.intervals[0]
         return _schedules.interval_to_cron(i.every, i.offset), tz_name
     if spec.calendars:
         if len(spec.calendars) > 1:
             _schedules.logger.debug(
-                "multiple calendars on a schedule; using the first (DEVIATIONS D22)"
+                "multiple calendars on a schedule; using the first (DEVIATIONS schedules)"
             )
         c = spec.calendars[0]
 
@@ -939,7 +939,7 @@ def _list_description_from_row(row: Mapping[str, Any]) -> ScheduleListDescriptio
 
 
 def require_supported_overlap(overlap: Optional[ScheduleOverlapPolicy]) -> None:
-    """Reject overlap policies dbosify does not implement (DEVIATIONS D22).
+    """Reject overlap policies dbosify does not implement (DEVIATIONS schedules).
 
     SKIP, CANCEL_OTHER, TERMINATE_OTHER, and ALLOW_ALL are honored;
     BUFFER_ONE/BUFFER_ALL need durable start-after-completion queueing we don't
@@ -952,7 +952,7 @@ def require_supported_overlap(overlap: Optional[ScheduleOverlapPolicy]) -> None:
     ):
         raise NotImplementedError(
             "dbosify does not support ScheduleOverlapPolicy.BUFFER_ONE / "
-            "BUFFER_ALL yet (DEVIATIONS D22); SKIP, CANCEL_OTHER, "
+            "BUFFER_ALL yet (DEVIATIONS schedules); SKIP, CANCEL_OTHER, "
             "TERMINATE_OTHER, and ALLOW_ALL are supported"
         )
 
@@ -961,14 +961,14 @@ def require_overlap_override_supported(
     overlap: Optional[ScheduleOverlapPolicy],
 ) -> None:
     """Reject a per-call (trigger/backfill) overlap override we don't honor
-    (DEVIATIONS D22). A per-call override can't be threaded through DBOS's
+    (DEVIATIONS schedules). A per-call override can't be threaded through DBOS's
     trigger/backfill, so only ``None`` (use the schedule's configured policy)
     and ``ALLOW_ALL`` (the least-restrictive, no-op case) are accepted; any
     other value raises rather than being silently ignored."""
     if overlap is not None and overlap != ScheduleOverlapPolicy.ALLOW_ALL:
         raise NotImplementedError(
             "dbosify does not honor a per-call ScheduleOverlapPolicy "
-            f"override of {overlap!r} on trigger/backfill (DEVIATIONS D22); the "
+            f"override of {overlap!r} on trigger/backfill (DEVIATIONS schedules); the "
             "schedule's configured overlap policy applies. Only None or "
             "ALLOW_ALL are accepted."
         )

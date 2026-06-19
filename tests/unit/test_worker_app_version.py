@@ -1,6 +1,6 @@
 """The Worker pins a stable default DBOS ``application_version`` so redeploys
 don't strand in-flight workflows, cooperating workers agree on a version, and
-``workflow.patched()`` reaches pre-patch runs (DESIGN §6.8 / DEVIATIONS D28).
+``workflow.patched()`` reaches pre-patch runs (DESIGN §6.8).
 These cover the resolution of ``_with_default_app_version`` without launching
 DBOS. The override is config-only — there is no ``DBOS__APPVERSION`` special
 case.

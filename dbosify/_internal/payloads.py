@@ -58,7 +58,7 @@ class RunMeta:
     attributes: Optional[Dict[str, Any]] = None
     # The run's interceptor headers in wire form (str -> payload dict). Set from
     # the client start (or a child/continue-as-new), surfaced to workflow
-    # interceptors as ExecuteWorkflowInput.headers (DEVIATIONS D24). Carried
+    # interceptors as ExecuteWorkflowInput.headers. Carried
     # across cron/retry hops (the same run re-running); continue-as-new sets its
     # own (an interceptor re-injects them).
     headers: Optional[Dict[str, Any]] = None

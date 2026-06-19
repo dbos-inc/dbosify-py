@@ -67,7 +67,7 @@ class ScheduledGreeter:
 # Activities run in the in-process worker, so they share this module state. We
 # count *starts* (not instantaneous concurrency): SKIP suppresses most fires
 # while an action is still running, so far fewer actions start than under
-# ALLOW_ALL — a signal robust to the small fire-time TOCTOU race (D22).
+# ALLOW_ALL — a signal robust to the small fire-time TOCTOU race (schedules).
 _overlap = {"started": 0}
 
 
@@ -295,7 +295,7 @@ async def test_pause_and_unpause() -> None:
         await handle.pause(note="paused now")
         desc = await handle.describe()
         assert desc.schedule.state.paused is True
-        # The pause note is accepted but not persisted (D22); the creation note
+        # The pause note is accepted but not persisted (schedules); the creation note
         # is unchanged.
         assert desc.schedule.state.note == "a note"
 
@@ -462,7 +462,7 @@ async def test_schedule_persists_across_worker_restart() -> None:
         await handle.delete()
 
 
-# --- overlap policies (DEVIATIONS D22) --------------------------------------
+# --- overlap policies (DEVIATIONS schedules) --------------------------------------
 
 
 async def test_overlap_skip_suppresses_runs() -> None:
@@ -470,7 +470,7 @@ async def test_overlap_skip_suppresses_runs() -> None:
     # running across an unbounded number of occurrences. We wait until many fires
     # have happened (each runs the dispatcher, which skips), then assert that
     # despite all those fires only the one blocked action ever started (≤2,
-    # tolerating the documented fire-time TOCTOU race, D22). A broken SKIP would
+    # tolerating the documented fire-time TOCTOU race, schedules). A broken SKIP would
     # have started one action *per fire* (~6). The huge margin (≤2 vs ≥6) is what
     # makes this reliable rather than timing-dependent.
     _overlap.update(started=0)
@@ -563,7 +563,7 @@ async def test_buffer_overlap_rejected() -> None:
 
 
 async def test_trigger_overlap_override_rejected_except_allow_all() -> None:
-    # A per-call overlap override is only accepted as ALLOW_ALL (D22); any other
+    # A per-call overlap override is only accepted as ALLOW_ALL (schedules); any other
     # value raises rather than being silently ignored. ALLOW_ALL is accepted and
     # the action still fires (under the schedule's configured policy).
     async with _env() as client:

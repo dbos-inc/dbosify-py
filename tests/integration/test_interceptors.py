@@ -686,7 +686,7 @@ async def test_schedule_update_does_not_invoke_describe_schedule_interceptor() -
     assert "describe_schedule" not in verbs
 
 
-# --- Workflow interceptors + header propagation (DEVIATIONS D24) -----------
+# --- Workflow interceptors + header propagation -----------
 #
 # A context-propagation interceptor (the canonical tracing/baggage shape): a
 # value set once at the client surfaces in the workflow, its activities, its

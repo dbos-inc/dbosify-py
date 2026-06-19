@@ -628,7 +628,7 @@ async def test_list_search_attribute_value_types() -> None:
         assert await ids(f"CustomDatetime = '{WHEN_VAL.isoformat()}'") == {"typed"}
         # a non-matching value finds nothing.
         assert await ids("CustomInt = 999") == set()
-        # DEVIATION (D15): keyword-LIST attributes are not filterable. The value
+        # DEVIATION (memo-search-attributes): keyword-LIST attributes are not filterable. The value
         # is stored as a JSON array (["red", "blue"]) and our containment filter
         # is scalar-shaped ({"v": "red"}); with no cluster type registry the
         # query can't know to wrap the value as an array, so it never matches.

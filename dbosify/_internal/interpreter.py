@@ -696,7 +696,7 @@ class _ChildExec:
 
 
 # ---------------------------------------------------------------------------
-# Workflow interceptor chain roots (DEVIATIONS D24). Built fresh per execution
+# Workflow interceptor chain roots. Built fresh per execution
 # in Interpreter._build_interceptor_chains; the inbound root performs the real
 # dispatch into user handlers, the outbound root performs the real activity /
 # child / signal / continue-as-new operations via the interpreter's runtime
@@ -895,7 +895,7 @@ class Interpreter(_Runtime):
         # explicit unset that shadows the @defn handler. Absence falls through
         # to the decorator handlers; key None is the dynamic (catch-all)
         # override. In-memory + reconstructed on replay (run() re-registers),
-        # like current details (DEVIATIONS D30).
+        # like current details (DEVIATIONS current-details).
         self._signal_overrides: Dict[
             Optional[str], Optional[Tuple[Any, Callable[..., Any]]]
         ] = {}
@@ -967,7 +967,7 @@ class Interpreter(_Runtime):
         # Free-form UI/CLI details set via workflow.set_current_details(): pure
         # in-memory state, reconstructed deterministically on recovery by
         # replaying the same set_current_details calls (no checkpoint needed —
-        # not surfaced to describe()/list in v1, DEVIATIONS D30).
+        # not surfaced to describe()/list in v1, DEVIATIONS current-details).
         self._current_details: str = ""
         self._random = Random(0)
         # The deterministic random seed (checkpointed once at run start), exposed
@@ -977,7 +977,7 @@ class Interpreter(_Runtime):
         self._start_time = 0.0
         # ("ok", result) | ("failure", exc) | ("task_failure", exc)
         self._outcome: Optional[Tuple[str, Any]] = None
-        # Workflow interceptor chains (DEVIATIONS D24), built in execute().
+        # Workflow interceptor chains, built in execute().
         # _inbound wraps run/handler dispatch; _outbound (installed via
         # _inbound.init) wraps activity/child/signal/continue-as-new calls.
         self._inbound: Optional[_wfi.WorkflowInboundInterceptor] = None
@@ -3215,7 +3215,7 @@ class Interpreter(_Runtime):
         self, callback: Callable[[int], None]
     ) -> None:
         # Accepted for parity but intentionally a no-op: our seed is fixed per
-        # run, so the callback could never fire (DEVIATIONS D31).
+        # run, so the callback could never fire (DEVIATIONS random-seed).
         return None
 
     def runtime_instance(self) -> Any:
@@ -3378,7 +3378,7 @@ class Interpreter(_Runtime):
         # read live from the worker's DBOS application_version (post-launch, so
         # it reflects an explicit build_id, the pinned default, or a computed
         # code-hash for auto-versioning) — the version DBOS actually pins
-        # recovery/dequeue to, so reported == enforced (DEVIATIONS D29). None
+        # recovery/dequeue to, so reported == enforced (DEVIATIONS worker-versioning). None
         # when no Worker is active (the in-process dispatcher harness).
         from . import registry
 

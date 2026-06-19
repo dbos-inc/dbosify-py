@@ -6,7 +6,7 @@ The kill lands while scheduled actions are in flight (every-second fires with
   * keep the persisted schedule firing after restart (more occurrences),
 with each occurrence's deterministic id ensuring no *twin* execution.
 
-Note on at-least-once (DEVIATIONS D6): an action whose ``record_occurrence``
+Note on at-least-once (DEVIATIONS failover): an action whose ``record_occurrence``
 activity wrote its side-effect but had not yet checkpointed that step when the
 worker was killed re-executes that activity on recovery — so an occurrence may
 legitimately be recorded twice. The deterministic per-occurrence id still bars
@@ -57,6 +57,6 @@ def test_sigkill_mid_scheduled_action(tmp_path: Path) -> None:
     # The deterministic per-occurrence id bars a twin / replay storm: no
     # occurrence is recorded more than twice — the original write plus at most a
     # single at-least-once recovery re-run for an action that was mid-activity
-    # (side-effect done, step not yet checkpointed) at the kill (DEVIATIONS D6).
+    # (side-effect done, step not yet checkpointed) at the kill (DEVIATIONS failover).
     # A real twin or replay loop would push some id past two.
     assert max(counts.values()) <= 2, occurrences

@@ -393,7 +393,7 @@ class MiIDConflictWorkflow:
     "(cancel_workflow_async) rather than hard-terminating it, so its status ends "
     "CANCELED not TERMINATED and a cancel-ignoring run never resolves — the test "
     "hangs at that assertion. Needs a hard-terminate primitive (DBOS native "
-    "terminate has the D27 partial-checkpoint caveat)."
+    "terminate has the replay partial-checkpoint caveat)."
 )
 async def test_workflow_id_conflict(client: Client) -> None:
     async with new_worker(client, MiIDConflictWorkflow) as worker:

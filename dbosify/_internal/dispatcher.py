@@ -434,7 +434,7 @@ async def _enqueue_next_run(
 # action workflow under a per-occurrence deterministic id (so a re-fire at the
 # same nominal time is an idempotent no-op while distinct occurrences each run).
 #
-# Overlap (DEVIATIONS D22): for any policy other than ALLOW_ALL the dispatcher
+# Overlap (DEVIATIONS schedules): for any policy other than ALLOW_ALL the dispatcher
 # finds the most recently *started* action of this schedule and checks whether
 # it is still open. Every fire is a dispatcher firing that DBOS tags with the
 # schedule name, so an indexed schedule lookup (not a prefix scan, §6.4) yields
@@ -527,7 +527,7 @@ async def _apply_overlap_policy(
     elif overlap == _OVERLAP_CANCEL_OTHER:
         # Cooperative cancel (lets the running action's cleanup run). We do not
         # wait for it to finish unwinding before starting the next (DEVIATIONS
-        # D22): they may briefly overlap.
+        # schedules): they may briefly overlap.
         await DBOS.send_async(
             prior, inbox.cancel_envelope("schedule overlap"), inbox.INBOX_TOPIC
         )
@@ -547,7 +547,7 @@ async def _running_prior_occurrence(
     most recent occurrence that actually left an action row (skipped fires leave
     none) is the candidate, and it counts as a running prior iff still open.
     Bounded to the most recent ``_OVERLAP_LOOKBACK_LIMIT`` fires (DEVIATIONS
-    D22). Unlike the old cron-grid walk this also matches off-grid trigger/
+    schedules). Unlike the old cron-grid walk this also matches off-grid trigger/
     backfill fires, which that walk could not reproduce."""
     base = action["id"]
     schedule_name = context["schedule_id"]

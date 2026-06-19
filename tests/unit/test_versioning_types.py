@@ -1,6 +1,6 @@
 """Worker-versioning value types (no database). These mirror
 ``temporalio.common`` for parity; their behavior is inert in dbosify
-(DEVIATIONS D29)."""
+(DEVIATIONS worker-versioning)."""
 
 import pytest
 

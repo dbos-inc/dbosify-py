@@ -31,7 +31,7 @@ def cancellable_activity() -> str:
 @activity.defn
 def worker_lifecycle_activity() -> str:
     # shield_thread_cancel_exception is a no-op here (cooperative cancellation,
-    # DEVIATIONS D26) — the body still runs.
+    # DEVIATIONS sync-activity-cancel) — the body still runs.
     with activity.shield_thread_cancel_exception():
         shutdown = activity.is_worker_shutdown()
     activity.wait_for_worker_shutdown_sync(timeout=0.01)

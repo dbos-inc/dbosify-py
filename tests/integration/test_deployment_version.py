@@ -1,5 +1,5 @@
 """Worker deployment versioning (audit item 2), built on DBOS versioning
-(DEVIATIONS D29): a build ID *is* the DBOS ``application_version`` (set via
+(DEVIATIONS worker-versioning): a build ID *is* the DBOS ``application_version`` (set via
 ``build_id`` / ``deployment_config``, else derived from the app name +
 ``application_version``), surfaced via
 ``workflow.Info.get_current_deployment_version()``. Because DBOS scopes recovery
@@ -112,7 +112,7 @@ async def test_explicit_build_id() -> None:
     # The build_id IS the DBOS application_version — the version DBOS scopes
     # recovery and queue dequeue to. That equality is what makes the reported
     # deployment version the *actual* pinned routing version (PINNED is real,
-    # not cosmetic). See DEVIATIONS D29.
+    # not cosmetic). See DEVIATIONS worker-versioning.
     probe = DBOSClient(system_database_url=system_database_url())
     try:
         status = probe.retrieve_workflow("dv-build-id").get_status()
