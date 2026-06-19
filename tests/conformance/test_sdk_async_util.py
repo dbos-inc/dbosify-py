@@ -363,17 +363,14 @@ async def test_workflow_coroutines_can_use_semaphore(client: Client) -> None:
 
 
 @pytest.mark.skip(
-    reason=(
-        "Peak-concurrency assertion (semaphore caps concurrent update handlers "
-        "at 3) does not hold in our model. Upstream relies on creating the "
-        "updates in the Admitted state so the worker dequeues them as one batch, "
-        "starting all handler coroutines together so they actually contend for "
-        "the semaphore. Without that Admitted-update batching the concurrently "
-        "fired updates arrive and interleave differently, so the observed peak "
-        "differs from the expected value of 3. Sister tests "
-        "(test_workflow_coroutines_can_use_semaphore, the *respects_timeout "
-        "tests) already cover semaphore-bounded concurrency behaviorally."
-    )
+    reason="Confirmed by running: our update handlers execute SEQUENTIALLY "
+    "(observed peak_in_critical_section=1, not 3) — concurrently-fired updates are "
+    "delivered and processed one per drain cycle rather than interleaved like "
+    "Temporal's batch of Admitted updates, so they never contend for the "
+    "semaphore. Relaxing peak to <= cap would make the assertion vacuous (1 is "
+    "always <= 3). Semaphore-bounded concurrency is covered behaviorally by the "
+    "coroutine sister tests (which do interleave); the *update-handler* "
+    "concurrency this asserts isn't observable in our delivery model."
 )
 async def test_update_handler_can_use_semaphore_to_control_handler_execution_concurrency(
     client: Client,

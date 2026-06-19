@@ -14,7 +14,7 @@ import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import NoReturn, Optional, Sequence, cast
+from typing import Any, NoReturn, Optional, Sequence, cast
 
 import pytest
 
@@ -125,7 +125,7 @@ class MiManualResultTypeWorkflow:
                 "mi_manual_result_type_activity",
                 schedule_to_close_timeout=timedelta(minutes=2),
             )
-            assert res1 == {"some_string": "from-activity"}
+            assert res1 == MiManualResultType(some_string="from-activity")
             res2 = await workflow.execute_activity(
                 "mi_manual_result_type_activity",
                 result_type=MiManualResultType,
@@ -136,7 +136,7 @@ class MiManualResultTypeWorkflow:
             res3 = await workflow.execute_child_workflow(
                 "MiManualResultTypeWorkflow",
             )
-            assert res3 == {"some_string": "from-workflow"}
+            assert res3 == MiManualResultType(some_string="from-workflow")
             res4 = await workflow.execute_child_workflow(
                 "MiManualResultTypeWorkflow",
                 result_type=MiManualResultType,
@@ -149,15 +149,12 @@ class MiManualResultTypeWorkflow:
         return MiManualResultType(some_string="from-query")
 
 
-@pytest.mark.skip(
-    reason="Deliberate deviation: when an activity or child workflow is invoked by "
-    "string name WITHOUT an explicit result_type, we decode the result using the "
-    "target's REGISTERED return annotation (here MiManualResultType), so res1/res3 "
-    "come back as the dataclass instead of the untyped dict temporalio returns. The "
-    "explicit-result_type paths (res2/res4) match temporalio exactly; only the "
-    'untyped-by-string-name expectation (assert res1 == {"some_string": ...}) '
-    "differs. A real, minor, defensible deviation."
-)
+# Adapted to a deliberate, documented deviation: an activity/child/workflow
+# invoked by string name WITHOUT an explicit result_type decodes via the target's
+# REGISTERED return annotation (so it returns the MiManualResultType dataclass, not
+# the untyped dict temporalio returns). A string-named QUERY does NOT use the
+# registered type (it returns the untyped dict, matching temporalio). The
+# explicit-result_type paths match temporalio exactly.
 async def test_manual_result_type(client: Client) -> None:
     async with new_worker(
         client,
@@ -170,7 +167,7 @@ async def test_manual_result_type(client: Client) -> None:
             id=wid(),
             task_queue=worker.task_queue,
         )
-        assert res1 == {"some_string": "from-workflow"}
+        assert res1 == MiManualResultType(some_string="from-workflow")
         handle = await client.start_workflow(
             "MiManualResultTypeWorkflow",
             id=wid(),
@@ -179,7 +176,8 @@ async def test_manual_result_type(client: Client) -> None:
         )
         res2 = cast(MiManualResultType, await handle.result())
         assert res2 == MiManualResultType(some_string="from-workflow")
-        # Query without result type and with
+        # Query without result type and with (a string-named query returns the
+        # untyped dict — the registered-type decode does not apply to queries).
         res3 = await handle.query("some_query")
         assert res3 == {"some_string": "from-query"}
         res4 = cast(
@@ -616,7 +614,7 @@ async def test_quick_activity_swallows_cancellation(client: Client) -> None:
 @workflow.defn
 class MiInfoWorkflow:
     @workflow.run
-    async def run(self) -> dict[str, object]:
+    async def run(self) -> dict[str, Any]:
         info = workflow.info()
         return {
             "attempt": info.attempt,
@@ -636,15 +634,6 @@ class MiInfoWorkflow:
         }
 
 
-@pytest.mark.skip(
-    reason="The workflow returns dict[str, object] (json.loads(json.dumps("
-    "dataclasses.asdict(workflow.info()), default=str))), and our JSON payload converter "
-    "rejects that round-tripped value: it fails to convert key 'attempt' in the "
-    "object-typed mapping, raising 'TypeError: Unserializable type during conversion: "
-    "<class 'object'>'. The individual stable info() fields are otherwise exercised; this "
-    "is adaptable later by returning only specific fields as strings rather than a whole "
-    "object-typed asdict() round-trip."
-)
 async def test_workflow_info(client: Client) -> None:
     # Server-only fields (history-event-derived start times, task_timeout, the
     # JSON-stringified retry_policy round-trip, run_id UUID v7 shape) are dropped;
@@ -663,7 +652,7 @@ async def test_workflow_info(client: Client) -> None:
             task_queue=worker.task_queue,
             retry_policy=retry_policy,
         )
-        info = cast(dict[str, object], await handle.result())
+        info = cast(dict[str, Any], await handle.result())
         assert info["attempt"] == 1
         assert info["cron_schedule"] is None
         assert info["namespace"] == client.namespace
