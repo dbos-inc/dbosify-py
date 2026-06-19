@@ -275,9 +275,10 @@ async def test_activity_bad_params(client: Client) -> None:
                 id=wid(),
                 task_queue=worker.task_queue,
             )
-    assert "missing 1 required positional argument: 'name'" in _app_error(
-        err.value
-    ).message
+    assert (
+        "missing 1 required positional argument: 'name'"
+        in _app_error(err.value).message
+    )
 
 
 async def test_activity_type_hints(client: Client) -> None:
