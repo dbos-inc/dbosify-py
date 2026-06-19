@@ -484,6 +484,23 @@ def _patch_marker(patch_id: str) -> Any:
     return _patch_step(patch_id)
 
 
+def _as_failure_error(err: BaseException) -> exceptions.FailureError:
+    """Coerce a workflow-*failure* exception to a FailureError. A failure the
+    workflow raises that is not already a FailureError — a bare
+    ``asyncio.TimeoutError``, or a user exception listed in
+    ``failure_exception_types`` — must reach the dispatcher as a FailureError so
+    it is recorded via ``serialize_failure`` (which tags the type by class name,
+    e.g. ``TimeoutError``); otherwise it falls through to DBOS's generic
+    exception path and surfaces to clients as a bare ``Exception``. Preserves the
+    original cause chain and traceback for serialization."""
+    if isinstance(err, exceptions.FailureError):
+        return err
+    wrapped = exceptions.ApplicationError(str(err), type=type(err).__name__)
+    wrapped.__cause__ = err.__cause__
+    wrapped.__traceback__ = err.__traceback__
+    return wrapped
+
+
 class _TimerHandle(asyncio.TimerHandle):
     def __init__(
         self,
@@ -1352,7 +1369,7 @@ class Interpreter(_Runtime):
         if self._cancel_requested and exceptions.is_cancelled_exception(err):
             self._set_outcome(("cancelled", err))
         elif self._is_failure_exception(err):
-            self._set_outcome(("failure", err))
+            self._set_outcome(("failure", _as_failure_error(err)))
         else:
             self._set_outcome(("task_failure", err))
 

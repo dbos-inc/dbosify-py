@@ -596,11 +596,6 @@ class CtTimeoutErrorWorkflow:
 
 
 async def test_workflow_timeout_error(client: Client) -> None:
-    # Adapted: temporalio additionally asserts cause.type == "TimeoutError". We
-    # surface a raised asyncio.TimeoutError as ApplicationError(type="TimeoutError")
-    # for the wait_for/asyncio.timeout paths, but wait_condition's timeout
-    # serializes without that exact type tag — so we keep temporalio's first
-    # assertion (the failure cause is an ApplicationError) which holds for all.
     async with new_worker(client, CtTimeoutErrorWorkflow) as worker:
         scenarios = ["workflow.wait_condition", "asyncio.wait_for"]
         if sys.version_info >= (3, 11):
@@ -615,6 +610,7 @@ async def test_workflow_timeout_error(client: Client) -> None:
                     task_queue=worker.task_queue,
                 )
             assert isinstance(err.value.cause, ApplicationError)
+            assert err.value.cause.type == "TimeoutError"
 
 
 # ---------------------------------------------------------------------------
