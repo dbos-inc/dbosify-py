@@ -124,16 +124,17 @@ class UpImmediatelyCompleteUpdateAndWorkflow:
 
 
 @pytest.mark.skip(
-    reason="First-WFT message-delivery ordering: an update queued before any "
-    "worker runs is not drained in the workflow's first task when run() completes "
-    "immediately — our execute loop closes the completed workflow before the "
-    "already-queued update is recv'd from the inbox, so the backgrounded update "
-    "times out (Temporal delivers all messages in a workflow task before the "
-    "completion command). The schema-ordering prerequisite is handled by "
-    "warm_schema; this delivery-ordering gap is the remaining blocker. DISTINCT "
-    "from the now-fixed loop-affinity bug — see "
-    "test_update_completion_is_honored_when_after_workflow_return_2, which "
-    "exercised that bug worker-first and now passes."
+    reason="First-WFT message-delivery ordering — a fundamental difference "
+    "between Temporal's activation/job model and our poll-based DBOS inbox. The "
+    "update targets a workflow whose run() finishes in its first task, so the "
+    "buffered update is never drained (the run closes before recv'ing it). "
+    "Delivering buffered messages before run() runs DOES deliver it, but breaks "
+    "runtime handler registration/override and races queries (it regressed "
+    "test_runtime_handlers); delivering after run() completes breaks "
+    "in_first_wft's init-state visibility. Reconciling needs distinguishing "
+    "first-activation-admitted messages from later ones, which our inbox poll "
+    "can't do cleanly. The related loop-affinity bug IS fixed — see "
+    "test_update_completion_is_honored_when_after_workflow_return_2."
 )
 async def test_workflow_update_before_worker_start(client: Client) -> None:
     # Start a workflow and an update against it *before* any worker is running,
@@ -288,11 +289,12 @@ class UpUpdateCompletionIsHonoredWhenAfterWorkflowReturn1Workflow:
 
 @pytest.mark.skip(
     reason="First-WFT message-delivery ordering (same as "
-    "test_workflow_update_before_worker_start): the update is queued before the "
-    "worker, and run() returns before our loop drains it from the inbox, so the "
-    "backgrounded update times out. DISTINCT from the now-fixed loop-affinity bug "
-    "(the worker-first variant _2 passes). warm_schema handles the schema "
-    "prerequisite; the delivery-ordering gap is the remaining blocker."
+    "test_workflow_update_before_worker_start): the update is buffered before the "
+    "worker and run() finishes in its first task, so it is never drained from our "
+    "poll-based inbox. The loop-affinity bug this was grouped with is fixed (the "
+    "worker-first variant _2 passes); the delivery-ordering gap is a deeper "
+    "activation-model difference not safely fixable without breaking runtime "
+    "handler timing."
 )
 async def test_update_completion_is_honored_when_after_workflow_return_1(
     client: Client,
@@ -422,13 +424,15 @@ class UpWorkflowWithNonWorkflowInitInit:
 
 
 @pytest.mark.skip(
-    reason="First-WFT message-delivery ordering (same as "
-    "test_workflow_update_before_worker_start): the update is queued before the "
-    "worker so it lands in the first task, but our loop doesn't drain it before "
-    "the run resolves, so the backgrounded update times out. DISTINCT from the "
-    "now-fixed loop-affinity bug (worker-first update variant _2 passes). "
-    "warm_schema handles the schema prerequisite; delivery ordering is the "
-    "remaining blocker."
+    reason="First-WFT message-delivery ordering (the strongest form): the update "
+    "must run BEFORE run()'s body so it sees __init__ state, not run()'s "
+    "mutations. Delivering buffered messages before run() achieves that but "
+    "breaks runtime handler registration/override and races queries (regressed "
+    "test_runtime_handlers); delivering after run() makes the update see the "
+    "mutated value. These two requirements are irreconcilable in our poll-based "
+    "inbox without distinguishing first-activation-admitted messages from later "
+    "ones (Temporal's activation/job model). The loop-affinity bug is fixed "
+    "separately (see ..._after_workflow_return_2)."
 )
 @pytest.mark.parametrize(
     ["client_cls", "worker_cls"],
