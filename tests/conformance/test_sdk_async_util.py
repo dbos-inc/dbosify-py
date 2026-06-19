@@ -136,6 +136,10 @@ class AuUseLockOrSemaphoreWorkflowParameters:
     semaphore_initial_value: Optional[int] = None
     sleep: Optional[float] = None
     timeout: Optional[float] = None
+    # If set, update handlers wait at a barrier until this many have been delivered
+    # before contending for the lock/semaphore — recreating Temporal's batch of
+    # Admitted updates so exact-concurrency assertions don't race delivery timing.
+    synchronize_handlers: Optional[int] = None
 
 
 @workflow.defn
@@ -214,6 +218,7 @@ class AuHandlerCoroutinesUseLockOrSemaphoreWorkflow(
     def __init__(self) -> None:
         super().__init__()
         self.workflow_may_exit = False
+        self._handlers_arrived = 0
 
     @workflow.run
     async def run(
@@ -231,6 +236,13 @@ class AuHandlerCoroutinesUseLockOrSemaphoreWorkflow(
         if not hasattr(self, "params"):
             self.init(params)
         assert (update_info := workflow.current_update_info())
+        # Optional barrier: wait until all concurrently-fired updates have been
+        # delivered before any contends, so the exact-concurrency expectations don't
+        # depend on the order/timing in which updates are delivered under load.
+        n = params.synchronize_handlers
+        if n:
+            self._handlers_arrived += 1
+            await workflow.wait_condition(lambda: self._handlers_arrived >= n)
         await self.coroutine(update_info.id)
 
     @workflow.signal
@@ -340,8 +352,14 @@ async def test_update_handler_lock_acquisition_respects_timeout(
 ) -> None:
     await _do_update_handler_lock_or_semaphore_test(
         client,
-        # Second and subsequent handler executions fail to acquire the lock due to the timeout.
-        AuUseLockOrSemaphoreWorkflowParameters(sleep=0.5, timeout=0.1),
+        # All 5 handlers synchronize at a barrier (synchronize_handlers=5) before
+        # contending, so they attempt lock.acquire() together: the first holds it for
+        # 0.5s and the rest give up after their 0.1s timeout (ever=1). Without the
+        # barrier this was flaky under load — staggered update delivery let a later
+        # handler acquire only after the holder had already released (ever=2).
+        AuUseLockOrSemaphoreWorkflowParameters(
+            sleep=0.5, timeout=0.1, synchronize_handlers=5
+        ),
         n_updates=5,
         expectation=AuLockOrSemaphoreWorkflowConcurrencySummary(
             ever_in_critical_section=1, peak_in_critical_section=1
@@ -439,13 +457,21 @@ class AuSignalsActivitiesTimersUpdatesTracingWorkflow:
 
     def __init__(self) -> None:
         self.events: list[str] = []
+        self._should_finish = False
 
     @workflow.run
     async def run(self) -> list[str]:
         tt = asyncio.create_task(self.run_timer())
         at = asyncio.create_task(self.run_act())
         await asyncio.gather(tt, at)
+        # Stay alive until explicitly told to finish, so the late-sent update is
+        # always delivered to a running workflow instead of racing completion.
+        await workflow.wait_condition(lambda: self._should_finish)
         return self.events
+
+    @workflow.signal
+    async def finish(self) -> None:
+        self._should_finish = True
 
     @workflow.signal
     async def dosig(self, name: str) -> None:
@@ -513,6 +539,9 @@ async def test_async_loop_ordering(client: Client) -> None:
         await handle.execute_update(
             AuSignalsActivitiesTimersUpdatesTracingWorkflow.doupdate, "1"
         )
+        # Released only now that the update has completed, so run() never finishes
+        # before the update is delivered.
+        await handle.signal(AuSignalsActivitiesTimersUpdatesTracingWorkflow.finish)
         await handle.result()
 
 
