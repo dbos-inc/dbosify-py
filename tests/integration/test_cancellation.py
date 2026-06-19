@@ -5,6 +5,7 @@ lives in test_cancellation_recovery.py.
 """
 
 import asyncio
+import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -82,9 +83,13 @@ class UncancelWorkflow:
         except asyncio.CancelledError:
             task = asyncio.current_task()
             assert task is not None
-            requested = task.cancelling()
-            remaining = task.uncancel()
-            return f"cancelling={requested} uncancelled_to={remaining}"
+            # cancelling()/uncancel() are 3.11+; the version guard lets mypy
+            # narrow them away on 3.10 (the test is skipped there too).
+            if sys.version_info >= (3, 11):
+                requested = task.cancelling()
+                remaining = task.uncancel()
+                return f"cancelling={requested} uncancelled_to={remaining}"
+            return "no-uncancel"
         return "unreachable"
 
 
@@ -163,6 +168,10 @@ async def test_swallowed_cancel_completes() -> None:
         assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
 
 
+@pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="asyncio.Task.uncancel()/cancelling() are 3.11+",
+)
 async def test_uncancel_clears_cancel_counter() -> None:
     # asyncio.Task.uncancel()/cancelling() work on the interpreter's real tasks:
     # the cooperative cancel injects via task.cancel(), so the native counter is
