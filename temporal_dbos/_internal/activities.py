@@ -355,11 +355,39 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
                             "ended_at": time_mod.time(),
                         }
 
+        async def run_to_deadline() -> Dict[str, Any]:
+            # Enforce start-to-close OURSELVES rather than via asyncio.wait_for.
+            # wait_for returns the coroutine's value if it swallows the timeout
+            # cancellation — an activity that catches CancelledError and returns
+            # would thereby defeat the deadline and be recorded as a success.
+            # The deadline is authoritative: once it passes we cancel + abandon
+            # the attempt and discard whatever it later produces, so a
+            # start-to-close timeout is always surfaced (matching the
+            # heartbeat-timeout watchdog above and Temporal's hard enforcement).
+            if start_to_close is None:
+                return await run_attempt()
+            task = asyncio.ensure_future(run_attempt())
+            try:
+                done, _ = await asyncio.wait({task}, timeout=start_to_close)
+            except asyncio.CancelledError:
+                # External cancellation (workflow cancel / scope): propagate the
+                # cancel into the attempt like wait_for would, then re-raise.
+                task.cancel()
+                raise
+            if done:
+                return task.result()
+            task.cancel()
+            try:
+                await task
+            except BaseException:  # noqa: BLE001 — late result/error is discarded
+                pass
+            raise asyncio.TimeoutError
+
         try:
             # User exceptions (including user-raised TimeoutError) are
             # converted inside call_user_activity, so a TimeoutError here is
             # unambiguously the start-to-close enforcement firing.
-            return await asyncio.wait_for(run_attempt(), timeout=start_to_close)
+            return await run_to_deadline()
         except activity_api_complete_async_error():
             # raise_complete_async(): the function returned, but the
             # activity stays pending until externally completed (the

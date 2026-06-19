@@ -93,6 +93,19 @@ async def slow_writer(path: str) -> None:
         await asyncio.sleep(0.05)
 
 
+@activity.defn
+async def swallow_cancel_and_return() -> str:
+    """Mirrors temporalio's ``wait_cancel``: ignore cancellation and return a
+    value. An authoritative start-to-close must time out anyway — the late
+    return is discarded, not recorded as a success."""
+    try:
+        while True:
+            await asyncio.sleep(0.2)
+            activity.heartbeat()
+    except asyncio.CancelledError:
+        return "swallowed-and-returned"
+
+
 @workflow.defn
 class CancelStopsAsyncFnWorkflow:
     @workflow.run
@@ -252,6 +265,21 @@ class AsyncTimeoutWorkflow:
 
 
 @workflow.defn
+class SwallowedCancelTimeoutWorkflow:
+    @workflow.run
+    async def run(self, local: bool) -> str:
+        execute = (
+            workflow.execute_local_activity if local else workflow.execute_activity
+        )
+        result: str = await execute(
+            swallow_cancel_and_return,
+            start_to_close_timeout=timedelta(seconds=1),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+        return result
+
+
+@workflow.defn
 class DuplicateIdWorkflow:
     @workflow.run
     async def run(self) -> None:
@@ -327,6 +355,7 @@ async def _env() -> AsyncIterator[Client]:
             AsyncCanWorkflow,
             CancelStopsAsyncFnWorkflow,
             OrphanAtCloseWorkflow,
+            SwallowedCancelTimeoutWorkflow,
         ],
         activities=[
             heartbeating_forever,
@@ -336,6 +365,7 @@ async def _env() -> AsyncIterator[Client]:
             flaky_with_heartbeat,
             complete_externally,
             stalls_after_one_heartbeat,
+            swallow_cancel_and_return,
         ],
     )
     async with worker:
@@ -554,6 +584,27 @@ def _timeout_cause(exc_info: Any) -> TimeoutError:
     assert isinstance(cause, ActivityError)
     assert isinstance(cause.__cause__, TimeoutError)
     return cause.__cause__
+
+
+@pytest.mark.parametrize("local", [False, True], ids=["queued", "local"])
+async def test_start_to_close_is_authoritative_over_swallowed_cancel(
+    local: bool,
+) -> None:
+    """An activity that catches CancelledError and returns a value must still
+    time out: the start-to-close deadline is authoritative and discards the late
+    return rather than recording a success. Covers both the queued
+    (execute_activity) and local (execute_local_activity) paths, which share the
+    attempt step. Regression for the cooperative-timeout deviation."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            SwallowedCancelTimeoutWorkflow.run,
+            local,
+            id=f"swallow-s2c-{'local' if local else 'queued'}",
+            task_queue=TASK_QUEUE,
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await handle.result()
+        assert _timeout_cause(exc_info).type == TimeoutType.START_TO_CLOSE
 
 
 async def test_parked_async_activity_start_to_close() -> None:

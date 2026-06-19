@@ -145,11 +145,18 @@ def register_worker(
         if defn.name not in registry._dbos_workflows:
             registry.register_dbos_workflow(defn.name, _make_dbos_workflow(defn.name))
     for fn in activities:
+        if isinstance(fn, type):
+            # A callable-class activity must be registered as an *instance* (so
+            # __call__ runs against its constructor state), not the class.
+            raise TypeError(
+                f"{fn.__qualname__} is a class instead of an instance; register "
+                "an instance of the callable class as the activity"
+            )
         activity_defn = registry.activity_definition_of(fn)
         if activity_defn.fn is not fn:
-            # A bound method: the definition was built at decoration time on
-            # the unbound function; execute the bound callable the user
-            # actually registered (temporalio supports method activities).
+            # A bound method or callable-class instance: the definition was built
+            # at decoration time on the unbound function / class; execute the
+            # callable the user actually registered (temporalio supports both).
             activity_defn = dataclasses.replace(activity_defn, fn=fn)
         registry.register_activity(activity_defn)
         if activity_defn.dynamic:

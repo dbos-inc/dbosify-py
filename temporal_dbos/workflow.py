@@ -96,9 +96,11 @@ __all__ = [
     "new_random",
     "NondeterminismError",
     "execute_activity",
+    "execute_activity_class",
     "execute_activity_method",
     "execute_child_workflow",
     "execute_local_activity",
+    "execute_local_activity_class",
     "execute_local_activity_method",
     "get_external_workflow_handle",
     "get_external_workflow_handle_for",
@@ -128,9 +130,11 @@ __all__ = [
     "signal",
     "sleep",
     "start_activity",
+    "start_activity_class",
     "start_activity_method",
     "start_child_workflow",
     "start_local_activity",
+    "start_local_activity_class",
     "start_local_activity_method",
     "time",
     "time_ns",
@@ -1923,6 +1927,78 @@ async def execute_activity_method(
     )
 
 
+def start_activity_class(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    task_queue: Optional[str] = None,
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    heartbeat_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+    versioning_intent: Optional[Any] = None,
+    summary: Optional[str] = None,
+    priority: Optional[Any] = None,
+) -> ActivityHandle:
+    """Start an activity from a callable-class reference. See ``start_activity``."""
+    return start_activity(
+        activity,
+        arg,
+        args=args,
+        task_queue=task_queue,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        heartbeat_timeout=heartbeat_timeout,
+        retry_policy=retry_policy,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+        versioning_intent=versioning_intent,
+        summary=summary,
+        priority=priority,
+    )
+
+
+async def execute_activity_class(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    task_queue: Optional[str] = None,
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    heartbeat_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+    versioning_intent: Optional[Any] = None,
+    summary: Optional[str] = None,
+    priority: Optional[Any] = None,
+) -> Any:
+    """Run an activity from a callable-class reference. See ``execute_activity``."""
+    return await start_activity_class(
+        activity,
+        arg,
+        args=args,
+        task_queue=task_queue,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        heartbeat_timeout=heartbeat_timeout,
+        retry_policy=retry_policy,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+        versioning_intent=versioning_intent,
+        summary=summary,
+        priority=priority,
+    )
+
+
 def start_local_activity(
     activity: Any,
     arg: Any = _arg_unset,
@@ -2056,6 +2132,67 @@ async def execute_local_activity_method(
 ) -> Any:
     """Run a local activity from a method reference."""
     return await start_local_activity_method(
+        activity,
+        arg,
+        args=args,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        retry_policy=retry_policy,
+        local_retry_threshold=local_retry_threshold,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+        summary=summary,
+    )
+
+
+def start_local_activity_class(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    local_retry_threshold: Optional[timedelta] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+    summary: Optional[str] = None,
+) -> ActivityHandle:
+    """Start a local activity from a callable-class reference (no
+    ``result_type``, mirroring temporalio: the return type is inferred)."""
+    return start_local_activity(
+        activity,
+        arg,
+        args=args,
+        schedule_to_close_timeout=schedule_to_close_timeout,
+        schedule_to_start_timeout=schedule_to_start_timeout,
+        start_to_close_timeout=start_to_close_timeout,
+        retry_policy=retry_policy,
+        local_retry_threshold=local_retry_threshold,
+        cancellation_type=cancellation_type,
+        activity_id=activity_id,
+        summary=summary,
+    )
+
+
+async def execute_local_activity_class(
+    activity: Any,
+    arg: Any = _arg_unset,
+    *,
+    args: Sequence[Any] = [],
+    schedule_to_close_timeout: Optional[timedelta] = None,
+    schedule_to_start_timeout: Optional[timedelta] = None,
+    start_to_close_timeout: Optional[timedelta] = None,
+    retry_policy: Optional[RetryPolicy] = None,
+    local_retry_threshold: Optional[timedelta] = None,
+    cancellation_type: Optional[Any] = None,
+    activity_id: Optional[str] = None,
+    summary: Optional[str] = None,
+) -> Any:
+    """Run a local activity from a callable-class reference."""
+    return await start_local_activity_class(
         activity,
         arg,
         args=args,

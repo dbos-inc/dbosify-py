@@ -557,12 +557,6 @@ KNOWN_MISSING_NAMES: Dict[str, Set[str]] = {
         "ChildWorkflowConfig",
         "LocalActivityConfig",
         "UpdateMethodMultiParam",
-        # Class-based activity invocation variants — we dispatch by fn/string ref
-        # (the *_method signatures are already pinned above).
-        "execute_activity_class",
-        "execute_local_activity_class",
-        "start_activity_class",
-        "start_local_activity_class",
         # Failure-exception predicate helper — not exposed (minor).
         "is_failure_exception",
     },

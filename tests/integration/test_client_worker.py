@@ -296,6 +296,15 @@ async def test_signal_with_start_attaches_to_running() -> None:
             start_signal="greet",
             start_signal_args=["second"],
         )
+        # The USE_EXISTING attach handle carries the attached run's ids (not None),
+        # so reading result_run_id / first_execution_run_id works and matches the
+        # run the first call started.
+        assert second.result_run_id == first.result_run_id == "sws-attach-wf"
+        assert (
+            second.first_execution_run_id
+            == first.first_execution_run_id
+            == "sws-attach-wf"
+        )
         # The second call attached to the running run rather than starting a new
         # one, and its start signal reached that run (else run() hangs at one
         # greeting): both handles resolve the same result.

@@ -1389,10 +1389,16 @@ class Client:
                         await self._dbos_client.send_async(
                             current_status.workflow_id, env, topic, idempotency_key=idem
                         )
+                    # Like a fresh start, the returned handle is NOT run-bound
+                    # (signals/queries/updates resolve the chain's current run);
+                    # result_run_id is the run we attached to (where its result
+                    # lands, so handle.result() works) and first_execution_run_id
+                    # is the chain's first run.
                     return WorkflowHandle(
                         self,
                         id,
-                        run_id=current_status.workflow_id,
+                        result_run_id=current_status.workflow_id,
+                        first_execution_run_id=ids.run_dbos_id(id, 0),
                         result_type=result_type,
                     )
                 if (

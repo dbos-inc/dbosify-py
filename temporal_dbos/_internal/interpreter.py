@@ -484,6 +484,23 @@ def _patch_marker(patch_id: str) -> Any:
     return _patch_step(patch_id)
 
 
+def _as_failure_error(err: BaseException) -> exceptions.FailureError:
+    """Coerce a workflow-*failure* exception to a FailureError. A failure the
+    workflow raises that is not already a FailureError — a bare
+    ``asyncio.TimeoutError``, or a user exception listed in
+    ``failure_exception_types`` — must reach the dispatcher as a FailureError so
+    it is recorded via ``serialize_failure`` (which tags the type by class name,
+    e.g. ``TimeoutError``); otherwise it falls through to DBOS's generic
+    exception path and surfaces to clients as a bare ``Exception``. Preserves the
+    original cause chain and traceback for serialization."""
+    if isinstance(err, exceptions.FailureError):
+        return err
+    wrapped = exceptions.ApplicationError(str(err), type=type(err).__name__)
+    wrapped.__cause__ = err.__cause__
+    wrapped.__traceback__ = err.__traceback__
+    return wrapped
+
+
 class _TimerHandle(asyncio.TimerHandle):
     def __init__(
         self,
@@ -1295,10 +1312,21 @@ class Interpreter(_Runtime):
     # ------------------------------------------------------------------
 
     def _instantiate(self) -> None:
-        if self._defn.init_takes_args:
-            self._instance = self._defn.cls(*self._args)
-        else:
-            self._instance = self._defn.cls()
+        # Construct the workflow instance with the virtual loop installed as the
+        # running loop. A loop-bound object the user creates in __init__ — most
+        # notably ``asyncio.Future()`` — captures ``get_event_loop()`` eagerly;
+        # without this it would bind to the dispatcher's real loop, and a signal
+        # or update handler awaiting it later (on the vloop) would raise
+        # "got Future attached to a different loop". Mirrors _drain's loop swap.
+        previous_loop = asyncio._get_running_loop()
+        asyncio._set_running_loop(self._vloop)
+        try:
+            if self._defn.init_takes_args:
+                self._instance = self._defn.cls(*self._args)
+            else:
+                self._instance = self._defn.cls()
+        finally:
+            asyncio._set_running_loop(previous_loop)
         coro = self._run_primary()
         self._primary_task = asyncio.Task(coro, loop=self._vloop)
         self._tasks.add(self._primary_task)
@@ -1341,7 +1369,7 @@ class Interpreter(_Runtime):
         if self._cancel_requested and exceptions.is_cancelled_exception(err):
             self._set_outcome(("cancelled", err))
         elif self._is_failure_exception(err):
-            self._set_outcome(("failure", err))
+            self._set_outcome(("failure", _as_failure_error(err)))
         else:
             self._set_outcome(("task_failure", err))
 
@@ -2752,7 +2780,22 @@ class Interpreter(_Runtime):
                 envelope["name"],
             )
             return
-        decoded = await self._decode_message_args(envelope)
+        try:
+            decoded = await self._decode_message_args(envelope)
+        except Exception as err:  # noqa: BLE001 — a bad payload drops the signal
+            # Temporal logs and drops a signal whose input cannot be deserialized
+            # to the handler's parameter type; the workflow keeps running. The
+            # failure is deterministic (payload + handler signature), so the drop
+            # replays identically — like the malformed-message drop in
+            # _deliver_inbox.
+            logger.warning(
+                "Workflow %s: Failed deserializing signal input for %r; "
+                "dropping signal (%s)",
+                self._workflow_id,
+                envelope["name"],
+                err,
+            )
+            return
         # Decode headers here (real loop) so the codec runs off the virtual loop;
         # the handler task gets ready Payloads.
         headers = await conversion.decode_headers(envelope.get("headers"))
