@@ -412,12 +412,15 @@ async def test_update_handler_semaphore_acquisition_respects_timeout(
 ) -> None:
     await _do_update_handler_lock_or_semaphore_test(
         client,
-        # Initial entry to the semaphore succeeds, but all subsequent attempts to
-        # acquire a semaphore slot fail.
+        # All 5 handlers barrier-sync (synchronize_handlers=5) then attempt acquire
+        # together: 3 take a semaphore slot and hold 0.5s, the other 2 give up after
+        # 0.1s (ever=3). Without the barrier, updates arrive spread across virtual
+        # time and a late one can grab a slot freed by an early one (ever races to 4).
         AuUseLockOrSemaphoreWorkflowParameters(
             semaphore_initial_value=3,
             sleep=0.5,
             timeout=0.1,
+            synchronize_handlers=5,
         ),
         n_updates=5,
         expectation=AuLockOrSemaphoreWorkflowConcurrencySummary(
