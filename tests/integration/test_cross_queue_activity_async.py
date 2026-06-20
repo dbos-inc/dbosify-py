@@ -11,10 +11,8 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from dbos import DBOSClient
 
-from dbosify.client import Client
-from tests.dbconfig import system_database_url
+from tests.dbconfig import connect_client, system_database_url
 from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "cross_queue_async_worker.py"
@@ -36,16 +34,15 @@ def _env(vmid: str, token: "Path | None" = None, **extra: str) -> "dict[str, str
 async def _complete(
     task_token: bytes, value: str, *, heartbeat_first: bool = False
 ) -> None:
-    dbos_client = DBOSClient(system_database_url=system_database_url())
+    client = await connect_client()
     try:
-        client = Client(dbos_client)
         handle = client.get_async_activity_handle(task_token=task_token)
         if heartbeat_first:
             # A heartbeat must NOT be mistaken for the completion.
             await handle.heartbeat("still working")
         await handle.complete(value)
     finally:
-        dbos_client.destroy()
+        await client.close()
 
 
 @pytest.mark.timeout(150)

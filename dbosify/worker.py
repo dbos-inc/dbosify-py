@@ -1,7 +1,7 @@
 """Worker for running workflows and activities, mirroring
 ``temporalio.worker`` in shape while taking DBOS machinery directly: a
-Worker is constructed from a ``dbos.DBOSConfig`` and owns the process's DBOS
-lifecycle outright.
+Worker is constructed from either a Postgres URL or a ``dbos.DBOSConfig`` and
+owns the process's DBOS lifecycle outright.
 
 Exactly **one Worker per process** is supported: DBOS's launchable
 runtime (queue listeners, notification listener, recovery) is process-global,
@@ -106,6 +106,9 @@ logger = logging.getLogger("dbosify.worker")
 # auto-version) lets workers agree and deploys preserve in-flight work (DESIGN §6.8).
 DEFAULT_APP_VERSION = "0.1"
 
+# Default DBOS application name when the Worker is given only a Postgres URL.
+DEFAULT_APP_NAME = "dbosify"
+
 # Behavior-changing AND unsupported options: passing a non-default value raises
 # rather than silently no-ops. arg name -> hint; arrive via ``**unsupported``.
 _REJECTED_OPTIONS = {
@@ -131,6 +134,20 @@ def _rate_limiter(rate_per_second: Optional[float]) -> Optional[QueueRateLimit]:
         return {"limit": round(rate_per_second), "period": 1.0}
     # Sub-1 rate: one start per 1/rate seconds (exact).
     return {"limit": 1, "period": 1.0 / rate_per_second}
+
+
+def _normalize_config(config: str | DBOSConfig) -> DBOSConfig:
+    """Resolve the Worker's first argument to a ``DBOSConfig``.
+
+    A bare string is a Postgres URL: expand it into a minimal config under the
+    default application name, pointed at that system database. A ``DBOSConfig``
+    is taken as given. Either way the DBOS admin server is forced off — DBOSify
+    exposes DBOS's management APIs, not the admin HTTP port (DESIGN §1), and an
+    always-on port collides when workers share a host.
+    """
+    if isinstance(config, str):
+        config = DBOSConfig(name=DEFAULT_APP_NAME, system_database_url=config)
+    return {**config, "run_admin_server": False}
 
 
 def _with_default_app_version(config: DBOSConfig) -> DBOSConfig:
@@ -179,7 +196,7 @@ class Worker:
 
     def __init__(
         self,
-        config: DBOSConfig,
+        config: str | DBOSConfig,
         *,
         task_queue: str,
         namespace: str = DEFAULT_NAMESPACE,
@@ -207,6 +224,12 @@ class Worker:
         activity types, the task queue) happens at construction; execution
         and recovery start at :py:meth:`run`.
 
+        ``config`` is either a Postgres URL (a connection string for the DBOS
+        system database) or a full ``dbos.DBOSConfig``. A URL is expanded into a
+        minimal config under a default application name; pass a ``DBOSConfig``
+        for full control (custom engine, executor, telemetry, ...). The DBOS
+        admin server is disabled regardless (DESIGN §1).
+
         ``build_id`` / ``deployment_config`` set the worker's deployment version
         (surfaced via ``workflow.Info.get_current_deployment_version()``). The
         build ID becomes the DBOS ``application_version``, which DBOS uses to
@@ -220,6 +243,7 @@ class Worker:
         the DBOS application name + application_version.
         """
         global _live_worker
+        config = _normalize_config(config)
         if not task_queue or not isinstance(task_queue, str):
             raise ValueError("task_queue must be a non-empty string")
         if _live_worker is not None:

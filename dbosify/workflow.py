@@ -1233,7 +1233,11 @@ def time_ns() -> int:
 
 def random() -> Random:
     """Deterministically-seeded random instance for this workflow."""
-    return _runtime().runtime_random()
+    runtime = _runtime()
+    if runtime.runtime_is_read_only():
+        # Consuming the shared RNG mutates run state; forbidden in queries/validators.
+        raise ReadOnlyContextError("Cannot use random in a read-only context")
+    return runtime.runtime_random()
 
 
 def random_seed() -> int:
@@ -1645,6 +1649,8 @@ def continue_as_new(
     parity; the new run is pinned to the enqueuing worker's build ID, and the
     auto-upgrade/ramping variants have no DBOS analog (DEVIATIONS worker-versioning).
     """
+    if _runtime().runtime_is_read_only():
+        raise ReadOnlyContextError("Cannot continue-as-new in a read-only context")
     for key, value in {
         "task_timeout": task_timeout,
         "versioning_intent": versioning_intent,

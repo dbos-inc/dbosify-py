@@ -24,7 +24,6 @@ from typing import (
     AsyncIterator,
     Awaitable,
     Callable,
-    Iterator,
     NoReturn,
     Protocol,
     Sequence,
@@ -35,7 +34,6 @@ from typing import (
 
 import pytest
 import sqlalchemy as sa
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import (
@@ -58,7 +56,7 @@ from dbosify.exceptions import (
 )
 from dbosify.worker import Worker
 from tests.conformance.sdk_harness import warm_schema
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -91,13 +89,13 @@ def _ensure_database_exists() -> None:
 
 
 @pytest.fixture()
-def client(dbosify_env: None) -> Iterator[Client]:
+async def client(dbosify_env: None) -> AsyncIterator[Client]:
     _ensure_database_exists()
-    dbos_client = DBOSClient(system_database_url=system_database_url())
+    client = await connect_client()
     try:
-        yield Client(dbos_client)
+        yield client
     finally:
-        dbos_client.destroy()
+        await client.close()
 
 
 @asynccontextmanager

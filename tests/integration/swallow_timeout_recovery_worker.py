@@ -16,14 +16,11 @@ import asyncio
 import sys
 from datetime import timedelta
 
-from dbos import DBOSClient
-
 from dbosify import activity, workflow
-from dbosify.client import Client
 from dbosify.common import RetryPolicy
 from dbosify.exceptions import ActivityError, TimeoutError
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "swallow-timeout-recovery-tq"
 
@@ -80,9 +77,8 @@ async def main() -> None:
         workflows=[SwallowTimeoutRecoveryWorkflow],
         activities=[swallow_cancel_and_return],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 handle = await client.start_workflow(
                     SwallowTimeoutRecoveryWorkflow.run,
@@ -96,7 +92,7 @@ async def main() -> None:
                 await handle.signal(SwallowTimeoutRecoveryWorkflow.release)
                 print("RESULT " + await handle.result(), flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

@@ -10,13 +10,12 @@ from datetime import timedelta
 from typing import AsyncIterator
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import Client
 from dbosify.common import RetryPolicy
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -102,11 +101,11 @@ async def _env() -> AsyncIterator[Client]:
         activities=[background_heartbeat_activity, wait_for_cancel_bg_heartbeat],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_background_task_heartbeats_keep_activity_alive() -> None:

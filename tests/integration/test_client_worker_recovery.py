@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify._internal import inbox
-from tests.dbconfig import system_database_url
+from tests.dbconfig import make_dbos_client
 from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "client_recovery_worker.py"
@@ -44,7 +43,7 @@ def test_worker_sigkill_recovery() -> None:
         # Recovery replays stage one (the activity must not re-execute:
         # exactly one fresh ACTIVITY print, from stage two).
         second.wait_for_line("STAGE_ONE_DONE", timeout=60)
-        client = DBOSClient(system_database_url=system_database_url())
+        client = make_dbos_client()
         try:
             client.send(
                 "two-stage-wf", inbox.signal_envelope("go", []), inbox.INBOX_TOPIC

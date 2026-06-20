@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Sequence
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import workflow
 from dbosify.client import Client
@@ -23,7 +22,7 @@ from dbosify.common import (
 )
 from dbosify.converter import DataConverter, Payload, PayloadCodec
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import default_config, make_dbos_client
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -189,7 +188,7 @@ async def _env(
         data_converter=data_converter,
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             yield Client(dbos_client, data_converter=data_converter)
         finally:

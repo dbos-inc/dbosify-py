@@ -16,9 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dbos import DBOSClient
 
-from tests.dbconfig import system_database_url
+from tests.dbconfig import make_dbos_client
 from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "dbos_semantics_worker.py"
@@ -86,7 +85,7 @@ def test_recv_order_replays_across_sigkill(tmp_path: Path) -> None:
             # Wait for the workflow row to exist: sends to a not-yet-started
             # workflow fail on a foreign-key constraint.
             first.wait_for_line("STARTED")
-            client = DBOSClient(system_database_url=system_database_url())
+            client = make_dbos_client()
             client.send(wf_id, "m1", "inbox")
             client.send(wf_id, "m2", "inbox")
             first.wait_for_line("RECEIVED 2")

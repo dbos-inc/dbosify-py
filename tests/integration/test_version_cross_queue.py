@@ -8,9 +8,8 @@ runs to completion and its workflow row carries that build id.
 from pathlib import Path
 
 import pytest
-from dbos import DBOSClient
 
-from tests.dbconfig import system_database_url
+from tests.dbconfig import make_dbos_client
 from tests.harness import PythonProcess, build_id_env
 
 WORKER = Path(__file__).parent / "version_cross_queue_worker.py"
@@ -37,7 +36,7 @@ def test_cross_queue_activity_pinned_to_build_id() -> None:
 
     # The queued __temporal_activity workflow (id "<wf>--a<seq>") was stamped with
     # the workflow worker's build id; only the matching-version worker dequeues it.
-    probe = DBOSClient(system_database_url=system_database_url())
+    probe = make_dbos_client()
     try:
         activity_rows = probe.list_workflows(workflow_id_prefix=f"{wf_id}--a")
     finally:

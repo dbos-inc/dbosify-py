@@ -18,13 +18,10 @@ import json
 import sys
 from typing import Any, List, Sequence
 
-from dbos import DBOSClient
-
 from dbosify import workflow
-from dbosify.client import Client
 from dbosify.common import RawValue
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "dynamic-recovery-tq"
 
@@ -60,9 +57,8 @@ async def main() -> None:
         workflows=[DynamicRecoveryWorkflow],
         activities=[],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 handle = await client.start_workflow(
                     DynamicRecoveryWorkflow.run,
@@ -82,7 +78,7 @@ async def main() -> None:
                 received = await handle.result()
                 print("RESULT " + json.dumps(received), flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

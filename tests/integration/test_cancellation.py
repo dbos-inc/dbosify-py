@@ -5,6 +5,7 @@ lives in test_cancellation_recovery.py.
 """
 
 import asyncio
+import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -12,7 +13,6 @@ from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import (
@@ -24,7 +24,7 @@ from dbosify.client import (
 from dbosify.common import WorkflowIDConflictPolicy
 from dbosify.exceptions import CancelledError, TerminatedError
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -67,6 +67,32 @@ class SwallowingWorkflow:
 
 
 @workflow.defn
+class UncancelWorkflow:
+    """Exercises the stdlib asyncio.Task cancel-counter (3.11+) on the virtual
+    loop: a cancel increments ``cancelling()``; ``uncancel()`` decrements it, so
+    the workflow can swallow the cancel (the shield-loop idiom) and complete.
+    There is no ``workflow.uncancel`` to add — user code reaches it through the
+    real ``asyncio.Task`` the interpreter hosts the run coroutine on.
+    """
+
+    @workflow.run
+    async def run(self) -> str:
+        try:
+            await workflow.wait_condition(lambda: False)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            assert task is not None
+            # cancelling()/uncancel() are 3.11+; the version guard lets mypy
+            # narrow them away on 3.10 (the test is skipped there too).
+            if sys.version_info >= (3, 11):
+                requested = task.cancelling()
+                remaining = task.uncancel()
+                return f"cancelling={requested} uncancelled_to={remaining}"
+            return "no-uncancel"
+        return "unreachable"
+
+
+@workflow.defn
 class CleanupWorkflow:
     @workflow.run
     async def run(self, path: str) -> str:
@@ -98,15 +124,21 @@ async def _env() -> AsyncIterator[Client]:
     worker = Worker(
         default_config(),
         task_queue=TASK_QUEUE,
-        workflows=[ParkedWorkflow, SwallowingWorkflow, CleanupWorkflow, BusyWorkflow],
+        workflows=[
+            ParkedWorkflow,
+            SwallowingWorkflow,
+            UncancelWorkflow,
+            CleanupWorkflow,
+            BusyWorkflow,
+        ],
         activities=[record, slow_activity],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def _assert_cancelled_result(handle: WorkflowHandle) -> None:
@@ -132,6 +164,23 @@ async def test_swallowed_cancel_completes() -> None:
         )
         await handle.cancel(reason="nope")
         assert await handle.result() == "survived:nope"
+        assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11),
+    reason="asyncio.Task.uncancel()/cancelling() are 3.11+",
+)
+async def test_uncancel_clears_cancel_counter() -> None:
+    # asyncio.Task.uncancel()/cancelling() work on the interpreter's real tasks:
+    # the cooperative cancel injects via task.cancel(), so the native counter is
+    # 1 on entry and uncancel() returns it to 0 (the shield-loop idiom).
+    async with _env() as client:
+        handle = await client.start_workflow(
+            UncancelWorkflow.run, id="cancel-uncancel", task_queue=TASK_QUEUE
+        )
+        await handle.cancel()
+        assert await handle.result() == "cancelling=1 uncancelled_to=0"
         assert (await handle.describe()).status == WorkflowExecutionStatus.COMPLETED
 
 

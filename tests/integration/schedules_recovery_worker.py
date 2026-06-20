@@ -17,18 +17,17 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
-from dbos import DBOSClient, DBOSConfig
+from dbos import DBOSConfig
 
 from dbosify import activity, workflow
 from dbosify.client import (
-    Client,
     Schedule,
     ScheduleActionStartWorkflow,
     ScheduleIntervalSpec,
     ScheduleSpec,
 )
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "schedules-recovery-tq"
 SCHEDULE_ID = "recovery-sched"
@@ -76,9 +75,8 @@ async def main() -> None:
         workflows=[ScheduledRecoveryAction],
         activities=[record_occurrence],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if mode == "start":
                 await client.create_schedule(
                     SCHEDULE_ID,
@@ -104,7 +102,7 @@ async def main() -> None:
                 await client.get_schedule_handle(SCHEDULE_ID).delete()
                 print("DONE", flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ def namespace_from_schema(schema: Optional[str]) -> str:
     :func:`namespace_schema`. Used by the low-level ``Client(dbos_client)``
     path, where the DBOSClient's schema is the single source of truth.
 
-    Raises ``ValueError`` if ``schema`` isn't a Temporal namespace schema
+    Raises ``ValueError`` if ``schema`` isn't a valid namespace schema
     (``dbosify_<namespace>``) — e.g. a bare ``dbos`` schema (or ``None``, as on
     SQLite) has no namespace.
     """
@@ -62,7 +62,7 @@ def namespace_from_schema(schema: Optional[str]) -> str:
         if _NAMESPACE_RE.match(namespace) and len(namespace) <= _MAX_NAMESPACE_LEN:
             return namespace
     raise ValueError(
-        f"DBOS system schema {schema!r} is not a temporal namespace schema "
+        f"DBOS system schema {schema!r} is not a valid namespace schema "
         f"({_SCHEMA_PREFIX}<namespace>); use Client.connect(system_database_url, "
         "namespace=...) or build the DBOSClient with "
         "dbos_system_schema=namespace_schema(<namespace>)"

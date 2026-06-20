@@ -13,7 +13,7 @@ Connection configuration, in priority order:
 """
 
 import os
-from typing import Any
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import dbos
@@ -22,24 +22,17 @@ from dbos import DBOSConfig
 from dbosify._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
 from dbosify._internal.serializer import TEMPORAL_SERIALIZER
 
+if TYPE_CHECKING:
+    from dbosify.client import Client
+
 TEST_SYSTEM_DB_NAME = "dbosify_test_dbos_sys"
 
 # Every namespace maps to its own DBOS system schema (DEVIATIONS no-server).
 # Tests run in the default namespace; all components must agree on its schema.
 TEST_SCHEMA = namespace_schema(DEFAULT_NAMESPACE)
 
-# Every process touching the test database must use the JSON serializer (DBOS
-# picks the deserializer by row label). This default covers the raw test DBOSClients.
-_orig_dbos_client_init = dbos.DBOSClient.__init__
-
-
-def _dbos_client_init(self: "dbos.DBOSClient", *args: Any, **kwargs: Any) -> None:
-    kwargs.setdefault("serializer", TEMPORAL_SERIALIZER)
-    kwargs.setdefault("dbos_system_schema", TEST_SCHEMA)
-    _orig_dbos_client_init(self, *args, **kwargs)
-
-
-dbos.DBOSClient.__init__ = _dbos_client_init  # type: ignore[method-assign]
+# Test clients are built via connect_client()/make_dbos_client() below, which set
+# the JSON serializer + namespace schema explicitly — no DBOSClient monkeypatch.
 
 
 def system_database_url() -> str:
@@ -67,3 +60,23 @@ def default_config() -> DBOSConfig:
         # that launch on this config land in the same schema as the product.
         "dbos_system_schema": TEST_SCHEMA,
     }
+
+
+async def connect_client(namespace: str = DEFAULT_NAMESPACE) -> "Client":
+    """A dbosify ``Client`` via the production ``Client.connect`` path — no
+    hand-built ``DBOSClient``. ``Client.connect`` sets the JSON serializer and
+    the namespace's schema itself; ``close()`` (or ``async with``) disposes it."""
+    from dbosify.client import Client
+
+    return await Client.connect(system_database_url(), namespace=namespace)
+
+
+def make_dbos_client() -> "dbos.DBOSClient":
+    """A raw ``DBOSClient`` for low-level test drivers (``send``/``list_workflows``/
+    ``retrieve_workflow``) that the dbosify ``Client`` API can't express. The JSON
+    serializer and default-namespace schema are set explicitly (no monkeypatch)."""
+    return dbos.DBOSClient(
+        system_database_url=system_database_url(),
+        serializer=TEMPORAL_SERIALIZER,
+        dbos_system_schema=TEST_SCHEMA,
+    )

@@ -11,12 +11,11 @@ from datetime import timedelta
 from typing import AsyncIterator, List, Optional
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import Client
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config, make_dbos_client
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -79,11 +78,11 @@ async def _env(
         activity_executor=activity_executor,
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_max_concurrent_activities_caps_execution() -> None:
@@ -102,7 +101,7 @@ async def test_identity_maps_to_executor_id() -> None:
         await client.execute_workflow(
             FanOut.run, 1, id="tuning-identity", task_queue=TASK_QUEUE
         )
-    probe = DBOSClient(system_database_url=system_database_url())
+    probe = make_dbos_client()
     try:
         status = probe.retrieve_workflow("tuning-identity").get_status()
     finally:

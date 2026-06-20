@@ -26,14 +26,12 @@ import json
 import sys
 from datetime import timedelta
 
-from dbos import DBOSClient
-
 from dbosify import activity, workflow
-from dbosify.client import Client, WorkflowFailureError
+from dbosify.client import WorkflowFailureError
 from dbosify.common import RetryPolicy
 from dbosify.exceptions import ApplicationError, ChildWorkflowError
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "inflight-recovery-tq"
 
@@ -270,9 +268,8 @@ async def main() -> None:
         ],
         activities=[record_cleanup, record_child_work, record_update_effect],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 handle = await client.start_workflow(
                     run_ref,
@@ -295,7 +292,7 @@ async def main() -> None:
                 "RESULT " + json.dumps({**outcome, "status": status.name}), flush=True
             )
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

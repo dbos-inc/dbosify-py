@@ -20,17 +20,16 @@ import sys
 from datetime import timedelta
 from typing import Any
 
-from dbos import DBOS, DBOSClient
+from dbos import DBOS
 
 from dbosify import activity, workflow
-from dbosify.client import Client
 from dbosify.worker import (
     ActivityInboundInterceptor,
     ExecuteActivityInput,
     Interceptor,
     Worker,
 )
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 ACTIVITY_TASK_QUEUE = "xq-ic-activity-tq"
 WORKFLOW_TASK_QUEUE = "xq-ic-workflow-tq"
@@ -88,9 +87,8 @@ async def run_workflow_worker(workflow_id: str) -> None:
         task_queue=WORKFLOW_TASK_QUEUE,
         workflows=[CrossQueueWorkflow],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 CrossQueueWorkflow.run,
                 "Temporal",
@@ -99,7 +97,7 @@ async def run_workflow_worker(workflow_id: str) -> None:
             )
             print("RESULT " + await handle.result(), flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 def main() -> None:

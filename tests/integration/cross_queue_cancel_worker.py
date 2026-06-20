@@ -17,13 +17,12 @@ import os
 import sys
 from datetime import timedelta
 
-from dbos import DBOS, DBOSClient
+from dbos import DBOS
 
 from dbosify import activity, exceptions, workflow
-from dbosify.client import Client
 from dbosify.worker import Worker
 from dbosify.workflow import ActivityCancellationType
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 ACTIVITY_TASK_QUEUE = "xq-cancel-activity-tq"
 WORKFLOW_TASK_QUEUE = "xq-cancel-workflow-tq"
@@ -98,9 +97,8 @@ async def run_workflow_worker(workflow_id: str) -> None:
         task_queue=WORKFLOW_TASK_QUEUE,
         workflows=[CancelCrossQueueWorkflow],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 CancelCrossQueueWorkflow.run,
                 args=[
@@ -114,7 +112,7 @@ async def run_workflow_worker(workflow_id: str) -> None:
             result = await handle.result()
             print("RESULT " + result, flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 def main() -> None:

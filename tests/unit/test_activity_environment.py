@@ -43,6 +43,11 @@ def client_activity() -> object:
     return activity.client()
 
 
+@activity.defn
+async def async_client_activity() -> object:
+    return activity.client()
+
+
 def test_sync_activity_with_heartbeat() -> None:
     env = ActivityEnvironment()
     beats: List[Any] = []
@@ -83,14 +88,22 @@ def test_environment_worker_shutdown_trips_flag() -> None:
 def test_client_helper_returns_environment_client() -> None:
     sentinel = object()
     env = ActivityEnvironment(client=sentinel)
-    assert env.run(client_activity) is sentinel
+    assert asyncio.run(env.run(async_client_activity)) is sentinel
 
 
 def test_client_helper_raises_when_unavailable() -> None:
-    # An ActivityEnvironment with no client has no client and no worker_state, so
+    # An async activity with no env client and no worker_state has no client, so
     # activity.client() raises regardless of any worker in the process.
     env = ActivityEnvironment()
     with pytest.raises(RuntimeError, match="No client available"):
+        asyncio.run(env.run(async_client_activity))
+
+
+def test_client_unavailable_in_sync_activity() -> None:
+    # temporalio parity: a sync activity cannot use the client even when the
+    # environment was given one (it runs off the event loop).
+    env = ActivityEnvironment(client=object())
+    with pytest.raises(RuntimeError, match="only available in `async def`"):
         env.run(client_activity)
 
 

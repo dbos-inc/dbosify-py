@@ -9,9 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dbos import DBOSClient
 
-from tests.dbconfig import system_database_url
+from tests.dbconfig import make_dbos_client
 from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "inflight_recovery_worker.py"
@@ -52,7 +51,7 @@ def test_sigkill_mid_child_reattaches(tmp_path: Path) -> None:
     assert effects.read_text() == "child-work\n"
 
     # Recovery re-attached to the same child: exactly one child row exists.
-    client = DBOSClient(system_database_url=system_database_url())
+    client = make_dbos_client()
     try:
         children = client.list_workflows(workflow_id_prefix="reattach-child")
         assert [c.workflow_id for c in children] == ["reattach-child"]
@@ -90,7 +89,7 @@ def test_sigkill_mid_child_retry_follows_chain(tmp_path: Path) -> None:
     assert effects.read_text() == "child-work\n"
 
     # The child chain advanced past run 0 — the retry produced a successor run.
-    client = DBOSClient(system_database_url=system_database_url())
+    client = make_dbos_client()
     try:
         runs = client.list_workflows(workflow_id_prefix="reattach-retry-child")
         assert len(runs) >= 2

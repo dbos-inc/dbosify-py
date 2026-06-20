@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import workflow
 from dbosify.client import Client
@@ -21,7 +20,7 @@ from dbosify.common import (
     WorkerDeploymentVersion,
 )
 from dbosify.worker import DEFAULT_APP_VERSION, Worker, WorkerDeploymentConfig
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config, make_dbos_client
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -93,11 +92,11 @@ async def _env(
         deployment_config=deployment_config,
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_explicit_build_id() -> None:
@@ -111,7 +110,7 @@ async def test_explicit_build_id() -> None:
     assert result["target_changed"] is False
     # The build_id IS the DBOS application_version scoping recovery/dequeue, so
     # the reported version is the actual pinned routing one (DEVIATIONS worker-versioning).
-    probe = DBOSClient(system_database_url=system_database_url())
+    probe = make_dbos_client()
     try:
         status = probe.retrieve_workflow("dv-build-id").get_status()
     finally:
@@ -172,7 +171,7 @@ async def test_continue_as_new_successor_inherits_build_id() -> None:
             CANOnceWorkflow.run, 0, id="dv-can", task_queue=TASK_QUEUE
         )
     assert result == "done-1"
-    probe = DBOSClient(system_database_url=system_database_url())
+    probe = make_dbos_client()
     try:
         # Run-chain id scheme (§6.4): successor run n=1 is "<id>--r1".
         successor = probe.retrieve_workflow("dv-can--r1").get_status()
@@ -188,19 +187,18 @@ async def test_auto_versioning_reports_computed_version_not_empty() -> None:
     config["application_version"] = None
     worker = Worker(config, task_queue=TASK_QUEUE, workflows=_WORKFLOWS)
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             result = await client.execute_workflow(
                 DeploymentInfoWorkflow.run, id="dv-autover", task_queue=TASK_QUEUE
             )
         finally:
-            dbos_client.destroy()
+            await client.close()
     assert result["build_id"], "auto-versioned build_id should be the computed hash"
     # Must be the *computed* code-hash, not a silent fallback to the pinned
     # default — otherwise this would pass even if auto-versioning regressed.
     assert result["build_id"] != DEFAULT_APP_VERSION
-    probe = DBOSClient(system_database_url=system_database_url())
+    probe = make_dbos_client()
     try:
         status = probe.retrieve_workflow("dv-autover").get_status()
     finally:

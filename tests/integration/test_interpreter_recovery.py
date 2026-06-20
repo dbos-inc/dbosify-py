@@ -13,7 +13,7 @@ import pytest
 from dbos import DBOSClient
 
 from dbosify._internal import conversion, inbox
-from tests.dbconfig import system_database_url
+from tests.dbconfig import make_dbos_client
 from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "interpreter_recovery_worker.py"
@@ -38,7 +38,7 @@ class Driver:
     @property
     def client(self) -> DBOSClient:
         if self._client is None:
-            self._client = DBOSClient(system_database_url=system_database_url())
+            self._client = make_dbos_client()
         return self._client
 
     def close(self) -> None:

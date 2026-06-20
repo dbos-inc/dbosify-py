@@ -18,9 +18,8 @@ product (CLAUDE.md), so these — not just the happy path — gate the feature.
 from pathlib import Path
 
 import pytest
-from dbos import DBOSClient
 
-from tests.dbconfig import system_database_url
+from tests.dbconfig import make_dbos_client, system_database_url
 from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "cross_queue_recovery_worker.py"
@@ -120,7 +119,7 @@ def test_sigkill_workflow_worker_reattaches_to_activity(tmp_path: Path) -> None:
     assert effects.read_text() == "ran\n"
 
     # Exactly one activity workflow exists: {parent}--a{seq}, no twin.
-    client = DBOSClient(system_database_url=system_database_url())
+    client = make_dbos_client()
     try:
         rows = client.list_workflows(workflow_id_prefix=f"{wf_id}--a")
         assert [r.workflow_id for r in rows] == [f"{wf_id}--a1"]

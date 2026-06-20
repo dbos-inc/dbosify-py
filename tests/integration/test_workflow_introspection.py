@@ -32,6 +32,24 @@ class IntrospectionWorkflow:
         # Mutating from a read-only validator must be rejected.
         workflow.upsert_memo({"k": "v"})
 
+    @workflow.update
+    def random_in_validator(self, x: int) -> str:
+        return "unreachable"
+
+    @random_in_validator.validator
+    def _random_validator(self, x: int) -> None:
+        # Consuming the shared RNG from a read-only validator must be rejected.
+        workflow.random().random()
+
+    @workflow.update
+    def continue_as_new_in_validator(self, x: int) -> str:
+        return "unreachable"
+
+    @continue_as_new_in_validator.validator
+    def _can_validator(self, x: int) -> None:
+        # continue-as-new from a read-only validator must be rejected.
+        workflow.continue_as_new()
+
     @workflow.signal
     def finish(self) -> None:
         self.done = True
@@ -66,6 +84,12 @@ def test_instance_random_and_update_info() -> None:
     # A validator that mutates state is rejected (read-only context).
     with pytest.raises(dispatcher.WorkflowUpdateFailedError):
         dispatcher.execute_update("introspect", "mutate_in_validator", [1])
+
+    # random() and continue_as_new() are likewise rejected in a read-only context.
+    with pytest.raises(dispatcher.WorkflowUpdateFailedError):
+        dispatcher.execute_update("introspect", "random_in_validator", [1])
+    with pytest.raises(dispatcher.WorkflowUpdateFailedError):
+        dispatcher.execute_update("introspect", "continue_as_new_in_validator", [1])
 
     dispatcher.signal_workflow("introspect", "finish")
     result = dispatcher.workflow_result(handle)

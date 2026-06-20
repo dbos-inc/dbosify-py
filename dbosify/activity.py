@@ -88,8 +88,7 @@ def payload_converter() -> PayloadConverter:
 _F = TypeVar("_F", bound=Callable[..., Any])
 
 logger = logging.getLogger("dbosify.activity")
-"""Logger that can be used within activities. (Phase 1: a plain logger;
-the context-injecting adapter mirroring temporalio's lands later.)"""
+"""Logger that can be used within activities."""
 
 
 @overload
@@ -148,6 +147,11 @@ def defn(
                     "not callable (define __call__ for a callable-class activity)"
                 )
             introspect = call
+        # Activities are invoked positionally (args[]); keyword-only params can
+        # never be supplied, so reject them at decoration time (temporalio parity).
+        for param in inspect.signature(introspect).parameters.values():
+            if param.kind is inspect.Parameter.KEYWORD_ONLY:
+                raise TypeError("Activity cannot have keyword-only arguments")
         arg_types, ret_type = type_hints_from_func(introspect)
         if dynamic:
             _registry.validate_dynamic_activity_sig(arg_types)
@@ -226,6 +230,9 @@ class ActivityCancellationDetails:
 class _Context:
     info: Info
     on_heartbeat: Callable[..., None]
+    # Whether the running activity is an ``async def`` (vs a sync ``def``).
+    # ``activity.client()`` is available only to async activities (temporalio parity).
+    is_async: bool = True
     cancelled: threading.Event = field(default_factory=threading.Event)
     last_heartbeat: Sequence[Any] = ()
     last_heartbeat_at: float = field(default_factory=time_mod.monotonic)
@@ -594,14 +601,22 @@ def client() -> "Client":
     """Return a Temporal client for use in the current activity, mirroring
     ``temporalio.activity.client``.
 
-    On real worker runs this is the process worker's client (built lazily from
-    the Worker's DBOS configuration). In tests it is the client passed to
+    The client is only available in ``async def`` activities; a sync ``def``
+    activity runs off the event loop and cannot use it (temporalio parity), so
+    this raises there even when a client is configured. On real worker runs the
+    client is the process worker's (built lazily from the Worker's DBOS
+    configuration); in tests it is the client passed to
     :py:class:`dbosify.testing.ActivityEnvironment`.
 
     Raises:
-        RuntimeError: When no client is available.
+        RuntimeError: When no client is available (incl. any sync activity).
     """
     ctx = _context()
+    if not ctx.is_async:
+        raise RuntimeError(
+            "No client available. The client is only available in `async def` "
+            "activities, not sync `def` activities."
+        )
     if ctx.client is not None:
         return ctx.client
     available = ctx.worker_state.client() if ctx.worker_state is not None else None

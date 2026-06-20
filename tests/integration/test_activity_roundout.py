@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, AsyncIterator, List, Optional, Sequence
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import (
@@ -28,7 +27,7 @@ from dbosify.exceptions import (
     TimeoutType,
 )
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -367,12 +366,12 @@ async def _env() -> AsyncIterator[Client]:
         ],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
             TOKENS.clear()
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 # Effects are written cross-process by (sometimes abandoned) activity threads, so the
@@ -523,14 +522,17 @@ def test_async_activity_completion_survives_sigkill(tmp_path: Path) -> None:
     try:
         second.wait_for_line("STARTED", timeout=60)
         token = token_file.read_text().encode()
-        dbos_client = DBOSClient(system_database_url=system_database_url())
-        try:
-            client = Client(dbos_client)
-            asyncio.run(
-                client.get_async_activity_handle(task_token=token).complete("recovered")
-            )
-        finally:
-            dbos_client.destroy()
+
+        async def _complete_recovered() -> None:
+            client = await connect_client()
+            try:
+                await client.get_async_activity_handle(task_token=token).complete(
+                    "recovered"
+                )
+            finally:
+                await client.close()
+
+        asyncio.run(_complete_recovered())
         import json
 
         result = json.loads(

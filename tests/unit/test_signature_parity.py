@@ -69,7 +69,7 @@ DELIBERATE_DEVIATIONS: Dict[str, str] = {
         "params are all dev-server flags, which don't apply"
     ),
     "testing.WorkflowEnvironment.start_time_skipping": (
-        "Phase 4; raises NotImplementedError"
+        "time-skipping is out of scope; raises NotImplementedError"
     ),
     "testing.WorkflowEnvironment.dbos_config": (
         "DBOS-native extension: the config to build the env's Worker from "

@@ -10,7 +10,6 @@ from datetime import timedelta
 from typing import Any, AsyncIterator, List, Optional
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import (
@@ -28,7 +27,7 @@ from dbosify.exceptions import (
     WorkflowAlreadyStartedError,
 )
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -181,11 +180,11 @@ async def _env() -> AsyncIterator[Client]:
         activities=[compose_greeting],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_hello_world_quad() -> None:
@@ -493,3 +492,43 @@ async def test_query_reject_condition() -> None:
         strict_handle = strict_client.get_workflow_handle("qrc-wf")
         with pytest.raises(WorkflowQueryRejectedError):
             await strict_handle.query(AccumulatorWorkflow.total_so_far)
+
+
+async def test_worker_from_url_string() -> None:
+    """The Worker accepts a bare Postgres URL in place of a DBOSConfig,
+    synthesizing a minimal config (and forcing the admin server off); an
+    end-to-end workflow runs on it exactly as on a config-built worker."""
+    worker = Worker(
+        system_database_url(),
+        task_queue=TASK_QUEUE,
+        workflows=[GreetingWorkflow],
+        activities=[compose_greeting],
+    )
+    async with worker:
+        client = await connect_client()
+        try:
+            result = await client.execute_workflow(
+                GreetingWorkflow.run, "URL", id="url-wf", task_queue=TASK_QUEUE
+            )
+        finally:
+            await client.close()
+    assert result == "Hello, URL! (wf=url-wf)"
+
+
+async def test_worker_cancel_run() -> None:
+    """is_running/is_shutdown track the run lifecycle, and cancelling the run()
+    task shuts the worker down (adapted from temporalio's test_worker_cancel_run)."""
+    worker = Worker(
+        default_config(),
+        task_queue=TASK_QUEUE,
+        workflows=[GreetingWorkflow],
+        activities=[compose_greeting],
+    )
+    assert not worker.is_running and not worker.is_shutdown
+    run_task = asyncio.create_task(worker.run())
+    await asyncio.sleep(0.3)
+    assert worker.is_running and not worker.is_shutdown
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    assert not worker.is_running and worker.is_shutdown

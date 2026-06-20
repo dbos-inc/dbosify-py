@@ -12,10 +12,9 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify.client import Client
-from tests.dbconfig import system_database_url
+from tests.dbconfig import make_dbos_client
 from tests.harness import PythonProcess, build_id_env
 from tests.integration.version_client_worker import TASK_QUEUE, VersionEcho
 
@@ -25,7 +24,7 @@ WORKER = Path(__file__).parent / "version_client_worker.py"
 async def _client_run(wf_id: str) -> Tuple[str, Optional[str]]:
     # This process is a bare client: a DBOSClient, no launched DBOS, no build id
     # of its own. The enqueue carries no version; the worker stamps its own.
-    dbos_client = DBOSClient(system_database_url=system_database_url())
+    dbos_client = make_dbos_client()
     try:
         client = Client(dbos_client)
         result: str = await client.execute_workflow(

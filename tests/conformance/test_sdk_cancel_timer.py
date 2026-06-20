@@ -696,28 +696,37 @@ async def test_workflow_timeout_support(client: Client, approach: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+# Note: asyncio.Task.uncancel()/cancelling() work on our interpreter's real
+# tasks (the cooperative cancel injects via task.cancel()) — there is no
+# workflow.uncancel to add. The shield-loop counter is regression-covered by
+# tests/integration/test_cancellation.py::test_uncancel_clears_cancel_counter.
+# These upstream variants stay skipped because they assert on temporalio's
+# internal logger ("exception in shielded future") and server history (duplicate
+# cancel commands), and they ride the activity-cancellation-type family.
+
+
 @pytest.mark.skip(
-    reason="workflow.uncancel / task.uncancel shield-loop counter is not implemented "
-    "(dbosify.workflow has no uncancel); the test also relies on "
-    "LogCapturer + history-event server-only assertions."
+    reason="Asserts on temporalio's internal _workflow_instance logger and server "
+    "history (duplicate cancel commands), neither of which exists here. The uncancel/"
+    "cancelling() counter itself works — see test_cancellation.test_uncancel_clears_cancel_counter."
 )
 async def test_workflow_uncancel_shield_activity() -> None:
     pass
 
 
 @pytest.mark.skip(
-    reason="workflow.uncancel / task.uncancel shield-loop counter is not implemented "
-    "(dbosify.workflow has no uncancel); the test also relies on "
-    "LogCapturer + history-event server-only assertions."
+    reason="Asserts on temporalio's internal _workflow_instance logger and server "
+    "history (duplicate cancel commands), neither of which exists here. The uncancel/"
+    "cancelling() counter itself works — see test_cancellation.test_uncancel_clears_cancel_counter."
 )
 async def test_workflow_uncancel_shield_child_workflow() -> None:
     pass
 
 
 @pytest.mark.skip(
-    reason="workflow.uncancel / task.uncancel shield-loop counter is not implemented "
-    "(dbosify.workflow has no uncancel); the test also relies on "
-    "LogCapturer server-only assertions."
+    reason="Asserts on temporalio's internal _workflow_instance logger (server-only), "
+    "not on observable behavior. The uncancel/cancelling() counter itself works — "
+    "see test_cancellation.test_uncancel_clears_cancel_counter."
 )
 async def test_workflow_uncancel_shield_signal_external() -> None:
     pass

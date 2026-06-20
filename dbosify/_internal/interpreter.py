@@ -962,8 +962,16 @@ class Interpreter(_Runtime):
                 inbound = cls(inbound)
         self._inbound = inbound
         # init() walks the chain installing the (possibly wrapped) outbound; the
-        # root inbound's init stores the final outbound on self._outbound.
-        inbound.init(_RootWorkflowOutbound(self))
+        # root inbound's init stores the final outbound on self._outbound. A user
+        # interceptor's init() may call workflow.* (e.g. set_signal_handler),
+        # which require the virtual loop as the running loop — install it as
+        # _instantiate() does.
+        previous_loop = asyncio._get_running_loop()
+        asyncio._set_running_loop(self._vloop)
+        try:
+            inbound.init(_RootWorkflowOutbound(self))
+        finally:
+            asyncio._set_running_loop(previous_loop)
 
     # ------------------------------------------------------------------
     # The outer loop (real asyncio loop, inside the DBOS workflow)

@@ -11,7 +11,6 @@ from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify._internal import conversion
@@ -51,7 +50,7 @@ from dbosify.worker import (
     WorkflowInterceptorClassInput,
     WorkflowOutboundInterceptor,
 )
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config, make_dbos_client
 from tests.harness import retry_until_success_async
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
@@ -206,16 +205,15 @@ async def test_activity_interceptor_wraps_and_routes() -> None:
         interceptors=[_RecordingWorkerInterceptor(events)],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 InterceptedWorkflow.run, "hi", id="ic-act", task_queue=TASK_QUEUE
             )
             await handle.signal(InterceptedWorkflow.finish)
             result = await handle.result()
         finally:
-            dbos_client.destroy()
+            await client.close()
 
     # The activity returned "hi:echo"; the inbound interceptor wrapped it.
     assert result == "intercepted(hi:echo)|extra=0"
@@ -236,7 +234,7 @@ async def test_client_interceptor_records_verbs() -> None:
         activities=[echo],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
@@ -299,7 +297,7 @@ async def test_client_interceptor_records_schedule_verbs() -> None:
     events: List[Event] = []
     worker = Worker(default_config(), task_queue=TASK_QUEUE, workflows=[QuickGreeter])
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
@@ -334,7 +332,7 @@ async def test_client_interceptor_records_async_activity_verbs() -> None:
         activities=[complete_externally],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
@@ -433,7 +431,7 @@ async def test_interceptor_chain_ordering() -> None:
         ],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(
                 dbos_client,
@@ -517,9 +515,8 @@ async def test_activity_interceptor_fires_per_attempt_not_on_replay() -> None:
         interceptors=[_CountingWorkerInterceptor()],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 RetryReplayWorkflow.run, id="ic-retry", task_queue=TASK_QUEUE
             )
@@ -530,7 +527,7 @@ async def test_activity_interceptor_fires_per_attempt_not_on_replay() -> None:
             await handle.signal(RetryReplayWorkflow.finish)
             assert await handle.result() == "ok:3"
         finally:
-            dbos_client.destroy()
+            await client.close()
 
     # One failed attempt + one success; the replays do not re-run the step.
     assert _attempts["fn"] == 2
@@ -550,14 +547,13 @@ async def test_activity_interceptor_fires_for_local_activity() -> None:
         interceptors=[_RecordingWorkerInterceptor(events)],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             result = await client.execute_workflow(
                 LocalActivityWorkflow.run, "loc", id="ic-local", task_queue=TASK_QUEUE
             )
         finally:
-            dbos_client.destroy()
+            await client.close()
 
     assert result == "intercepted(loc:echo)"
     assert ("execute_activity", "echo") in events
@@ -595,7 +591,7 @@ async def test_client_interceptor_injects_search_attributes_and_memo() -> None:
     search attributes."""
     worker = Worker(default_config(), task_queue=TASK_QUEUE, workflows=[QuickGreeter])
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(dbos_client, interceptors=[_InjectingClientInterceptor()])
             # Started with neither search_attributes nor memo — the interceptor
@@ -628,7 +624,7 @@ async def test_query_reject_condition_does_not_invoke_describe_interceptor() -> 
         activities=[echo],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
@@ -664,7 +660,7 @@ async def test_schedule_update_does_not_invoke_describe_schedule_interceptor() -
     events: List[Event] = []
     worker = Worker(default_config(), task_queue=TASK_QUEUE, workflows=[QuickGreeter])
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(
                 dbos_client, interceptors=[_RecordingClientInterceptor(events)]
@@ -851,7 +847,7 @@ async def test_header_propagates_to_workflow_activity_and_child() -> None:
         interceptors=[_TraceWorkerInterceptor()],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(dbos_client, interceptors=[_TraceClientInterceptor()])
             result = await client.execute_workflow(
@@ -876,14 +872,13 @@ async def test_header_channel_inert_without_client_injection() -> None:
         interceptors=[_TraceWorkerInterceptor()],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()  # no client interceptor
         try:
-            client = Client(dbos_client)  # no client interceptor
             result = await client.execute_workflow(
                 TraceParentWorkflow.run, id="ic-trace-plain", task_queue=TASK_QUEUE
             )
         finally:
-            dbos_client.destroy()
+            await client.close()
 
     assert result == {
         "trace": "",
@@ -901,7 +896,7 @@ async def test_signal_header_reaches_handler() -> None:
         interceptors=[_TraceWorkerInterceptor()],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(
                 dbos_client, interceptors=[_TraceClientInterceptor("from-signal")]
@@ -926,7 +921,7 @@ async def test_header_survives_continue_as_new() -> None:
         interceptors=[_TraceWorkerInterceptor()],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(dbos_client, interceptors=[_TraceClientInterceptor()])
             result = await client.execute_workflow(
@@ -977,7 +972,7 @@ async def test_header_survives_payload_codec() -> None:
         data_converter=converter,
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        dbos_client = make_dbos_client()
         try:
             client = Client(
                 dbos_client,

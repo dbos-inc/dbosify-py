@@ -20,14 +20,12 @@ import json
 import sys
 from datetime import timedelta
 
-from dbos import DBOSClient
-
 from dbosify import activity, workflow
 from dbosify.client import Client
 from dbosify.common import RetryPolicy
 from dbosify.exceptions import ApplicationError
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "chain-hop-recovery-tq"
 
@@ -89,9 +87,8 @@ async def main() -> None:
         workflows=[CronRecoveryWorkflow, RetryRecoveryWorkflow],
         activities=[record],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 if scenario == "cron":
                     await client.start_workflow(
@@ -132,7 +129,7 @@ async def main() -> None:
                 result = await client.get_workflow_handle(workflow_id).result()
                 print("RESULT " + json.dumps(result), flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

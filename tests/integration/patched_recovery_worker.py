@@ -22,12 +22,9 @@ import os
 import sys
 from datetime import timedelta
 
-from dbos import DBOSClient
-
 from dbosify import activity, workflow
-from dbosify.client import Client
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "patched-recovery-tq"
 PATCH_VERSION = os.environ.get("PATCH_VERSION", "v2")
@@ -87,9 +84,8 @@ async def main() -> None:
         workflows=[PatchRecoveryWorkflow],
         activities=[noop],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 handle = await client.start_workflow(
                     PatchRecoveryWorkflow.run,
@@ -106,7 +102,7 @@ async def main() -> None:
                 branch = await handle.result()
                 print("RESULT " + branch, flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

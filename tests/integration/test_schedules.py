@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Optional
 
 import pytest
-from dbos import DBOSClient, DBOSConfig
+from dbos import DBOSConfig
 
 from dbosify import activity, workflow
 from dbosify.client import (
@@ -33,7 +33,7 @@ from dbosify.common import (
     TypedSearchAttributes,
 )
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 from tests.harness import retry_until_success_async
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
@@ -165,11 +165,11 @@ async def _env(config: Optional[DBOSConfig] = None) -> AsyncIterator[Client]:
         activities=[greet, overlap_record],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def _wait_for_action(client: Client, *, name: str = "World") -> str:

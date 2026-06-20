@@ -16,12 +16,11 @@ import os
 import sys
 from datetime import timedelta
 
-from dbos import DBOS, DBOSClient
+from dbos import DBOS
 
 from dbosify import activity, workflow
-from dbosify.client import Client
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 ACTIVITY_TASK_QUEUE = "version-xq-activity-tq"
 WORKFLOW_TASK_QUEUE = "version-xq-workflow-tq"
@@ -67,7 +66,7 @@ async def run_workflow_worker(workflow_id: str) -> None:
         workflows=[VersionCrossQueueWorkflow],
         build_id=os.environ["DBOSIFY_BUILD_ID"],
     ):
-        client = Client(DBOSClient(system_database_url=system_database_url()))
+        client = await connect_client()
         result = await client.execute_workflow(
             VersionCrossQueueWorkflow.run,
             "Temporal",
