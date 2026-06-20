@@ -13,11 +13,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify._internal import inbox
-from dbosify.client import Client, WorkflowUpdateStage
-from tests.dbconfig import system_database_url
+from dbosify.client import WorkflowUpdateStage
+from tests.dbconfig import connect_client, make_dbos_client
 from tests.harness import PythonProcess
 
 WORKER = Path(__file__).parent / "inflight_recovery_worker.py"
@@ -52,7 +51,7 @@ def test_is_replaying_across_recovery(tmp_path: Path) -> None:
     second.start()
     try:
         second.wait_for_line("PROBE_PARKED", timeout=60)
-        client = DBOSClient(system_database_url=system_database_url())
+        client = make_dbos_client()
         try:
             client.send(wf_id, inbox.signal_envelope("go", []), inbox.INBOX_TOPIC)
             result = _result_from(second.wait_for_line("RESULT ", timeout=60))
@@ -85,11 +84,10 @@ async def test_sigkill_with_updates_in_flight(tmp_path: Path) -> None:
 
     first = PythonProcess(WORKER, "updates-start", wf_id, str(effects), env=ENV)
     first.start()
-    dbos_client = None
+    client = None
     try:
         first.wait_for_line("STARTED", timeout=60)
-        dbos_client = DBOSClient(system_database_url=system_database_url())
-        client = Client(dbos_client)
+        client = await connect_client()
         handle = client.get_workflow_handle(wf_id)
         # Both updates reach ACCEPTED (validator passed, acceptance durable,
         # handler parked on `release`), with a signal in between.
@@ -115,7 +113,7 @@ async def test_sigkill_with_updates_in_flight(tmp_path: Path) -> None:
     second.start()
     try:
         second.wait_for_line("STARTED", timeout=60)
-        assert dbos_client is not None
+        assert client is not None
         # Recovery re-parked both handlers; release them and re-attach to the
         # in-flight updates by id, as a crashed-and-restarted caller would.
         await handle.signal("release_updates")
@@ -127,8 +125,8 @@ async def test_sigkill_with_updates_in_flight(tmp_path: Path) -> None:
         assert second.wait() == 0
     finally:
         second.terminate_and_wait()
-        if dbos_client is not None:
-            dbos_client.destroy()
+        if client is not None:
+            await client.close()
 
     # Inbox delivery order is checkpointed, so the replayed prefix is exact; the
     # two handlers wake together on release, so their completions may interleave.

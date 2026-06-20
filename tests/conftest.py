@@ -9,7 +9,7 @@ import pytest
 import sqlalchemy as sa
 from dbos import DBOS, DBOSClient, DBOSConfig
 
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import default_config, make_dbos_client, system_database_url
 
 
 @pytest.fixture()
@@ -67,9 +67,9 @@ def dbos(
 
 @pytest.fixture()
 def dbos_client(dbos: DBOS) -> Generator[DBOSClient, Any, None]:
-    """A DBOSClient against the same system database as the `dbos` fixture
-    (the JSON serializer default lives in tests/dbconfig.py)."""
-    client = DBOSClient(system_database_url=system_database_url())
+    """A DBOSClient against the same system database as the `dbos` fixture,
+    with the JSON serializer + namespace schema set explicitly (make_dbos_client)."""
+    client = make_dbos_client()
     yield client
     client.destroy()
 

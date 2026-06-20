@@ -22,12 +22,11 @@ import os
 import sys
 from datetime import timedelta
 
-from dbos import DBOS, DBOSClient
+from dbos import DBOS
 
 from dbosify import activity, workflow
-from dbosify.client import Client
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 ACTIVITY_TASK_QUEUE = "xq-recovery-activity-tq"
 WORKFLOW_TASK_QUEUE = "xq-recovery-workflow-tq"
@@ -79,9 +78,8 @@ async def run_workflow_worker(action: str, workflow_id: str) -> None:
         task_queue=WORKFLOW_TASK_QUEUE,
         workflows=[SlowCrossQueueWorkflow],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 handle = await client.start_workflow(
                     SlowCrossQueueWorkflow.run,
@@ -96,7 +94,7 @@ async def run_workflow_worker(action: str, workflow_id: str) -> None:
             result = await handle.result()
             print("RESULT " + result, flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 def main() -> None:

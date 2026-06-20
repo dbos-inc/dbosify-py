@@ -11,13 +11,12 @@ from datetime import timedelta
 from typing import Any, AsyncIterator, Dict, List, Sequence
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import workflow
 from dbosify.client import Client, WorkflowUpdateFailedError
 from dbosify.exceptions import ApplicationError
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -176,11 +175,11 @@ ALL_WORKFLOWS = [
 async def _env() -> AsyncIterator[Client]:
     worker = Worker(default_config(), task_queue=TASK_QUEUE, workflows=ALL_WORKFLOWS)
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_set_signal_handler_runtime() -> None:

@@ -5,14 +5,13 @@ the freshly-(re)created test database) is defined here so every ``test_sdk_*.py`
 module in this directory can request it.
 """
 
-from typing import Iterator
+from typing import AsyncIterator
 
 import pytest
 import sqlalchemy as sa
-from dbos import DBOSClient
 
 from dbosify.client import Client
-from tests.dbconfig import system_database_url
+from tests.dbconfig import connect_client, system_database_url
 
 
 def _ensure_database_exists() -> None:
@@ -38,10 +37,10 @@ def _ensure_database_exists() -> None:
 
 
 @pytest.fixture()
-def client(dbosify_env: None) -> Iterator[Client]:
+async def client(dbosify_env: None) -> AsyncIterator[Client]:
     _ensure_database_exists()
-    dbos_client = DBOSClient(system_database_url=system_database_url())
+    client = await connect_client()
     try:
-        yield Client(dbos_client)
+        yield client
     finally:
-        dbos_client.destroy()
+        await client.close()

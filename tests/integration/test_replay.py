@@ -12,12 +12,10 @@ from datetime import timedelta
 from typing import AsyncIterator, Dict, List
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify._internal import registry
 from dbosify.client import (
-    Client,
     WorkflowExecutionStatus,
     WorkflowFailureError,
     WorkflowHistory,
@@ -26,7 +24,7 @@ from dbosify.client import (
 from dbosify.exceptions import ApplicationError
 from dbosify.worker import Interceptor, Replayer, Worker
 from dbosify.workflow import NondeterminismError
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 from tests.harness import retry_until_success_async
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
@@ -169,9 +167,8 @@ async def _aiter(items: List[WorkflowHistory]) -> AsyncIterator[WorkflowHistory]
 
 async def test_replay_clean_no_failure() -> None:
     async with _worker():
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ReplayWf.run, "hi", id="rp-clean", task_queue=TASK_QUEUE
             )
@@ -183,16 +180,15 @@ async def test_replay_clean_no_failure() -> None:
             result = await Replayer(workflows=[ReplayWf]).replay_workflow(history)
             assert result.replay_failure is None
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_patched_workflow_clean() -> None:
     # A patched run recorded a marker; replay reads it back so patched() returns
     # True and the activity lines up — a clean verify, not a false divergence.
     async with _worker(PatchedReplayWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 PatchedReplayWf.run, "hi", id="rp-patched", task_queue=TASK_QUEUE
             )
@@ -204,14 +200,13 @@ async def test_replay_patched_workflow_clean() -> None:
             )
             assert result.replay_failure is None
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_reordered_activity_diverges() -> None:
     async with _worker():
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ReplayWf.run, "hi", id="rp-reorder", task_queue=TASK_QUEUE
             )
@@ -227,14 +222,13 @@ async def test_replay_reordered_activity_diverges() -> None:
             )
             assert isinstance(result.replay_failure, NondeterminismError)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_added_trailing_activity_is_guarded() -> None:
     async with _worker():
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ReplayWf.run, "hi", id="rp-extra", task_queue=TASK_QUEUE
             )
@@ -249,14 +243,13 @@ async def test_replay_added_trailing_activity_is_guarded() -> None:
             # The guard fired before the new activity ran: no real side effect.
             assert C_RUNS == []
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_early_finish_diverges() -> None:
     async with _worker():
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ReplayWf.run, "hi", id="rp-skip", task_queue=TASK_QUEUE
             )
@@ -269,14 +262,13 @@ async def test_replay_early_finish_diverges() -> None:
             )
             assert isinstance(result.replay_failure, NondeterminismError)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_recorded_failure_replays_as_pass() -> None:
     async with _worker(FailWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 FailWf.run, id="rp-fail", task_queue=TASK_QUEUE
             )
@@ -291,14 +283,13 @@ async def test_recorded_failure_replays_as_pass() -> None:
             )
             assert result.replay_failure is None
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_timer_and_signal_clean() -> None:
     async with _worker(TimerSignalWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 TimerSignalWf.run, "hi", id="rp-timer", task_queue=TASK_QUEUE
             )
@@ -309,14 +300,13 @@ async def test_replay_timer_and_signal_clean() -> None:
             result = await Replayer(workflows=[TimerSignalWf]).replay_workflow(history)
             assert result.replay_failure is None
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_with_child_workflow_clean() -> None:
     async with _worker(ParentWf, ChildWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 ParentWf.run, "hi", id="rp-parent", task_queue=TASK_QUEUE
             )
@@ -330,14 +320,13 @@ async def test_replay_with_child_workflow_clean() -> None:
             )
             assert result.replay_failure is None
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_query_on_closed_workflow_rehydrates() -> None:
     async with _worker(GreetingWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 GreetingWf.run, "World", id="rp-query", task_queue=TASK_QUEUE
             )
@@ -350,21 +339,20 @@ async def test_query_on_closed_workflow_rehydrates() -> None:
             assert await handle.query(GreetingWf.greeting) == "Goodbye, World!"
 
             # The scratch rehydrate fork was cleaned up (no extra runs linger).
-            survivors = await dbos_client.list_workflows_async(
+            survivors = await client._dbos_client.list_workflows_async(
                 workflow_id_prefix="", load_input=False
             )
             assert all(s.workflow_id == "rp-query" for s in survivors), [
                 s.workflow_id for s in survivors
             ]
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_canceled_workflow_replays_as_pass() -> None:
     async with _worker(TimerSignalWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 TimerSignalWf.run, "hi", id="rp-cancel", task_queue=TASK_QUEUE
             )
@@ -383,7 +371,7 @@ async def test_replay_canceled_workflow_replays_as_pass() -> None:
             )
             assert result.replay_failure is None
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replayer_does_not_clobber_worker_interceptors() -> None:
@@ -405,22 +393,20 @@ async def test_replayer_does_not_clobber_worker_interceptors() -> None:
 
 async def test_query_on_missing_workflow_raises_query_failed() -> None:
     async with _worker(GreetingWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = client.get_workflow_handle("rp-does-not-exist")
             # A missing run is a query failure, not a bare RuntimeError.
             with pytest.raises(WorkflowQueryFailedError):
                 await handle.query(GreetingWf.greeting)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_query_on_terminated_workflow_fails_clearly() -> None:
     async with _worker(TimerSignalWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 TimerSignalWf.run, "hi", id="rp-term", task_queue=TASK_QUEUE
             )
@@ -437,14 +423,13 @@ async def test_query_on_terminated_workflow_fails_clearly() -> None:
             with pytest.raises(WorkflowQueryFailedError, match="TERMINATED"):
                 await handle.query(TimerSignalWf.state)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_terminated_workflow_is_rejected() -> None:
     async with _worker(TimerSignalWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 TimerSignalWf.run, "hi", id="rp-term-replay", task_queue=TASK_QUEUE
             )
@@ -465,14 +450,13 @@ async def test_replay_terminated_workflow_is_rejected() -> None:
             assert isinstance(result.replay_failure, ValueError)
             assert "TERMINATED" in str(result.replay_failure)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_query_on_closed_with_changed_code_fails_clearly() -> None:
     async with _worker(GreetingWf):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 GreetingWf.run, "World", id="rp-changed", task_queue=TASK_QUEUE
             )
@@ -486,14 +470,13 @@ async def test_query_on_closed_with_changed_code_fails_clearly() -> None:
                     GreetingWf.greeting, rpc_timeout=timedelta(seconds=3)
                 )
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_replay_workflows_aggregates_failures_by_run_id() -> None:
     async with _worker():
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             histories: List[WorkflowHistory] = []
             for i in range(2):
                 handle = await client.start_workflow(
@@ -518,4 +501,4 @@ async def test_replay_workflows_aggregates_failures_by_run_id() -> None:
                 for f in diverged.replay_failures.values()
             )
         finally:
-            dbos_client.destroy()
+            await client.close()

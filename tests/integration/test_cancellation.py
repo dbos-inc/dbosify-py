@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import AsyncIterator, Optional
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import (
@@ -25,7 +24,7 @@ from dbosify.client import (
 from dbosify.common import WorkflowIDConflictPolicy
 from dbosify.exceptions import CancelledError, TerminatedError
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -135,11 +134,11 @@ async def _env() -> AsyncIterator[Client]:
         activities=[record, slow_activity],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def _assert_cancelled_result(handle: WorkflowHandle) -> None:

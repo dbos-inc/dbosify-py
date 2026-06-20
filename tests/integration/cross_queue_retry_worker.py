@@ -23,14 +23,14 @@ import os
 import sys
 from datetime import timedelta
 
-from dbos import DBOS, DBOSClient
+from dbos import DBOS
 
 from dbosify import activity, workflow
-from dbosify.client import Client, WorkflowFailureError
+from dbosify.client import WorkflowFailureError
 from dbosify.common import RetryPolicy
 from dbosify.exceptions import ApplicationError
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 ACTIVITY_TASK_QUEUE = "xq-retry-activity-tq"
 WORKFLOW_TASK_QUEUE = "xq-retry-workflow-tq"
@@ -89,9 +89,8 @@ async def run_workflow_worker(workflow_id: str) -> None:
         task_queue=WORKFLOW_TASK_QUEUE,
         workflows=[RetryCrossQueueWorkflow],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             handle = await client.start_workflow(
                 RetryCrossQueueWorkflow.run,
                 "Temporal",
@@ -105,7 +104,7 @@ async def run_workflow_worker(workflow_id: str) -> None:
             except WorkflowFailureError as err:
                 print("FAILED " + type(err.cause).__name__, flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 def main() -> None:

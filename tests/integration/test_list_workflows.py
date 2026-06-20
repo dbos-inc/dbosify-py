@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import workflow
 from dbosify._internal.visibility import VisibilityQueryError
@@ -37,7 +36,7 @@ from dbosify.common import (
 )
 from dbosify.exceptions import ApplicationError
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 from tests.harness import retry_until_success_async
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
@@ -108,11 +107,11 @@ async def _env() -> AsyncIterator[Client]:
         activities=[],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def _collect(it: WorkflowExecutionAsyncIterator) -> List[WorkflowExecution]:

@@ -58,6 +58,7 @@ def install_shim() -> None:
     from dbos import DBOSClient, DBOSConfig
 
     from dbosify._internal.namespaces import DEFAULT_NAMESPACE, namespace_schema
+    from dbosify._internal.serializer import TEMPORAL_SERIALIZER
     from dbosify.client import Client
     from dbosify.worker import Worker
 
@@ -88,7 +89,11 @@ def install_shim() -> None:
                 k: kwargs[k] for k in ("data_converter", "interceptors") if k in kwargs
             }
             client = cls(
-                DBOSClient(system_database_url=url, dbos_system_schema=schema),
+                DBOSClient(
+                    system_database_url=url,
+                    dbos_system_schema=schema,
+                    serializer=TEMPORAL_SERIALIZER,
+                ),
                 **forwarded,
             )
             # Stash interceptors so the adapted ``Worker(client, ...)`` can harvest

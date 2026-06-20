@@ -19,12 +19,9 @@ import asyncio
 import os
 import sys
 
-from dbos import DBOSClient
-
 from dbosify import workflow
-from dbosify.client import Client
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "version-recovery-tq"
 BUILD_ID = os.environ["DBOSIFY_BUILD_ID"]
@@ -54,7 +51,7 @@ async def main() -> None:
         workflows=[VersionPinnedWorkflow],
         build_id=BUILD_ID,
     ):
-        client = Client(DBOSClient(system_database_url=system_database_url()))
+        client = await connect_client()
         if action == "start":
             handle = await client.start_workflow(
                 VersionPinnedWorkflow.run, id=workflow_id, task_queue=TASK_QUEUE

@@ -16,17 +16,14 @@ import asyncio
 import json
 import sys
 
-from dbos import DBOSClient
-
 from dbosify import workflow
-from dbosify.client import Client
 from dbosify.common import (
     SearchAttributeKey,
     SearchAttributePair,
     TypedSearchAttributes,
 )
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "search-attr-recovery-tq"
 
@@ -61,9 +58,8 @@ async def main() -> None:
         workflows=[UpsertRecoveryWorkflow],
         activities=[],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 await client.start_workflow(
                     UpsertRecoveryWorkflow.run,
@@ -93,7 +89,7 @@ async def main() -> None:
                 }
                 print("RESULT " + json.dumps(out), flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

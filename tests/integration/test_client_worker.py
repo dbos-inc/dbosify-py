@@ -10,7 +10,6 @@ from datetime import timedelta
 from typing import Any, AsyncIterator, List, Optional
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import (
@@ -28,7 +27,7 @@ from dbosify.exceptions import (
     WorkflowAlreadyStartedError,
 )
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config, system_database_url
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -181,11 +180,11 @@ async def _env() -> AsyncIterator[Client]:
         activities=[compose_greeting],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_hello_world_quad() -> None:
@@ -506,14 +505,13 @@ async def test_worker_from_url_string() -> None:
         activities=[compose_greeting],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             result = await client.execute_workflow(
                 GreetingWorkflow.run, "URL", id="url-wf", task_queue=TASK_QUEUE
             )
         finally:
-            dbos_client.destroy()
+            await client.close()
     assert result == "Hello, URL! (wf=url-wf)"
 
 

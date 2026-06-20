@@ -14,7 +14,7 @@ from typing import Any, Optional
 import pytest
 
 from tests.conformance.samples import ensure_samples, rewrite_sample
-from tests.dbconfig import system_database_url
+from tests.dbconfig import make_dbos_client, system_database_url
 from tests.harness import PythonProcess
 
 RUNNER = Path(__file__).parent / "runner.py"
@@ -160,7 +160,7 @@ def _verify_hello_cron(deadline_seconds: float, process: PythonProcess) -> None:
                 if client is None:
                     # The sample subprocess creates the database; until
                     # then, construction/queries fail — keep retrying.
-                    client = DBOSClient(system_database_url=system_database_url())
+                    client = make_dbos_client()
                 polled = {
                     s.workflow_id: s.status
                     for s in client.list_workflows(workflow_ids=run_ids)

@@ -16,13 +16,10 @@ import json
 import sys
 from typing import List, Optional, Sequence
 
-from dbos import DBOSClient
-
 from dbosify import workflow
-from dbosify.client import Client
 from dbosify.common import RawValue
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "dynamic-can-recovery-tq"
 
@@ -67,9 +64,8 @@ async def main() -> None:
         workflows=[DynamicCANRecoveryWorkflow],
         activities=[],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 handle = await client.start_workflow(
                     DynamicCANRecoveryWorkflow.run,
@@ -89,7 +85,7 @@ async def main() -> None:
                 await handle.signal("finish")
                 print("RESULT " + json.dumps(await handle.result()), flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

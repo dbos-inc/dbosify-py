@@ -16,12 +16,9 @@ import asyncio
 import sys
 from dataclasses import dataclass
 
-from dbos import DBOSClient
-
 from dbosify import activity, workflow  # noqa: F401  (workflow used below)
-from dbosify.client import Client
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 TASK_QUEUE = "bad-signal-recovery-tq"
 
@@ -59,9 +56,8 @@ async def main() -> None:
         task_queue=TASK_QUEUE,
         workflows=[BadSignalRecoveryWorkflow],
     ):
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            client = Client(dbos_client)
             if action == "start":
                 handle = await client.start_workflow(
                     BadSignalRecoveryWorkflow.run,
@@ -85,7 +81,7 @@ async def main() -> None:
                 )
                 print("RESULT " + ",".join(await handle.result()), flush=True)
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 if __name__ == "__main__":

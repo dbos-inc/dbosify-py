@@ -8,13 +8,12 @@ from datetime import timedelta
 from typing import Any, AsyncIterator, Dict, List, Sequence
 
 import pytest
-from dbos import DBOSClient
 
 from dbosify import activity, workflow
 from dbosify.client import Client
 from dbosify.common import RawValue
 from dbosify.worker import Worker
-from tests.dbconfig import default_config, system_database_url
+from tests.dbconfig import connect_client, default_config
 
 pytestmark = pytest.mark.usefixtures("dbosify_env")
 
@@ -120,11 +119,11 @@ async def _env() -> AsyncIterator[Client]:
         activities=[known_activity, any_activity],
     )
     async with worker:
-        dbos_client = DBOSClient(system_database_url=system_database_url())
+        client = await connect_client()
         try:
-            yield Client(dbos_client)
+            yield client
         finally:
-            dbos_client.destroy()
+            await client.close()
 
 
 async def test_dynamic_handlers_and_activity() -> None:
