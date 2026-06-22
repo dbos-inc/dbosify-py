@@ -3,7 +3,7 @@
 A drop-in replacement for the [Temporal Python SDK](https://github.com/temporalio/sdk-python) backed by a Postgres database (through [DBOS Transact](https://github.com/dbos-inc/dbos-transact-py)) instead of a Temporal server.
 
 To use this library, import `dbosify` instead of `temporalio` and connect your workers and clients to a Postgres database instead of a Temporal server.
-The library uses Postgres to orchestrate your durable workflows and messaging, providing the same reliablity guarantees with no infrastructure requirements.
+The library uses Postgres to orchestrate your durable workflows and messaging, providing the same reliability guarantees with no infrastructure requirements.
 All you need is Postgres.
 
 <p align="center">
@@ -11,6 +11,12 @@ All you need is Postgres.
 </p>
 
 ## Usage
+
+To install:
+
+```shell
+pip install dbosify
+```
 
 This is a drop-in replacement: simply import `dbosify` instead of `temporalio` and connect your clients and workers to a Postgres database instead of a Temporal server.
 Further documentation [here](https://docs.dbos.dev/explanations/migrating-from-temporal).
@@ -61,7 +67,7 @@ if __name__ == "__main__":
 
 ## How It Works
 
-`dbosify` runs each Temporal workflow as a durable DBOS workflow backed by Postgres. 
+`dbosify` runs each workflow as a durable DBOS workflow backed by Postgres.
 A deterministic interpreter runs workflows (their main coroutines and their signal, update, and query handlers) on a virtual event loop that only advances when an event arrives.
 Using DBOS steps and [workflow communication primitives](https://docs.dbos.dev/python/tutorials/workflow-communication), all nondeterministic actions are written to a Postgres checkpoint before being observed by the workflow.
 
@@ -77,10 +83,10 @@ We use the following testing strategies:
 
 - Direct ports of all relevant Temporal Python unit and integration tests
 - Direct ports of relevant Temporal Python sample applications, verifying DBOSify is a drop-in replacement
-- Unit and integration tests, with an emphasis on kill-and-recover tests verifying deterministic failure recovery
+- New unit and integration tests, with an emphasis on kill-and-recover tests verifying deterministic failure recovery
 - Signature parity tests mechanically asserting the public APIs of these libraries are identical (with documented exceptions)
 
-## What this is not
+## What This is Not
 
 - **Not a Temporal server replacement.** There is no gRPC wire compatibility. Temporal SDKs in other languages cannot connect. This replaces the Temporal server and Python SDK altogether for Python-only applications.
 - **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's workflow-management APIs and DBOS Conductor instead.
