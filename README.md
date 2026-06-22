@@ -63,4 +63,4 @@ if __name__ == "__main__":
 - **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's
   workflow-management APIs and DBOS Conductor instead.
 
-  See [this documentation](./docs/DEVIATIONS.md) for information on unsupported features.
+  See [this documentation](./docs/ARCHITECTURE.md) for information on architectural differences and feature compatibility.
