@@ -1,7 +1,7 @@
 # Architectural Differences from Temporal
 
 <p align="center">
-  <img src="architecture.png" alt="DBOSify architecture: a DBOSify Client and DBOSify Workers coordinate through Postgres, which handles workflow orchestration" width="720">
+  <img src="img/architecture.png" alt="DBOSify architecture: a DBOSify Client and DBOSify Workers coordinate through Postgres, which handles workflow orchestration" width="720">
 </p>
 
 ## Architecture

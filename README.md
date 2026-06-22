@@ -7,7 +7,7 @@ The library uses Postgres to orchestrate your durable workflows and messaging, p
 All you need is Postgres.
 
 <p align="center">
-  <img src="docs/architecture.png" alt="DBOSify architecture: a DBOSify Client and DBOSify Workers coordinate through Postgres, which handles workflow orchestration" width="720">
+  <img src="docs/img/architecture.png" alt="DBOSify architecture: a DBOSify Client and DBOSify Workers coordinate through Postgres, which handles workflow orchestration" width="720">
 </p>
 
 ## Usage
