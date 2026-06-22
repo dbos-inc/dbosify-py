@@ -2,8 +2,6 @@
 
 <p align="center">
   <img src="architecture.png" alt="DBOSify architecture: a DBOSify Client and DBOSify Workers coordinate through Postgres, which handles workflow orchestration" width="720">
-  <br>
-  <sub><em>DBOSify clients and workers coordinate through Postgres — no Temporal server required.</em></sub>
 </p>
 
 ## Architecture
