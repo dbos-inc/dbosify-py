@@ -86,7 +86,7 @@ Determinism violations surface as nondeterminism errors at replay rather than be
 
 Payloads and history length are uncapped Postgres rows — Temporal's 2MB/4MB payload and ~50k-event limits are not enforced.
 
-### memo-search-attributes — Query language subset supported
+### memo-search-attributes — Subset of visibility query language
 
 `list_workflows`/`count_workflows` parse a subset of the Temporal visibliity query language. These field/operator pairings are supported: `WorkflowType` (`=`, `!=`, `IN`), `WorkflowId` (`=`, `STARTS_WITH`), `ExecutionStatus` (`=`, `IN`), `StartTime`/`CloseTime` (`=`, `>`, `>=`, `<`, `<=`), and custom search attributes (`=` only, an exact-match containment), plus an optional trailing `GROUP BY ExecutionStatus|WorkflowType` on `count_workflows`.
 Operators may be conjoined with `AND` only.
