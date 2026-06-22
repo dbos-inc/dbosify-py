@@ -64,7 +64,6 @@ from typing import (
 from dbos import DBOS
 from dbos import error as dbos_error
 from dbos._context import get_local_dbos_context
-from dbos._utils import GlobalParams  # the worker's live DBOS application_version
 
 from .. import activity as activity_api
 from .. import exceptions
@@ -3200,7 +3199,9 @@ class Interpreter(_Runtime):
         name = registry.worker_deployment_name
         if name is None:
             return None
-        return WorkerDeploymentVersion(name, GlobalParams.app_version)
+        # DBOS.application_version is the public accessor for the worker's live
+        # application version (GlobalParams.app_version under the hood).
+        return WorkerDeploymentVersion(name, DBOS.application_version)
 
     def runtime_get_current_details(self) -> str:
         return self._current_details
