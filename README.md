@@ -29,7 +29,7 @@ from dbosify import activity, workflow
 from dbosify.client import Client
 from dbosify.worker import Worker
 
-DB_URL = "postgresql+psycopg://postgres:dbos@localhost:5432/dbosify"
+DB_URL = "postgresql://postgres:dbos@localhost:5432/dbosify"
 
 
 @activity.defn
@@ -67,7 +67,7 @@ if __name__ == "__main__":
 
 ## How It Works
 
-`dbosify` runs each workflow as a durable DBOS workflow backed by Postgres.
+DBOSify runs each workflow as a durable DBOS workflow backed by Postgres.
 A deterministic interpreter runs workflows (their main coroutines and their signal, update, and query handlers) on a virtual event loop that only advances when an event arrives.
 Using DBOS steps and [workflow communication primitives](https://docs.dbos.dev/python/tutorials/workflow-communication), all nondeterministic actions are written to a Postgres checkpoint before being observed by the workflow.
 
