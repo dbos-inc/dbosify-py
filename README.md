@@ -2,7 +2,7 @@
 
 A drop-in replacement for the [Temporal Python SDK](https://github.com/temporalio/sdk-python) backed by a Postgres database (through [DBOS Transact](https://github.com/dbos-inc/dbos-transact-py)) instead of a Temporal server.
 
-To use this library, simply import `dbosify` instead of `temporalio` and connect your workers and clients to a Postgres database instead of a Temporal server.
+To use this library, import `dbosify` instead of `temporalio` and connect your workers and clients to a Postgres database instead of a Temporal server.
 The library uses Postgres to orchestrate your durable workflows and messaging, providing the same reliablity guarantees with no infrastructure requirements.
 All you need is Postgres.
 
