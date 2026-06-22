@@ -62,7 +62,7 @@ if __name__ == "__main__":
 ## How It Works
 
 `dbosify` runs each Temporal workflow as a durable DBOS workflow backed by Postgres. 
-A deterministic interpreter (a port of the Temporal SDK's workflow machine) runs workflows (their main coroutines and their signal, update, and query handlers) on a virtual event loop that only advances when an event arrives.
+A deterministic interpreter runs workflows (their main coroutines and their signal, update, and query handlers) on a virtual event loop that only advances when an event arrives.
 Using DBOS steps and [workflow communication primitives](https://docs.dbos.dev/python/tutorials/workflow-communication), all nondeterministic actions are written to a Postgres checkpoint before being observed by the workflow.
 
 - **Activities and timers** become DBOS steps and durable sleeps, each checkpointed on completion.
