@@ -6,6 +6,10 @@ To use this library, import `dbosify` instead of `temporalio` and connect your w
 The library uses Postgres to orchestrate your durable workflows and messaging, providing the same reliablity guarantees with no infrastructure requirements.
 All you need is Postgres.
 
+<p align="center">
+  <img src="docs/architecture.png" alt="DBOSify architecture: a DBOSify Client and DBOSify Workers coordinate through Postgres, which handles workflow orchestration" width="700">
+</p>
+
 ## Usage
 
 This is a drop-in replacement: simply import `dbosify` instead of `temporalio` and connect your clients and workers to a Postgres database instead of a Temporal server.
@@ -63,4 +67,4 @@ if __name__ == "__main__":
 - **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's
   workflow-management APIs and DBOS Conductor instead.
 
-  See [this documentation](./docs/ARCHITECTURE.md) for information on architectural differences and feature compatibility.
+See [this documentation](./docs/ARCHITECTURE.md) for information on architectural differences and feature compatibility.
