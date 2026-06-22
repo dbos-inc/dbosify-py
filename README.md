@@ -2,7 +2,12 @@
 
 DBOSify is a drop-in replacement for [Temporal Python](https://github.com/temporalio/sdk-python) backed by a Postgres database (through [DBOS Transact](https://github.com/dbos-inc/dbos-transact-py)) instead of a Temporal server.
 
-To use this library, import `dbosify` instead of `temporalio` and connect your workers and clients to a Postgres database instead of a Temporal server.
+To use this library, import `dbosify` instead of `temporalio` and connect your workers and clients to a Postgres database instead of a Temporal server:
+
+<p align="center">
+  <img src="docs/img/dbosify.gif" alt="DBOSify is a drop-in replacement for Temporal Python" width="720">
+</p>
+
 The library uses Postgres to orchestrate your durable workflows and messaging, providing the same reliability guarantees with no infrastructure requirements.
 All you need is Postgres.
 
