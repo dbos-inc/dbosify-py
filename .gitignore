@@ -7,8 +7,6 @@ __pycache__/
 # AI
 CLAUDE.md
 .claude/
-docs/*
-!docs/DEVIATIONS.md
 
 # C extensions
 *.so
