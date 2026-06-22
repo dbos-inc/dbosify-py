@@ -1,6 +1,6 @@
 # DBOSify
 
-A drop-in replacement for the [Temporal Python SDK](https://github.com/temporalio/sdk-python) backed by a Postgres database (through [DBOS Transact](https://github.com/dbos-inc/dbos-transact-py)) instead of a Temporal server.
+DBOSify is a drop-in replacement for [Temporal Python](https://github.com/temporalio/sdk-python) backed by a Postgres database (through [DBOS Transact](https://github.com/dbos-inc/dbos-transact-py)) instead of a Temporal server.
 
 To use this library, import `dbosify` instead of `temporalio` and connect your workers and clients to a Postgres database instead of a Temporal server.
 The library uses Postgres to orchestrate your durable workflows and messaging, providing the same reliability guarantees with no infrastructure requirements.
@@ -29,7 +29,8 @@ from dbosify import activity, workflow
 from dbosify.client import Client
 from dbosify.worker import Worker
 
-DB_URL = "postgresql://postgres:dbos@localhost:5432/dbosify"
+# Set this to a connection string to your Postgres database
+DB_URL = "postgresql://postgres@localhost:5432/dbosify"
 
 
 @activity.defn
