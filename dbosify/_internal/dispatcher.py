@@ -31,8 +31,8 @@ from dbos import (
     SetWorkflowID,
     WorkflowHandle,
 )
+from dbos import error as dbos_error
 from dbos._context import get_local_dbos_context
-from dbos._error import DBOSUnexpectedStepError
 
 from .. import exceptions
 
@@ -181,7 +181,7 @@ def _make_dbos_workflow(
             raise SerializedWorkflowCancellation(
                 serialize_failure(cancelled.cause)
             ) from None
-        except (NondeterminismError, DBOSUnexpectedStepError) as nde:
+        except (NondeterminismError, dbos_error.DBOSUnexpectedStepError) as nde:
             # A replay diverged: stamp the nondeterminism marker so the engine can
             # tell it from a faithful failure. Only convert under an active guard.
             dispatch_ctx = get_local_dbos_context()

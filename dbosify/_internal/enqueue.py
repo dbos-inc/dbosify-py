@@ -38,8 +38,9 @@ async def enqueue_run(
 
     ``run_timeout`` (seconds) is re-applied explicitly because an in-workflow
     start with no explicit timeout otherwise inherits the *closing* run's
-    *absolute* deadline (``dbos._core._get_timeout_deadline``), which would let
-    a backed-off retry be born already expired; an explicit timeout on an
+    *absolute* deadline (DBOS derives an in-workflow child's deadline from the
+    enclosing run when none is set), which would let a backed-off retry be born
+    already expired; an explicit timeout on an
     enqueued workflow is converted to a deadline at dequeue (Temporal's per-run
     semantics). ``attributes`` is the encoded memo/search-attribute column for
     ``describe()``/visibility. ``delay_seconds`` (retry backoff / cron spacing)
