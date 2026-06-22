@@ -59,12 +59,13 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
+## How It Works
+
+## How It's Tested
+
 ## What this is not
 
-- **Not a Temporal server replacement.** There is no gRPC wire compatibility; Temporal
-  SDKs in other languages cannot connect. This replaces server + Python SDK together,
-  for Python-only applications.
-- **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's
-  workflow-management APIs and DBOS Conductor instead.
+- **Not a Temporal server replacement.** There is no gRPC wire compatibility. Temporal SDKs in other languages cannot connect. This replaces the Temporal server and Python SDK altogether for Python-only applications.
+- **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's workflow-management APIs and DBOS Conductor instead.
 
 See [this documentation](./docs/ARCHITECTURE.md) for information on architectural differences and feature compatibility.
