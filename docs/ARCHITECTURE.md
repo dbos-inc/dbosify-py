@@ -86,9 +86,11 @@ Determinism violations surface as nondeterminism errors at replay rather than be
 
 Payloads and history length are uncapped Postgres rows — Temporal's 2MB/4MB payload and ~50k-event limits are not enforced.
 
-### memo-search-attributes — Memo + search attributes: stored and exposed, untyped, not fully queryable
+### memo-search-attributes — Query language subset supported
 
-Memo/search attributes live on DBOS's JSONB `attributes`, but search attributes are untyped, `get_current_history_size()` returns 0, and `list_workflows`/`count_workflows` support only a documented `AND`-only subset of the visibility query language.
+`list_workflows`/`count_workflows` parse a subset of the Temporal visibliity query language. These field/operator pairings are supported: `WorkflowType` (`=`, `!=`, `IN`), `WorkflowId` (`=`, `STARTS_WITH`), `ExecutionStatus` (`=`, `IN`), `StartTime`/`CloseTime` (`=`, `>`, `>=`, `<`, `<=`), and custom search attributes (`=` only, an exact-match containment), plus an optional trailing `GROUP BY ExecutionStatus|WorkflowType` on `count_workflows`.
+Operators may be conjoined with `AND` only.
+Additionally, memos and search attributes are untyped.
 
 ### json-conversion — Data conversion: JSON transport, no protobuf payloads
 
