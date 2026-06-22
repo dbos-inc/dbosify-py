@@ -102,11 +102,11 @@ A `Schedule` compiles to one DBOS cron (non-dividing intervals approximated; cal
 
 ### dynamic-handlers — Dynamic handlers and activities are supported; dynamic workflows are not
 
-Dynamic signal/query/update handlers and dynamic activities work, but dynamic *workflows* (`@workflow.defn(dynamic=True)`) raise `NotImplementedError`.
+Dynamic signal/query/update handlers and dynamic activities are supported, but dynamic *workflows* (`@workflow.defn(dynamic=True)`) are not supported.
 
 ### worker-versioning — Worker deployment versioning = DBOS versioning: PINNED is enforced, AUTO_UPGRADE is not
 
-A build ID *is* the DBOS `application_version`, so PINNED is enforced (a workflow recovers/dequeues only on its build ID) while AUTO_UPGRADE, ramping, and cluster routing have no analog and degrade to pinned.
+A build ID is the DBOS `application_version`, so PINNED is enforced (a workflow recovers/dequeues only on its build ID) while AUTO_UPGRADE, ramping, and cluster routing are not supported.
 
 ### current-details — Current details are in-memory, reconstructed on replay, not in describe()
 
@@ -114,19 +114,19 @@ A build ID *is* the DBOS `application_version`, so PINNED is enforced (a workflo
 
 ### random-seed — Random seed is fixed per run; reseed callbacks never fire
 
-The per-run random seed never changes, so any `register_random_seed_callback` is stored but never invoked.
+The per-run random seed never changes, so any `register_random_seed_callback` is not supported.
 
 ### activity-cancel-details — Activity cancellation details are not tracked
 
-`activity.cancellation_details()` always returns `None` — the structured cancellation reason temporalio surfaces is not recorded.
+Structured cancellation reasons are not supported. `activity.cancellation_details()` always returns `None`.
 
 ### no-metrics — Metrics and the telemetry `runtime` module are not yet provided
 
-Metrics are not implemented: `metric_meter()` raises `AttributeError` and the entire `temporalio.runtime` telemetry module is absent.
+Metrics are not supported; the `temporalio.runtime` telemetry module is absent.
 
-### start-params — Some start parameters are accepted but not yet enforced
+### start-params — Some start parameters are not yet supported
 
-`start_child_workflow.cron_schedule`, `start_child_workflow.id_reuse_policy`, and `start_workflow.execution_timeout` are accepted (and debug-logged) but not yet enforced.
+The following start parameters are not yet supported: `start_child_workflow.cron_schedule`, `start_child_workflow.id_reuse_policy`, and `start_workflow.execution_timeout`
 
 ### no-client-activities — Client-initiated (standalone) activities are not supported
 
