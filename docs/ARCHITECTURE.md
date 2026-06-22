@@ -1,4 +1,4 @@
-# Fundamental deviations from Temporal
+# Architectural Differences from Temporal
 
 ## Architecture
 
