@@ -30,7 +30,7 @@ from dbosify.client import Client
 from dbosify.worker import Worker
 
 # Set this to a connection string to your Postgres database
-DB_URL = "postgresql://postgres@localhost:5432/dbosify"
+DB_URL = os.environ.get("DBOS_SYSTEM_DATABASE_URL")
 
 
 @activity.defn
