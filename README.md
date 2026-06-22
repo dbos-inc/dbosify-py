@@ -86,7 +86,7 @@ We use the following testing strategies:
 - New unit and integration tests, with an emphasis on kill-and-recover tests verifying deterministic failure recovery
 - Signature parity tests mechanically asserting the public APIs of these libraries are identical (with documented exceptions)
 
-## What This is Not
+## What This Is Not
 
 - **Not a Temporal server replacement.** There is no gRPC wire compatibility. Temporal SDKs in other languages cannot connect. This replaces the Temporal server and Python SDK altogether for Python-only applications.
 - **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's workflow-management APIs and DBOS Conductor instead.
