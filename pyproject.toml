@@ -17,12 +17,10 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "dbos==2.25.0a7",
+    "dbos>=2.25.0",
     # datetime.fromisoformat can't parse some ISO-8601 forms before 3.11;
-    # value_to_type falls back to dateutil there (mirrors temporalio).
+    # value_to_type falls back to dateutil there
     "python-dateutil>=2.8.2,<3 ; python_version < '3.11'",
-    # typing.NamedTuple can't be Generic before 3.11; typing_extensions
-    # backports it (used by SearchAttributePair, as in temporalio).
     "typing_extensions>=4.7.0",
 ]
 

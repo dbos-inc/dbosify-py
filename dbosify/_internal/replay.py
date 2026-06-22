@@ -168,7 +168,7 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     replayed faithfully. Requires a launched DBOS runtime (see :class:`Replayer`).
     """
     from dbos import DBOS
-    from dbos._error import DBOSUnexpectedStepError
+    from dbos import error as dbos_error
 
     from ..workflow import NondeterminismError
     from .payloads import (
@@ -212,7 +212,9 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
             # else: a genuine recorded failure replayed faithfully -> PASS.
         except SerializedContinueAsNew:
             pass  # faithful continue-as-new -> PASS
-        except DBOSUnexpectedStepError as err:  # defensive: surfaced directly
+        except (
+            dbos_error.DBOSUnexpectedStepError
+        ) as err:  # defensive: surfaced directly
             replay_failure = NondeterminismError(str(err))
         except NondeterminismError as err:  # defensive: surfaced directly
             replay_failure = err

@@ -62,9 +62,8 @@ from typing import (
 )
 
 from dbos import DBOS
+from dbos import error as dbos_error
 from dbos._context import get_local_dbos_context
-from dbos._error import DBOSUnexpectedStepError
-from dbos._utils import GlobalParams  # the worker's live DBOS application_version
 
 from .. import activity as activity_api
 from .. import exceptions
@@ -233,7 +232,6 @@ def _await_child_result(child_id: str) -> Any:
         @DBOS.step(name="__dbosify_child_result")
         async def child_result_step(child_id: str) -> Dict[str, Any]:
             from dbos._dbos import _get_dbos_instance
-            from dbos._error import DBOSAwaitedWorkflowCancelledError
 
             from .payloads import (
                 SerializedContinueAsNew,
@@ -274,7 +272,7 @@ def _await_child_result(child_id: str) -> Any:
                     "failure": failed.envelope,
                     "ended_at": time_mod.time(),
                 }
-            except DBOSAwaitedWorkflowCancelledError:
+            except dbos_error.DBOSAwaitedWorkflowCancelledError:
                 # Native DBOS cancel == the child was terminated.
                 terminated = exceptions.TerminatedError("Child workflow terminated")
                 return {
@@ -332,7 +330,6 @@ def _await_activity_result(activity_id: str) -> Any:
         @DBOS.step(name="__dbosify_activity_result")
         async def activity_result_step(activity_id: str) -> Dict[str, Any]:
             from dbos._dbos import _get_dbos_instance
-            from dbos._error import DBOSAwaitedWorkflowCancelledError
 
             from .payloads import serialize_failure
 
@@ -343,7 +340,7 @@ def _await_activity_result(activity_id: str) -> Any:
                         activity_id, CHILD_POLL_INTERVAL_SECONDS
                     )
                 )
-            except DBOSAwaitedWorkflowCancelledError:
+            except dbos_error.DBOSAwaitedWorkflowCancelledError:
                 # The activity workflow was terminated (native DBOS cancel):
                 # surface it as a cancellation of the activity.
                 cancelled = exceptions.CancelledError("Activity cancelled")
@@ -1282,9 +1279,9 @@ class Interpreter(_Runtime):
     def _record_workflow_error(self, err: BaseException) -> None:
         # During a verification replay, a divergence DBOS detected mid-run is
         # terminal: surface it as a workflow failure, not a (retried, masked) task.
-        if isinstance(err, (DBOSUnexpectedStepError, NondeterminismError)) and (
-            _replay.current_guard_for(self._workflow_id) is not None
-        ):
+        if isinstance(
+            err, (dbos_error.DBOSUnexpectedStepError, NondeterminismError)
+        ) and (_replay.current_guard_for(self._workflow_id) is not None):
             self._set_outcome(("failure", err))
             return
         if self._cancel_requested and exceptions.is_cancelled_exception(err):
@@ -3202,7 +3199,9 @@ class Interpreter(_Runtime):
         name = registry.worker_deployment_name
         if name is None:
             return None
-        return WorkerDeploymentVersion(name, GlobalParams.app_version)
+        # DBOS.application_version is the public accessor for the worker's live
+        # application version (GlobalParams.app_version under the hood).
+        return WorkerDeploymentVersion(name, DBOS.application_version)
 
     def runtime_get_current_details(self) -> str:
         return self._current_details

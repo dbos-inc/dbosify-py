@@ -35,10 +35,9 @@ import concurrent.futures
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any, Awaitable, Callable, Optional, Sequence, Type
+from typing import Any, Awaitable, Callable, Optional, Sequence, Type, TypedDict
 
 from dbos import DBOS, DBOSConfig
-from dbos._queue import QueueRateLimit
 
 from . import activity as _activity
 from ._internal import conversion
@@ -122,7 +121,17 @@ _REJECTED_OPTIONS = {
 _live_worker: Optional["Worker"] = None
 
 
-def _rate_limiter(rate_per_second: Optional[float]) -> Optional[QueueRateLimit]:
+class _QueueRateLimit(TypedDict):
+    """DBOS queue ``limiter`` shape (mirrors ``dbos._queue.QueueRateLimit``):
+    no more than ``limit`` workflow starts per ``period`` seconds. Defined
+    locally rather than imported from DBOS's private module — it is structurally
+    compatible with what ``DBOS.register_queue_async(limiter=...)`` accepts."""
+
+    limit: int
+    period: float
+
+
+def _rate_limiter(rate_per_second: Optional[float]) -> Optional[_QueueRateLimit]:
     """Map an activities-per-second rate to a DBOS queue ``limiter`` (no more
     than ``limit`` starts per ``period`` seconds). None when unset."""
     if rate_per_second is None:

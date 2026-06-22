@@ -33,7 +33,7 @@ from typing import (
 )
 
 from dbos import DBOSClient, EnqueueOptions, WorkflowStatus
-from dbos._error import DBOSAwaitedWorkflowCancelledError
+from dbos import error as dbos_error
 
 from . import _schedule, exceptions
 from ._internal import attributes as _attributes
@@ -2010,7 +2010,7 @@ class WorkflowHandle:
                 # constructor, so the `from` target must be the cause itself.
                 cause = deserialize_failure(failure.envelope)
                 raise WorkflowFailureError(cause=cause) from cause
-            except DBOSAwaitedWorkflowCancelledError:
+            except dbos_error.DBOSAwaitedWorkflowCancelledError:
                 # Native DBOS cancel == terminate in our scheme (§6.5).
                 terminated = exceptions.TerminatedError("Workflow terminated")
                 raise WorkflowFailureError(cause=terminated) from terminated
