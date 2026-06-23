@@ -13,7 +13,9 @@ from dbosify.common import RetryPolicy
 from dbosify.exceptions import RetryState
 
 
-def _decide(policy: RetryPolicy, failure: dict[str, object]):
+def _decide(
+    policy: RetryPolicy, failure: dict[str, object]
+) -> tuple[float | None, RetryState]:
     return retry_decision(
         policy, attempt=1, failure=failure, elapsed=None, schedule_to_close=None
     )
