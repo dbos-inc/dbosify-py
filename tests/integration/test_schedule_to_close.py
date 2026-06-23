@@ -39,10 +39,7 @@ async def always_fails() -> None:
     raise ApplicationError("boom", type="Boom")
 
 
-# Each invocation of the parked async activity below records its attempt number.
-# A schedule-to-close timeout on a *parked* (raise_complete_async) attempt must be
-# terminal: the body runs exactly once and is never re-invoked past the budget,
-# even with retries still available.
+# Records each invocation of the parked async activity below (must run exactly once under a budget timeout).
 _PARK_INVOCATIONS: List[int] = []
 
 
@@ -120,8 +117,7 @@ class ParkedAsyncScheduleToClose:
             await workflow.execute_activity(
                 park_and_count,
                 schedule_to_close_timeout=timedelta(seconds=2),
-                # Retries are available: only the budget — not the count — may
-                # stop the parked attempt, and it must stop terminally.
+                # Retries available: only the budget, not the count, may stop it.
                 retry_policy=RetryPolicy(
                     initial_interval=timedelta(seconds=0.4),
                     backoff_coefficient=1.0,
@@ -169,10 +165,7 @@ async def test_schedule_to_close_times_out_hanging_attempt() -> None:
 
 @pytest.mark.timeout(60)
 async def test_parked_async_schedule_to_close_is_terminal_not_retried() -> None:
-    # A parked (raise_complete_async) attempt bounded only by schedule_to_close
-    # must time out terminally with SCHEDULE_TO_CLOSE and never be re-invoked,
-    # even with retries left. Regression: the park time escaped the budget gate,
-    # so the timeout was retried and the activity re-ran past its budget.
+    # A parked attempt under schedule_to_close must time out terminally and never re-run (regression: the park escaped the budget gate).
     _PARK_INVOCATIONS.clear()
     async with _env() as client:
         started = _time.monotonic()

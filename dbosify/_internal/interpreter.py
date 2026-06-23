@@ -621,10 +621,7 @@ class _ActivityExec:
     cancellation_type: int = 0  # ActivityCancellationType; 2 = ABANDON
     attempt: int = 1
     in_backoff: bool = False
-    # Seconds of the in-flight durable wait (retry backoff or async-pending park)
-    # not yet charged to virtual time. Charged when the wait completes so the next
-    # attempt's schedule-to-close deadline and the give-up gate both include it.
-    # Deterministic (the wait length is recomputed on replay), so replay-stable.
+    # In-flight backoff/park seconds, charged to virtual time on completion so the budget counts them (replay-stable).
     pending_wait_seconds: float = 0.0
     last_failure: Optional[FailureEnvelope] = None
     cancel_requested: bool = False  # WAIT_CANCELLATION_COMPLETED in flight
@@ -2048,8 +2045,7 @@ class Interpreter(_Runtime):
             elif waiter.kind == "act_s2c":
                 parked_state = self._pending_activities.get(waiter.seq)
                 if parked_state is not None:
-                    # The park fully elapsed: charge it to virtual time so a
-                    # retried start-to-close park's budget gate includes the wait.
+                    # Charge the elapsed park to virtual time (counts toward a retry's budget).
                     self._advance_time(
                         self._vloop.time() + parked_state.pending_wait_seconds
                     )
@@ -2081,10 +2077,7 @@ class Interpreter(_Runtime):
             self._pending_activities.pop(waiter.seq, None)
             return
         if exec_state.in_backoff:
-            # Backoff sleep finished -> next attempt. Charge the backoff to virtual
-            # time so the next attempt's schedule-to-close budget reflects it (the
-            # delivery of an attempt's ``ended_at`` advances time, but a backoff
-            # sleep has no envelope of its own).
+            # Backoff done -> next attempt; charge it to virtual time (no ended_at of its own).
             self._advance_time(self._vloop.time() + exec_state.pending_wait_seconds)
             exec_state.pending_wait_seconds = 0.0
             exec_state.attempt += 1
@@ -2121,9 +2114,7 @@ class Interpreter(_Runtime):
                     else exceptions.TimeoutType.START_TO_CLOSE
                 )
                 park_seconds = max(0.05, parked)
-                # Charge the park to virtual time when it fires so a retried
-                # start-to-close park's give-up gate includes it (a
-                # schedule-to-close park is terminal, but the bookkeeping is uniform).
+                # Charge the park to virtual time when it fires (counts toward a retry's budget).
                 exec_state.pending_wait_seconds = park_seconds
                 self._launch_waiter(
                     "act_s2c",
