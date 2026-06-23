@@ -262,6 +262,18 @@ class AsyncTimeoutWorkflow:
 
 
 @workflow.defn
+class AsyncScheduleToCloseTimeoutWorkflow:
+    @workflow.run
+    async def run(self, stc: float) -> str:
+        result: str = await workflow.execute_activity(
+            complete_externally,
+            schedule_to_close_timeout=timedelta(seconds=stc),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+        return result
+
+
+@workflow.defn
 class SwallowedCancelTimeoutWorkflow:
     @workflow.run
     async def run(self, local: bool) -> str:
@@ -347,6 +359,7 @@ async def _env() -> AsyncIterator[Client]:
             HeartbeatTimeoutWorkflow,
             AsyncRetryWorkflow,
             AsyncTimeoutWorkflow,
+            AsyncScheduleToCloseTimeoutWorkflow,
             AsyncCustomIdWorkflow,
             DuplicateIdWorkflow,
             AsyncCanWorkflow,
@@ -622,6 +635,22 @@ async def test_parked_async_activity_start_to_close() -> None:
         with pytest.raises(WorkflowFailureError) as exc_info:
             await handle.result()
         assert _timeout_cause(exc_info).type == TimeoutType.START_TO_CLOSE
+
+
+async def test_parked_async_activity_schedule_to_close() -> None:
+    """A parked async activity bounded only by schedule-to-close times out with
+    SCHEDULE_TO_CLOSE, not START_TO_CLOSE: the inline park reports the binding
+    bound's type, matching the queued path (regression for the dropped label)."""
+    async with _env() as client:
+        handle = await client.start_workflow(
+            AsyncScheduleToCloseTimeoutWorkflow.run,
+            0.8,
+            id="parked-stc",
+            task_queue=TASK_QUEUE,
+        )
+        with pytest.raises(WorkflowFailureError) as exc_info:
+            await handle.result()
+        assert _timeout_cause(exc_info).type == TimeoutType.SCHEDULE_TO_CLOSE
 
 
 async def test_parked_async_activity_heartbeat_timeout() -> None:

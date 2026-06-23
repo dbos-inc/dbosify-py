@@ -624,6 +624,12 @@ class _ActivityExec:
     last_failure: Optional[FailureEnvelope] = None
     cancel_requested: bool = False  # WAIT_CANCELLATION_COMPLETED in flight
     async_pending: bool = False  # raise_complete_async(): awaiting external
+    # The binding bound for the async-pending park timer (act_s2c): START_TO_CLOSE
+    # or SCHEDULE_TO_CLOSE. Set when the park is armed so the timeout reports the
+    # right type; recomputed deterministically on replay (same code path).
+    async_park_timeout_type: "exceptions.TimeoutType" = (
+        exceptions.TimeoutType.START_TO_CLOSE
+    )
     heartbeat_timeout: Optional[float] = None
     # Whether a completer heartbeat arrived within the current watch window
     # (the timeout check counts envelopes between timer fires — no clock reads).
@@ -2035,8 +2041,14 @@ class Interpreter(_Runtime):
             elif waiter.kind == "q_activity":
                 self._deliver_queued_activity_event(waiter)
             elif waiter.kind == "act_s2c":
+                parked_state = self._pending_activities.get(waiter.seq)
                 self._async_parked_timeout(
-                    waiter.seq, exceptions.TimeoutType.START_TO_CLOSE
+                    waiter.seq,
+                    (
+                        parked_state.async_park_timeout_type
+                        if parked_state is not None
+                        else exceptions.TimeoutType.START_TO_CLOSE
+                    ),
                 )
             elif waiter.kind == "act_hb":
                 self._async_heartbeat_check(waiter.seq)
@@ -2082,8 +2094,15 @@ class Interpreter(_Runtime):
                 if exec_state.schedule_to_close is not None
                 else None
             )
-            parked, _ = activities_mod.effective_deadline(s2c_remaining, stc_remaining)
+            parked, parked_type = activities_mod.effective_deadline(
+                s2c_remaining, stc_remaining
+            )
             if parked is not None:
+                exec_state.async_park_timeout_type = (
+                    exceptions.TimeoutType.SCHEDULE_TO_CLOSE
+                    if parked_type == "schedule_to_close"
+                    else exceptions.TimeoutType.START_TO_CLOSE
+                )
                 self._launch_waiter(
                     "act_s2c",
                     exec_state.seq,
@@ -2440,12 +2459,14 @@ class Interpreter(_Runtime):
         if exec_state is None or not exec_state.async_pending:
             return  # resolved (or retired) before the timer fired
         self._retire_parked_timers(seq)
+        if timeout_type == exceptions.TimeoutType.SCHEDULE_TO_CLOSE:
+            message = "activity Schedule-To-Close timeout"
+        elif timeout_type == exceptions.TimeoutType.START_TO_CLOSE:
+            message = "activity Start-To-Close timeout"
+        else:
+            message = "activity Heartbeat timeout"
         timeout_failure = exceptions.TimeoutError(
-            (
-                "activity Start-To-Close timeout"
-                if timeout_type == exceptions.TimeoutType.START_TO_CLOSE
-                else "activity Heartbeat timeout"
-            ),
+            message,
             type=timeout_type,
             last_heartbeat_details=[],
         )

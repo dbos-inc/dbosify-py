@@ -9,9 +9,16 @@ process, where recovery replays run(): the activity's SCHEDULE_TO_CLOSE envelope
 replayed from its checkpoint (the activity is NOT re-run and re-timed), and the
 released run returns the same outcome — proving the timeout decision was
 checkpointed, not re-derived by luck.
+
+Each activity invocation appends a line to the file named by ``STC_RECOVERY_MARKER``
+so the test can assert the activity ran *exactly once*. If recovery re-ran the
+activity (re-deriving the timeout instead of replaying the checkpoint), the outcome
+would look the same but a second marker line would appear — which is the regression
+this test now actually detects.
 """
 
 import asyncio
+import os
 import sys
 from datetime import timedelta
 
@@ -26,6 +33,13 @@ TASK_QUEUE = "stc-recovery-tq"
 
 @activity.defn
 async def hang_forever() -> None:
+    # Record each invocation durably (before hanging) so the test can prove the
+    # activity ran exactly once: on resume the timeout must replay from the
+    # checkpoint, never re-invoke this body.
+    marker = os.environ.get("STC_RECOVERY_MARKER")
+    if marker:
+        with open(marker, "a") as f:
+            f.write("invoked\n")
     await asyncio.Event().wait()
 
 
