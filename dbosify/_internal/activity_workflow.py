@@ -143,10 +143,18 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         meta["deadline_type"] = deadline_type
         envelope: Dict[str, Any] = await step_fn(args, deadline, meta)
         if envelope.get("async_pending"):
-            # raise_complete_async(): park for external completion, bounded by the same deadline; a fail re-runs per policy.
-            wait_timeout = (
-                deadline if deadline is not None else inbox.RECV_TIMEOUT_SECONDS
-            )
+            # raise_complete_async(): park for external completion. The attempt
+            # deadline already covers the body run, so charge the body time the
+            # attempt just consumed against it (mirrors the interpreter inline
+            # path) — otherwise the park re-waits the full deadline. A fail/timeout
+            # re-runs or gives up per policy.
+            if deadline is not None:
+                body_elapsed = float(envelope.get("ended_at", 0.0)) - float(
+                    envelope.get("started_at", envelope.get("ended_at", 0.0))
+                )
+                wait_timeout = max(0.0, deadline - max(0.0, body_elapsed))
+            else:
+                wait_timeout = inbox.RECV_TIMEOUT_SECONDS
             envelope = await _await_async_completion(
                 envelope, wait_timeout, str(meta.get("activity_id", "")), deadline_type
             )

@@ -100,6 +100,16 @@ def retry_decision(
         and failure_type in set(policy.non_retryable_error_types)
     ):
         return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
+    # A schedule-to-close timeout means the whole-lifecycle budget is spent:
+    # terminal, never retried (Temporal parity). Other timeout types
+    # (start_to_close, heartbeat) stay retryable, still gated by the budget below.
+    # Robust across paths: an in-band attempt timeout and a parked-async timeout
+    # both surface here, so neither can be retried past the budget regardless of
+    # how ``elapsed`` was reconstructed.
+    if failure.get("cls") == "TimeoutError" and failure.get("timeout_type") == int(
+        exceptions.TimeoutType.SCHEDULE_TO_CLOSE
+    ):
+        return None, exceptions.RetryState.TIMEOUT
     if policy.maximum_attempts and attempt >= policy.maximum_attempts:
         return None, exceptions.RetryState.MAXIMUM_ATTEMPTS_REACHED
     override = failure.get("next_retry_delay")

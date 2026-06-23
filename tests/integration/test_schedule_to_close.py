@@ -13,7 +13,7 @@ import asyncio
 import time as _time
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import AsyncIterator
+from typing import AsyncIterator, List
 
 import pytest
 
@@ -37,6 +37,19 @@ async def hang_forever() -> None:
 @activity.defn
 async def always_fails() -> None:
     raise ApplicationError("boom", type="Boom")
+
+
+# Each invocation of the parked async activity below records its attempt number.
+# A schedule-to-close timeout on a *parked* (raise_complete_async) attempt must be
+# terminal: the body runs exactly once and is never re-invoked past the budget,
+# even with retries still available.
+_PARK_INVOCATIONS: List[int] = []
+
+
+@activity.defn
+async def park_and_count() -> None:
+    _PARK_INVOCATIONS.append(activity.info().attempt)
+    activity.raise_complete_async()
 
 
 def _describe(err: ActivityError) -> str:
@@ -99,6 +112,27 @@ class RetryExhaustsBudget:
             return _describe(err)
 
 
+@workflow.defn
+class ParkedAsyncScheduleToClose:
+    @workflow.run
+    async def run(self) -> str:
+        try:
+            await workflow.execute_activity(
+                park_and_count,
+                schedule_to_close_timeout=timedelta(seconds=2),
+                # Retries are available: only the budget — not the count — may
+                # stop the parked attempt, and it must stop terminally.
+                retry_policy=RetryPolicy(
+                    initial_interval=timedelta(seconds=0.4),
+                    backoff_coefficient=1.0,
+                    maximum_attempts=100,
+                ),
+            )
+            return "no-timeout"
+        except ActivityError as err:
+            return _describe(err)
+
+
 @asynccontextmanager
 async def _env() -> AsyncIterator[Client]:
     worker = Worker(
@@ -108,8 +142,9 @@ async def _env() -> AsyncIterator[Client]:
             OnlyScheduleToCloseHang,
             ScheduleToCloseBeatsStartToClose,
             RetryExhaustsBudget,
+            ParkedAsyncScheduleToClose,
         ],
-        activities=[hang_forever, always_fails],
+        activities=[hang_forever, always_fails, park_and_count],
     )
     async with worker:
         client = await connect_client()
@@ -130,6 +165,27 @@ async def test_schedule_to_close_times_out_hanging_attempt() -> None:
         elapsed = _time.monotonic() - started
     assert result == "timeout:SCHEDULE_TO_CLOSE:inner=None:state=TIMEOUT"
     assert elapsed < 30  # bounded by the ~2s budget, not an infinite hang
+
+
+@pytest.mark.timeout(60)
+async def test_parked_async_schedule_to_close_is_terminal_not_retried() -> None:
+    # A parked (raise_complete_async) attempt bounded only by schedule_to_close
+    # must time out terminally with SCHEDULE_TO_CLOSE and never be re-invoked,
+    # even with retries left. Regression: the park time escaped the budget gate,
+    # so the timeout was retried and the activity re-ran past its budget.
+    _PARK_INVOCATIONS.clear()
+    async with _env() as client:
+        started = _time.monotonic()
+        result = await client.execute_workflow(
+            ParkedAsyncScheduleToClose.run,
+            id="stc-parked-async-terminal",
+            task_queue=TASK_QUEUE,
+        )
+        elapsed = _time.monotonic() - started
+    assert result == "timeout:SCHEDULE_TO_CLOSE:inner=None:state=TIMEOUT"
+    # The discriminating assertion: invoked exactly once (attempt 1), not retried.
+    assert _PARK_INVOCATIONS == [1]
+    assert elapsed < 30  # bounded by the ~2s budget
 
 
 @pytest.mark.timeout(60)
