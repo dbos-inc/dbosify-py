@@ -346,8 +346,14 @@ def _workflow_retry_delay(
         return None
     if failure.get("non_retryable"):
         return None
-    failure_type = failure.get("type") or failure["cls"]
-    if failure_type in set(policy.get("non_retryable_error_types") or ()):
+    # Match only the user-defined ``type`` (set on ApplicationError, including
+    # arbitrary exceptions coerced to one), never the structured envelope class
+    # (TimeoutError/ActivityError/ChildWorkflowError/…): Temporal matches
+    # non_retryable_error_types against the failure type string, not its category.
+    failure_type = failure.get("type")
+    if failure_type is not None and failure_type in set(
+        policy.get("non_retryable_error_types") or ()
+    ):
         return None
     maximum_attempts = policy.get("maximum_attempts") or 0
     if maximum_attempts and attempt >= maximum_attempts:
