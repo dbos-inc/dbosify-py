@@ -95,7 +95,7 @@ This repository incorporates following testing strategies:
 
 ## What This Is Not
 
-- **Not a Temporal server replacement.** There is no gRPC wire compatibility. Temporal SDKs in other languages cannot connect. This replaces the Temporal server and Python SDK altogether for Python-only applications.
+- **No wire protocol compatibility.** There is no gRPC wire compatibility. Temporal SDKs in other languages cannot connect. This replaces the Temporal server and Python SDK altogether for Python-only applications.
 - **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's workflow-management APIs and DBOS Conductor instead.
 
 See [this documentation](./docs/ARCHITECTURE.md) for information on architectural differences and feature compatibility.
