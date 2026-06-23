@@ -52,11 +52,11 @@ ID-conflict / id-reuse start policies are check-then-start from the client (but 
 
 ### durable-messages — Signals, cancels, and updates are durable messages, not RPCs
 
-Because there is no server to validate targets, sends to closed workflows are silent no-ops (not "already completed"), operations on nonexistent workflows raise a DB/`RuntimeError` (not `NOT_FOUND`), exhausted waits raise `TimeoutError` (not `RPCError`), and signals/cancels are not request-deduplicated.
+Because there is no server to validate targets, sends to closed workflows are silent no-ops (not "already completed"), operations on nonexistent workflows raise `RuntimeError` (not `NOT_FOUND`), exhausted waits raise `TimeoutError` (not `RPCError`), and signals and cancels are not deduplicated.
 
 ### terminate-no-reason — Terminate stores no reason or details
 
-`handle.terminate(reason=...)` does not store the reason; awaiters get a generic `TerminatedError`.
+`handle.terminate(reason=...)` does not store the reason. Awaiters get a generic `TerminatedError`.
 
 ### async-activity-cancel — Async activities are more cancellable than Temporal's
 
@@ -74,7 +74,7 @@ A sync activity observes cancellation only cooperatively (at `heartbeat()` / `is
 
 ### no-sandbox — No workflow sandbox
 
-Determinism violations surface as nondeterminism errors at replay rather than being caught at development time.
+Workflow code does not run in a sandbox. Determinism violations surface as nondeterminism errors at replay time.
 
 ### uncapped-payloads — Payloads live in the system database, uncapped
 
