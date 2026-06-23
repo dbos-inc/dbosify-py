@@ -33,10 +33,6 @@ A child's default id is the deterministic `{parent_id}_{seq}` rather than a serv
 
 Legacy cron workflows are implemented as a run chain where `result()` returns the per-run result (Temporal's `follow_runs=True` never returns), between-run cancellation takes effect only at the next fire, `start_delay` is not supported, and an exceeded `run_timeout` ends the chain as TERMINATED instead of retrying it.
 
-### retry-matching — Workflow-retry matching and carryover differ at the edges
-
-Retry matching mirrors Temporal's except `non_retryable_error_types` also matches envelope failure classes (a superset), and inbox messages still unconsumed when a run fails carry over to the retry attempt.
-
 ## Process and operations model
 
 ### failover — Failover requires executor restart or DBOS Conductor
