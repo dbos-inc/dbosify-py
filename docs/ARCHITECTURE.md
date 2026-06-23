@@ -8,11 +8,12 @@
 
 ### no-server — No Temporal server, no wire protocol
 
-There is no gRPC, Web UI, `temporal` CLI, or cross-language client — `dbosify` replaces *server + Python SDK* for Python-only apps, with each namespace mapped to its own Postgres schema (`dbosify_<namespace>`) and one namespace served per worker process.
+There is no gRPC, Web UI, `temporal` CLI, or cross-language client. DBOSify replaces the Temporal server and Python SDK for Python-only apps.
 
 ### connection-surface — Connect to Postgres, not Temporal
 
-`Client` takes a Postgres URL and wraps a DBOS client; `Worker` takes a Postgres URL or `dbos.DBOSConfig` and wraps a DBOS runtime (one worker per process) — instead of connecting to a Temporal server.
+Instead of connecting to a Temporal server, `Client` takes a Postgres URL and wraps a DBOS client; `Worker` takes a Postgres URL or `dbos.DBOSConfig` and wraps a DBOS runtime.
+Only one worker is allowed per process.
 
 ### dbos-native-management — DBOS-native management bypasses the Temporal semantic layer
 
@@ -26,11 +27,11 @@ DBOS-native operations on the same workflows (Conductor, cancel, fork, resume) c
 
 ### child-ids — Child workflow IDs are deterministic, derived from the parent
 
-A child's default id is the deterministic `{parent_id}_{seq}` rather than a server UUID (this is what lets recovery re-attach to an already-started child).
+A child's default id is the deterministic `{parent_id}_{seq}` rather than a server UUID (this lets recovery re-attach to an already-started child).
 
 ### cron-chains — Legacy cron workflows are run chains with per-run results
 
-Legacy cron workflows are implemented as a run chain where `result()` returns the per-run result (Temporal's `follow_runs=True` never returns), between-run cancellation takes effect only at the next fire, 6/7-field cron is accepted, `start_delay` + `cron_schedule` raises, and an exceeded `run_timeout` ends the chain as TERMINATED instead of retrying it.
+Legacy cron workflows are implemented as a run chain where `result()` returns the per-run result (Temporal's `follow_runs=True` never returns), between-run cancellation takes effect only at the next fire, `start_delay` is not supported, and an exceeded `run_timeout` ends the chain as TERMINATED instead of retrying it.
 
 ### retry-matching — Workflow-retry matching and carryover differ at the edges
 
