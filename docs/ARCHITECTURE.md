@@ -41,7 +41,8 @@ Retry matching mirrors Temporal's except `non_retryable_error_types` also matche
 
 ### failover — Failover is restart-or-Conductor, not poller reassignment
 
-A dequeued execution is pinned to its `executor_id`/`app_version` and resumes only when an equivalent executor relaunches (or via management action from DBOS Conductor), and a mid-activity crash re-runs the same attempt number with empty `heartbeat_details`.
+A dequeued execution is pinned to its `executor_id`/`app_version` and resumes only when an equivalent executor relaunches (or via management action from DBOS Conductor). 
+A mid-activity crash re-runs the same activity attempt number with empty `heartbeat_details`.
 
 ### start-policies — Start policies are enforced client-side
 
