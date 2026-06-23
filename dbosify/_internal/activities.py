@@ -90,9 +90,14 @@ def retry_decision(
     """
     if failure.get("non_retryable"):
         return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
-    failure_type = failure.get("type") or failure["cls"]
-    if policy.non_retryable_error_types and failure_type in set(
-        policy.non_retryable_error_types
+    # Match only the user-defined ``type``, never the structured envelope class
+    # (see dispatcher._workflow_retry_delay): Temporal matches
+    # non_retryable_error_types against the failure type string, not its category.
+    failure_type = failure.get("type")
+    if (
+        failure_type is not None
+        and policy.non_retryable_error_types
+        and failure_type in set(policy.non_retryable_error_types)
     ):
         return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
     if policy.maximum_attempts and attempt >= policy.maximum_attempts:
