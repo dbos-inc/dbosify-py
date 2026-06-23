@@ -127,23 +127,32 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
 
     attempt = int(meta.get("attempt", 1))
+    # Elapsed budget consumed before the current attempt starts; reconstructed
+    # deterministically from recorded ``ended_at`` + the durable backoff sleeps,
+    # so it replays identically (measured from started_at, like retry_decision).
+    elapsed_before = 0.0
     while True:
         meta["attempt"] = attempt
-        envelope: Dict[str, Any] = await step_fn(args, start_to_close, meta)
+        # Bound this attempt by min(start_to_close, remaining schedule_to_close).
+        remaining_stc = (
+            schedule_to_close - elapsed_before
+            if schedule_to_close is not None
+            else None
+        )
+        deadline, deadline_type = activities_mod.effective_deadline(
+            start_to_close, remaining_stc
+        )
+        meta["deadline_type"] = deadline_type
+        envelope: Dict[str, Any] = await step_fn(args, deadline, meta)
         if envelope.get("async_pending"):
-            # raise_complete_async(): park for external completion. A fail re-runs the
-            # activity per policy (fall through); complete/cancelled/timeout end here.
-            timeout = (
-                start_to_close
-                if start_to_close is not None
-                else (
-                    schedule_to_close
-                    if schedule_to_close is not None
-                    else inbox.RECV_TIMEOUT_SECONDS
-                )
+            # raise_complete_async(): park for external completion, bounded by the
+            # same deadline. A fail re-runs per policy (fall through); complete/
+            # cancelled/timeout end here.
+            wait_timeout = (
+                deadline if deadline is not None else inbox.RECV_TIMEOUT_SECONDS
             )
             envelope = await _await_async_completion(
-                envelope, timeout, str(meta.get("activity_id", ""))
+                envelope, wait_timeout, str(meta.get("activity_id", "")), deadline_type
             )
         if envelope.get("ok"):
             return envelope
@@ -163,17 +172,22 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         if delay is None:
             return {**envelope, "retry_state": int(retry_state)}
         await DBOS.sleep_async(delay)
+        elapsed_before = elapsed + delay
         attempt += 1
 
 
 async def _await_async_completion(
-    pending_env: Dict[str, Any], timeout: float, activity_id: str
+    pending_env: Dict[str, Any],
+    timeout: float,
+    activity_id: str,
+    deadline_type: str = "start_to_close",
 ) -> Dict[str, Any]:
     """Park the activity workflow for external completion (raise_complete_async
     on the queued path). Returns a normal attempt envelope: complete -> ok,
     fail -> a retryable failure (the caller re-runs per policy), report_cancellation
     (or a cancellation marker from the interpreter) -> a terminal CancelledError,
-    and a recv timeout -> a START_TO_CLOSE timeout.
+    and a recv timeout -> a START_TO_CLOSE / SCHEDULE_TO_CLOSE timeout (per
+    ``deadline_type``).
 
     Heartbeats sent by the completer are not completions: they are skipped so the
     park keeps waiting (detail forwarding to the workflow side remains a
@@ -188,9 +202,18 @@ async def _await_async_completion(
     while True:
         completion = await DBOS.recv_async(inbox.ASYNC_COMPLETE_TOPIC, timeout)
         if completion is None:
+            is_stc = deadline_type == "schedule_to_close"
             timed_out = exceptions.TimeoutError(
-                "activity Start-To-Close timeout",
-                type=exceptions.TimeoutType.START_TO_CLOSE,
+                (
+                    "activity Schedule-To-Close timeout"
+                    if is_stc
+                    else "activity Start-To-Close timeout"
+                ),
+                type=(
+                    exceptions.TimeoutType.SCHEDULE_TO_CLOSE
+                    if is_stc
+                    else exceptions.TimeoutType.START_TO_CLOSE
+                ),
                 last_heartbeat_details=[],
             )
             return {
