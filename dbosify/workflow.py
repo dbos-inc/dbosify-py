@@ -19,7 +19,7 @@ import logging
 import uuid as uuid_mod
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum, IntEnum
 from random import Random
 from typing import (
@@ -675,7 +675,7 @@ class Info:
     .. deprecated::
         Use :py:attr:`typed_search_attributes` instead.
     """
-    start_time: datetime = datetime.fromtimestamp(0)
+    start_time: datetime = datetime.fromtimestamp(0, timezone.utc)
     task_queue: str = ""
     # Workflow-task timeout: no workflow-task concept here (inert). Surfaced for
     # parity; always None.
@@ -684,7 +684,7 @@ class Info:
     workflow_id: str = ""
     # The run's initialization time. A single start timestamp per run (no
     # "first task" vs "initialization" distinction), so equals start_time.
-    workflow_start_time: datetime = datetime.fromtimestamp(0)
+    workflow_start_time: datetime = datetime.fromtimestamp(0, timezone.utc)
     workflow_type: str = ""
 
     def get_current_history_length(self) -> int:
@@ -1217,8 +1217,11 @@ def upsert_search_attributes(
 
 
 def now() -> datetime:
-    """Current workflow time: deterministic, advances only on events."""
-    return datetime.fromtimestamp(time(), tz=None)
+    """Current workflow time: deterministic, advances only on events.
+
+    Returns a timezone-aware UTC datetime, matching temporalio (whose
+    ``workflow.now()`` documents UTC as the set time zone)."""
+    return datetime.fromtimestamp(time(), timezone.utc)
 
 
 def time() -> float:
