@@ -5,7 +5,7 @@ system schema), rather than parsing a Temporal-style target host.
 
 Surface: ``start_workflow`` / ``execute_workflow`` / ``get_workflow_handle``,
 and ``WorkflowHandle`` with ``result``/``signal``/``query``/``execute_update``/
-``describe``/``cancel`` (cooperative, §6.5) / ``terminate`` (forceful).
+``describe``/``cancel`` (cooperative) / ``terminate`` (forceful).
 Parameters not yet honored are accepted and ignored with a debug log.
 """
 
@@ -84,7 +84,7 @@ from ._internal.payloads import (
 from ._internal.serializer import TEMPORAL_SERIALIZER
 from ._internal.status import WorkflowExecutionStatus
 
-# Schedule types (DESIGN §6.7) live in _schedule.py and are re-exported here
+# Schedule types live in _schedule.py and are re-exported here
 # to mirror temporalio.client's namespace.
 from ._schedule import (  # noqa: E402
     Schedule,
@@ -361,14 +361,14 @@ class AsyncActivityHandle:
     ) -> None:
         self._client = client
         # The original addressing argument, re-used to rebuild this handle at
-        # the root of the outbound chain (DESIGN §6.8).
+        # the root of the outbound chain.
         self._id_or_token = id_or_token
         # Per-handle converter override for complete/fail/heartbeat encoding; it
         # rides on each *Input so it survives the chain-root handle rebuild.
         self._converter = data_converter_override
         self._workflow_id: Optional[str] = None
         self._run_id: Optional[str] = None
-        # On the queued path (§6.1.2) the completion goes to the activity
+        # On the queued path the completion goes to the activity
         # workflow's recv topic, not the parent run's inbox.
         self._queued_wf: Optional[str] = None
         if isinstance(id_or_token, bytes):
@@ -880,7 +880,7 @@ def _execution_from_status(
     """Synthesize a :class:`WorkflowExecution` (or a subclass — ``describe()``
     passes :class:`WorkflowExecutionDescription`) from a DBOS ``WorkflowStatus``.
 
-    The DBOS workflow id is the run id (decision §10.3); the Temporal workflow
+    The DBOS workflow id is the run id; the Temporal workflow
     id is its run-chain base. The DBOS workflow name is ``wf:{type}``.
     """
     workflow_type = status.name or ""
@@ -925,7 +925,7 @@ def _ignore_rpc_options(
     where: str, rpc_metadata: Mapping[str, Any], rpc_timeout: Optional[timedelta]
 ) -> None:
     """RPC transport options have no dbosify equivalent; accept and
-    debug-log them (DESIGN convention for tuning parameters)."""
+    debug-log them."""
     if rpc_metadata:
         logger.debug("%s: ignoring rpc_metadata", where)
     if rpc_timeout is not None:
@@ -1079,7 +1079,7 @@ class Client:
 
     Use :py:meth:`connect` — ``Client.connect(system_database_url,
     namespace=...)`` builds the underlying ``dbos.DBOSClient`` pointed at the
-    namespace's schema (DEVIATIONS no-server), so you state the namespace once and
+    namespace's schema (ARCHITECTURE no-server), so you state the namespace once and
     never touch ``dbos_system_schema``. For full control of the DBOSClient
     (custom engine/pool), build it yourself and use the constructor, where the
     DBOSClient's schema *is* the namespace.
@@ -1094,7 +1094,7 @@ class Client:
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> None:
         """Low-level constructor over a caller-built ``dbos.DBOSClient``. The
-        client's **namespace is its DBOSClient's schema** (DEVIATIONS no-server) — the
+        client's **namespace is its DBOSClient's schema** (ARCHITECTURE no-server) — the
         single source of truth — so build the DBOSClient with
         ``dbos_system_schema=namespace_schema(<namespace>)``, or just use
         :py:meth:`connect`, which takes a namespace and builds the DBOSClient
@@ -1110,7 +1110,7 @@ class Client:
         self._data_converter = data_converter
         self._default_query_reject_condition = default_workflow_query_reject_condition
         # Build the outbound interceptor chain: user interceptors fold (in
-        # reverse) over the root that performs the DBOS operations (DESIGN §6.8).
+        # reverse) over the root that performs the DBOS operations.
         impl: OutboundInterceptor = _ClientOutbound(self)
         for interceptor in reversed(interceptors):
             impl = interceptor.intercept_client(impl)
@@ -1140,7 +1140,7 @@ class Client:
         interceptors: Sequence[Interceptor] = [],
         default_workflow_query_reject_condition: Optional[QueryRejectCondition] = None,
     ) -> "Client":
-        """Connect to ``system_database_url`` in ``namespace`` (DEVIATIONS no-server).
+        """Connect to ``system_database_url`` in ``namespace`` (ARCHITECTURE no-server).
 
         Builds the underlying ``dbos.DBOSClient`` for you — pointed at the
         namespace's schema, with the JSON serializer — so the namespace is
@@ -1232,7 +1232,7 @@ class Client:
             "priority": priority,
             "request_id": request_id,
             # PinnedVersioningOverride matches the enforced default; the
-            # auto-upgrade override has no DBOS analog (DEVIATIONS worker-versioning).
+            # auto-upgrade override has no DBOS analog (ARCHITECTURE worker-versioning).
             "versioning_override": versioning_override,
             **unsupported,
         }.items():
@@ -1273,7 +1273,7 @@ class Client:
         return await self._impl.start_workflow(input)
 
     async def _start_workflow_impl(self, input: StartWorkflowInput) -> "WorkflowHandle":
-        """Root of the ``start_workflow`` outbound chain (DESIGN §6.8): the
+        """Root of the ``start_workflow`` outbound chain: the
         actual enqueue, reading the (possibly interceptor-modified) input."""
         workflow_args = input.args
         type_name = input.workflow
@@ -1313,7 +1313,7 @@ class Client:
             # created now but fires at the next occurrence (first-task backoff).
             _schedules.validate_cron(cron_schedule)
             if start_delay is not None:
-                # DEVIATION (DEVIATIONS cron-chains): cron uses the enqueue delay
+                # DEVIATION (ARCHITECTURE cron-chains): cron uses the enqueue delay
                 # to back off run 0, so a user start_delay can't ride alongside.
                 raise ValueError(
                     "start_delay cannot be used together with cron_schedule"
@@ -1333,7 +1333,7 @@ class Client:
         # into the run as ExecuteWorkflowInput.headers.
         meta.headers = (await conversion.encode_headers(input.headers)) or None
 
-        # Messages to deliver with the start (DEVIATIONS start-policies): start
+        # Messages to deliver with the start (ARCHITECTURE start-policies): start
         # signal and/or update, built before conflict resolution to ride either path.
         with_start_msgs: List[Tuple[Any, str, Optional[str]]] = []
         if start_signal is not None:
@@ -1357,7 +1357,7 @@ class Client:
             current_index, current_status = current
             if _status.is_open(current_status.status):
                 # Conflict policies (vs a RUNNING run). There is an inherent
-                # TOCTOU window here, accepted for v1 (DESIGN §6.4).
+                # TOCTOU window here, accepted for v1.
                 if id_conflict_policy == WorkflowIDConflictPolicy.USE_EXISTING:
                     # Attaching to the running run: deliver the with-start
                     # messages to it (there is no enqueue to bundle with).
@@ -1536,7 +1536,7 @@ class Client:
         )
 
     # ------------------------------------------------------------------
-    # Visibility (DESIGN §6.2)
+    # Visibility
     # ------------------------------------------------------------------
 
     def list_workflows(
@@ -1555,7 +1555,7 @@ class Client:
         until the first iteration, so a bad query raises on first ``__anext__``.
 
         Each run-chain link (continue-as-new / workflow-retry / cron hop) is a
-        separate row, keyed by its run id (decision §10.3).
+        separate row, keyed by its run id.
         """
         _ignore_rpc_options("list_workflows", rpc_metadata, rpc_timeout)
         return WorkflowExecutionAsyncIterator(
@@ -1655,7 +1655,7 @@ class Client:
         typically USE_EXISTING) and send it an update, waiting for
         ``wait_for_stage``. The update rides the start: on a *fresh* run the
         start enqueue and the update request commit in one system-database
-        transaction (Temporal's atomic update-with-start, DEVIATIONS.md start-policies); on
+        transaction (Temporal's atomic update-with-start, ARCHITECTURE.md start-policies); on
         a USE_EXISTING attach it is sent to the already-running run as part of
         the start. The request is routed through the update outbound
         interceptors first, so their modifications apply on both paths.
@@ -1729,7 +1729,7 @@ class Client:
         return AsyncActivityHandle(self, (workflow_id, run_id, activity_id))
 
     # ------------------------------------------------------------------
-    # Schedules (DESIGN §6.7)
+    # Schedules
     # ------------------------------------------------------------------
 
     async def create_schedule(
@@ -1744,7 +1744,7 @@ class Client:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> ScheduleHandle:
-        """Create a schedule and return its handle (DESIGN §6.7).
+        """Create a schedule and return its handle.
 
         The schedule's ``ScheduleSpec`` is compiled to a cron expression and
         backed by a DBOS schedule that fires a generic dispatcher; ``memo`` and
@@ -2011,7 +2011,7 @@ class WorkflowHandle:
                 cause = deserialize_failure(failure.envelope)
                 raise WorkflowFailureError(cause=cause) from cause
             except dbos_error.DBOSAwaitedWorkflowCancelledError:
-                # Native DBOS cancel == terminate in our scheme (§6.5).
+                # Native DBOS cancel == terminate in our scheme.
                 terminated = exceptions.TerminatedError("Workflow terminated")
                 raise WorkflowFailureError(cause=terminated) from terminated
             except Exception as err:
@@ -2093,7 +2093,7 @@ class WorkflowHandle:
             input.reject_condition or self._client._default_query_reject_condition
         )
         # Read status directly (not describe(), to skip its interceptor): gates
-        # reject_condition, picks the rehydrate path. DEVIATIONS start-policies.
+        # reject_condition, picks the rehydrate path. ARCHITECTURE start-policies.
         try:
             target = await self._target()
             raw = await self._client._status_of(target)
@@ -2131,7 +2131,7 @@ class WorkflowHandle:
             reply = await self._rehydrate_query(target, envelope, request_id, timeout)
         else:
             # TERMINATED/TIMED_OUT/CONTINUED_AS_NEW can't be faithfully replayed
-            # to a queryable final state — fail clearly (DEVIATIONS replay).
+            # to a queryable final state — fail clearly (ARCHITECTURE replay).
             raise WorkflowQueryFailedError(
                 f"cannot query a workflow in state {status.name}: rehydrate-by-"
                 "replay supports COMPLETED/FAILED/CANCELED runs only"
@@ -2491,7 +2491,7 @@ class WorkflowHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Request cooperative cancellation (§6.5): the workflow's primary
+        """Request cooperative cancellation: the workflow's primary
         coroutine gets CancelledError at its next event boundary; cleanup
         code runs and may still execute activities. The workflow may also
         swallow the cancel and complete normally. Raises if the targeted
@@ -2529,7 +2529,7 @@ class WorkflowHandle:
         rpc_metadata: Mapping[str, Any] = {},
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
-        """Forcefully terminate (§6.5): native DBOS cancellation. No
+        """Forcefully terminate: native DBOS cancellation. No
         workflow code runs; status becomes TERMINATED. ``reason``/details
         are accepted but not stored (DBOS cancellation has no reason field).
         """
@@ -2588,7 +2588,7 @@ class WorkflowHandle:
 
 
 class _ClientOutbound(OutboundInterceptor):
-    """Root of the client outbound interceptor chain (DESIGN §6.8): performs
+    """Root of the client outbound interceptor chain: performs
     the actual DBOS operations, reading the (possibly interceptor-modified)
     ``*Input``. Verbs whose work lives on a handle reconstruct the handle from
     the input's identity and call its ``_<verb>_impl``; the rest delegate to

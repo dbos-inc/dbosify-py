@@ -1,4 +1,4 @@
-"""SIGKILL recovery for the cross-queue / distributed activity path (§6.1.2).
+"""SIGKILL recovery for the cross-queue / distributed activity path.
 
 The activity runs on a *different* worker process than the workflow that calls
 it (via ``execute_activity(..., task_queue=)``), so two failure modes matter and

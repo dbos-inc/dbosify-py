@@ -1,4 +1,4 @@
-"""Proofs of the DBOS semantics DESIGN.md §7 declares foundational, in
+"""Proofs of the foundational DBOS semantics, in
 isolation from the interpreter (debugging them inside it would be far harder):
 
 1. function_id assignment stays deterministic when many async steps execute

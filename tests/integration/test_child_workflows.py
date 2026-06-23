@@ -1,4 +1,4 @@
-"""Child workflows (§6.6), in-process: parent/child results, default ids,
+"""Child workflows, in-process: parent/child results, default ids,
 failure cause fidelity, signaling children, and ParentClosePolicy. The
 SIGKILL re-attach proof lives in test_child_workflows_recovery.py.
 """

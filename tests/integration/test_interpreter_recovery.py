@@ -1,4 +1,4 @@
-"""The §4.3 SIGKILL-recovery suite (criteria 1, 2, 4, and 5), driven through
+"""The SIGKILL-recovery suite (criteria 1, 2, 4, and 5), driven through
 real worker subprocesses against real Postgres. The non-kill criteria (3 and 6)
 live in test_interpreter_basic.py.
 """
@@ -90,7 +90,7 @@ def _spawn(mode: str, workflow_id: str, *extra: str) -> PythonProcess:
 
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_signal_recovery_not_applied_twice(driver: Driver) -> None:
-    """§4.3 test 1: kill after the signal is recorded but before completion;
+    """Test 1: kill after the signal is recorded but before completion;
     after recovery the result is the same and the handler was not re-applied
     twice to state.
     """
@@ -122,7 +122,7 @@ def test_signal_recovery_not_applied_twice(driver: Driver) -> None:
 
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_race_order_identical_across_recovery(driver: Driver) -> None:
-    """§4.3 test 2: two concurrent activities + a timer racing; the
+    """Test 2: two concurrent activities + a timer racing; the
     completion order observed by user code is identical across a forced
     recovery replay.
     """
@@ -158,7 +158,7 @@ def test_race_order_identical_across_recovery(driver: Driver) -> None:
 
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_rejected_update_leaves_no_trace_across_recovery(driver: Driver) -> None:
-    """§4.3 test 4: a rejected update leaves no trace in workflow state
+    """Test 4: a rejected update leaves no trace in workflow state
     across recovery; an accepted update returns its value.
     """
     first = _spawn("counter-start", "counter-wf")
@@ -193,7 +193,7 @@ def test_rejected_update_leaves_no_trace_across_recovery(driver: Driver) -> None
 @pytest.mark.timeout(600)
 @pytest.mark.usefixtures("cleanup_test_databases")
 def test_perf_baseline_1000_iterations(driver: Driver) -> None:
-    """§4.3 test 5: 1,000 iterations of (sleep(0) + tiny activity); measure
+    """Test 5: 1,000 iterations of (sleep(0) + tiny activity); measure
     first-execution and recovery-replay times. Numbers go in docs/perf.md;
     the only hard assertion is correctness.
     """

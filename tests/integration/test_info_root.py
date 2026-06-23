@@ -1,5 +1,5 @@
 """workflow.info().root: the root workflow of a run's tree, threaded to
-children (§6.6). None for a top-level workflow (itself the root)."""
+children. None for a top-level workflow (itself the root)."""
 
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional

@@ -1,10 +1,10 @@
-"""Conformance: the samples-python ``activity_worker/`` corpus (DESIGN §9).
+"""Conformance: the samples-python ``activity_worker/`` corpus.
 
 That corpus is a single **cross-language** sample (a Go workflow calling a
 Python activity over a Temporal server), so it cannot run as written against a
 serverless, in-process model. We prove the capability it demonstrates: an
 **activities-only** worker reachable from a workflow on a **different task
-queue** — the cross-queue / distributed activity path (DESIGN §6.1.2). The Go
+queue** — the cross-queue / distributed activity path. The Go
 workflow is substituted by a Python ``SayHelloWorkflow`` (the documented
 migration delta); the activity body is the sample's ``say_hello_activity``
 verbatim. See ``activity_worker_workers.py``.

@@ -1,5 +1,5 @@
 """Workflow-id namespacing (ids.py): the ``--r`` (run-chain) and ``--a``
-(cross-queue activity, §6.1.2) separators are reserved so internal ids can never
+(cross-queue activity) separators are reserved so internal ids can never
 collide with a user/child id — a collision would make the idempotent
 ``SetWorkflowID`` enqueue silently re-attach to an unrelated workflow.
 """

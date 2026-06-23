@@ -1,5 +1,5 @@
 """The DBOS ``Serializer`` adapter: JSON transport for dbosify
-checkpoints (DESIGN §6.9), replacing DBOS's default pickle.
+checkpoints, replacing DBOS's default pickle.
 
 By the time data reaches this serializer it is already JSON-safe: every user
 value has been converted to a payload dict at the Temporal boundaries

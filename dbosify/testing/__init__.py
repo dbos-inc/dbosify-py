@@ -4,7 +4,7 @@
 :py:class:`WorkflowEnvironment.start_local` provisions an isolated,
 throwaway database on an externally provided Postgres server (there is no
 dev server to download — Postgres *is* the server). Time-skipping is out of
-scope (see DESIGN §6.10).
+scope.
 """
 
 import asyncio

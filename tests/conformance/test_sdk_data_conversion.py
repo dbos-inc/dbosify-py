@@ -3,7 +3,7 @@ tests adapted from temporalio's ``tests/worker/test_workflow.py``.
 
 temporalio rebuilds the client via ``client.config()`` to install a codec; we
 forward the ``DataConverter`` to ``new_worker`` instead — the converter is
-process-global (DESIGN §6.9), so it applies to the client too. Server-only log
+process-global, so it applies to the client too. Server-only log
 assertions (e.g. "Completing activity as failed") are dropped; the behavioral
 core (codec round-trips, error category survives, an interceptor may register a
 signal handler in ``init()``) is kept.

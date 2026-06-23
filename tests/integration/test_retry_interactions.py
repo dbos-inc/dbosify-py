@@ -1,5 +1,5 @@
 """How workflow retry policies compose with continue-as-new, cancellation,
-and message carryover (DESIGN §6.4). These are the cross-feature interaction
+and message carryover. These are the cross-feature interaction
 paths — independently each works; the question is the seams.
 """
 

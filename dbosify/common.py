@@ -542,7 +542,7 @@ def _warn_on_deprecated_search_attributes(
 
 
 # Worker versioning / deployments: a "deployment version" maps onto DBOS versioning
-# (enforces PINNED; AUTO_UPGRADE has none — see DEVIATIONS worker-versioning).
+# (enforces PINNED; AUTO_UPGRADE has none — see ARCHITECTURE worker-versioning).
 
 
 class VersioningBehavior(IntEnum):
@@ -551,7 +551,7 @@ class VersioningBehavior(IntEnum):
 
     ``PINNED`` is dbosify's enforced behavior (DBOS pins recovery/dequeue
     to ``application_version`` = the build ID). ``AUTO_UPGRADE`` has no DBOS
-    analog and degrades to pinned. See DEVIATIONS worker-versioning.
+    analog and degrades to pinned. See ARCHITECTURE worker-versioning.
     """
 
     UNSPECIFIED = 0
@@ -599,7 +599,7 @@ class VersioningOverride(ABC):
     execution, mirroring ``temporalio.common.VersioningOverride``.
 
     ``PinnedVersioningOverride`` matches dbosify's enforced default;
-    ``AutoUpgradeVersioningOverride`` has no DBOS analog (DEVIATIONS worker-versioning).
+    ``AutoUpgradeVersioningOverride`` has no DBOS analog (ARCHITECTURE worker-versioning).
     """
 
 

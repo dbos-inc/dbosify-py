@@ -1,16 +1,16 @@
-"""Subprocess worker hosting the §4.3 exit-criteria workflows.
+"""Subprocess worker hosting the exit-criteria workflows.
 
 Run as: python interpreter_recovery_worker.py <mode> <workflow_id> [extra]
 
 Modes (X-start launches and starts the workflow; X-resume launches and lets
 DBOS recovery re-execute it):
-  approval   §4.3 test 1 — wait_condition + signal, kill between signal and
+  approval   test 1 — wait_condition + signal, kill between signal and
              completion
-  race       §4.3 test 2 — two activities + a timer racing; completion order
+  race       test 2 — two activities + a timer racing; completion order
              must replay identically
-  counter    §4.3 test 4 — update validator; rejected updates leave no trace
+  counter    test 4 — update validator; rejected updates leave no trace
              across recovery
-  perf       §4.3 test 5 — N iterations of (sleep(0) + tiny activity);
+  perf       test 5 — N iterations of (sleep(0) + tiny activity);
              recovery replay time is the perf baseline
 """
 

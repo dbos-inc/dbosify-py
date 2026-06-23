@@ -1,4 +1,4 @@
-"""Data conversion, mirroring ``temporalio.converter`` (DESIGN §6.9).
+"""Data conversion, mirroring ``temporalio.converter``.
 
 This converts Python values to/from encoding-tagged :py:class:`Payload`
 records and (optionally) runs a :py:class:`PayloadCodec` over the payload
@@ -592,7 +592,7 @@ def value_to_type(
         return hint(**field_values)
 
     # Pydantic v1 model (``parse_obj``). Pydantic v2 models need a custom
-    # ``DataConverter`` (the default converter doesn't support them; DESIGN §6.9).
+    # ``DataConverter`` (the default converter doesn't support them).
     parse_obj_attr = inspect.getattr_static(hint, "parse_obj", None)
     if isinstance(parse_obj_attr, (classmethod, staticmethod)):
         if not isinstance(value, dict):

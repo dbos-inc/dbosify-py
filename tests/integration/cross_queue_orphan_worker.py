@@ -1,4 +1,4 @@
-"""Subprocess worker for the cross-queue orphan test (§6.1.2): a workflow that
+"""Subprocess worker for the cross-queue orphan test: a workflow that
 continues-as-new with a fire-and-forget cross-queue activity still in flight.
 The close path must cancel that activity (cross-process) rather than leave its
 ``__temporal_activity`` workflow running to completion on its worker.

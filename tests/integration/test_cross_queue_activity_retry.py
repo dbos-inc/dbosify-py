@@ -1,4 +1,4 @@
-"""Retry policy on the cross-queue / distributed activity path (§6.1.2).
+"""Retry policy on the cross-queue / distributed activity path.
 
 The ``__temporal_activity`` workflow owns the retry loop on the activity worker
 (Design A): attempts, durable backoff, ``maximum_attempts`` / non-retryable, and

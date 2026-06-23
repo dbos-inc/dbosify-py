@@ -585,7 +585,7 @@ class MultiCancelWorkflow:
 
 
 @pytest.mark.skip(
-    reason="DEVIATIONS sync-activity-cancel/activity-cancel-details (cooperative cancellation): a cancelled `wait_cancel` "
+    reason="ARCHITECTURE sync-activity-cancel/activity-cancel-details (cooperative cancellation): a cancelled `wait_cancel` "
     "activity catches asyncio.CancelledError and *returns a value*, so our model "
     "records it as a successful completion rather than ActivityError(CancelledError). "
     "Temporal's hard cancellation discards the late result. The 4-way "
@@ -648,7 +648,7 @@ class TrapCancelWorkflow:
 
 async def test_workflow_cancel_before_run(client: Client) -> None:
     # Start the workflow and cancel it before the worker exists; warm_schema
-    # pre-migrates the namespace schema (our Worker owns schema creation, DESIGN §5).
+    # pre-migrates the namespace schema (our Worker owns schema creation).
     await warm_schema(client)
     task_queue = str(uuid.uuid4())
     handle = await client.start_workflow(
@@ -942,7 +942,7 @@ async def test_workflow_signal_and_query_errors(client: Client) -> None:
 
 
 @pytest.mark.skip(
-    reason="DEVIATIONS dynamic-handler-signature: the legacy `(name, *args)` dynamic-handler signature "
+    reason="ARCHITECTURE dynamic-handler-signature: the legacy `(name, *args)` dynamic-handler signature "
     "is not supported; we require `(name, args: Sequence[RawValue])`. The "
     "new-style equivalent is covered by test_workflow_signal_and_query. The "
     "workflow can't even be defined (registration rejects the signature), so "
@@ -1092,7 +1092,7 @@ class PostPatchWorkflow(PatchWorkflowBase):
 
 
 @pytest.mark.skip(
-    reason="DEVIATIONS replay: this test queries a *completed* workflow after the "
+    reason="ARCHITECTURE replay: this test queries a *completed* workflow after the "
     "worker's registered code for that type name has been swapped (PrePatch -> "
     "Patch). Queries on closed runs rehydrate-by-replay under the currently-"
     "registered code; when that code differs from what the run executed, our "
@@ -1892,7 +1892,7 @@ class DataClassTypedWorkflow(DataClassTypedWorkflowAbstract):
         return param
 
     # temporalio declares this async (a deprecated form); we require sync query
-    # handlers (DEVIATIONS sync-queries), so it is a normal def here.
+    # handlers (ARCHITECTURE sync-queries), so it is a normal def here.
     @workflow.query
     def query_async(self, param: MyDataClass) -> MyDataClass:
         return param

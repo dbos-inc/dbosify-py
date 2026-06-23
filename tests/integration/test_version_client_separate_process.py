@@ -1,4 +1,4 @@
-"""A separate-process client against a versioned worker (DEVIATIONS worker-versioning).
+"""A separate-process client against a versioned worker (ARCHITECTURE worker-versioning).
 
 A bare client (the test process — it never set this build id) enqueues a
 workflow with no version (NULL); the versioned worker dequeues it (NULL matches

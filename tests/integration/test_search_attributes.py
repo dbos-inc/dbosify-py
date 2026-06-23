@@ -1,4 +1,4 @@
-"""Memo + search-attribute storage (DESIGN §6.2), backed by DBOS native
+"""Memo + search-attribute storage, backed by DBOS native
 workflow attributes.
 
 Covers the full surface: setting at start, reading back via ``describe()`` and

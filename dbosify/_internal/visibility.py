@@ -1,5 +1,4 @@
-"""Visibility-query parsing for ``client.list_workflows`` / ``count_workflows``
-(DESIGN §6.2).
+"""Visibility-query parsing for ``client.list_workflows`` / ``count_workflows``.
 
 Temporal sends the visibility filter *string* to the server, which parses it;
 the ``temporalio`` SDK ships no parser (``list_workflows`` passes the string

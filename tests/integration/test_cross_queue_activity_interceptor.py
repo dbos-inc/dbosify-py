@@ -1,4 +1,4 @@
-"""Activity interceptors fire on the cross-queue path (DESIGN §6.1.2 + §6.8).
+"""Activity interceptors fire on the cross-queue path.
 
 The activity runs on a different worker process than the calling workflow, and
 that activity worker carries its own ``Worker(interceptors=[...])``. The

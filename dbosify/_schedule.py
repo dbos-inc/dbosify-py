@@ -1,4 +1,4 @@
-"""Schedules (DESIGN §6.7): the temporalio-shaped ``Schedule`` type surface
+"""Schedules: the temporalio-shaped ``Schedule`` type surface
 and ``ScheduleHandle``, backed by DBOS schedule primitives.
 
 Mirrors ``temporalio.client``'s schedule types (re-exported from
@@ -10,7 +10,7 @@ workflow with a per-occurrence deterministic id (see
 the schedule's ``context`` so ``describe``/``list``/``update`` can reconstruct
 it; ``ScheduleSpec`` itself compiles down to a cron string + timezone for DBOS.
 
-Deviations (DEVIATIONS schedules): interval periods that don't divide a cron
+Deviations (ARCHITECTURE schedules): interval periods that don't divide a cron
 boundary, calendar ``year`` constraints, and interval offsets are approximated;
 overlap policy honors SKIP / CANCEL_OTHER / TERMINATE_OTHER / ALLOW_ALL (via a
 bounded backward walk of prior occurrences at fire time) but rejects
@@ -173,7 +173,7 @@ class SchedulePolicy:
 
     ``overlap`` defaults to ``SKIP`` (matching Temporal). SKIP, CANCEL_OTHER,
     TERMINATE_OTHER, and ALLOW_ALL are honored; BUFFER_ONE/BUFFER_ALL are
-    rejected at ``create_schedule`` time (DEVIATIONS schedules)."""
+    rejected at ``create_schedule`` time (ARCHITECTURE schedules)."""
 
     overlap: ScheduleOverlapPolicy = field(
         default_factory=lambda: ScheduleOverlapPolicy.SKIP
@@ -464,7 +464,7 @@ class ScheduleHandle:
     ) -> None:
         """Update this schedule. The ``updater`` (sync or async) receives the
         current description and returns the new ``ScheduleUpdate`` (or ``None``
-        to skip). Implemented as delete-then-recreate (DEVIATIONS schedules)."""
+        to skip). Implemented as delete-then-recreate (ARCHITECTURE schedules)."""
         await self._client._impl.update_schedule(
             UpdateScheduleInput(
                 id=self.id,
@@ -496,7 +496,7 @@ class ScheduleHandle:
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
         """Pause this schedule (DBOS ``pause_schedule``). ``note`` is accepted
-        but not persisted (DEVIATIONS schedules)."""
+        but not persisted (ARCHITECTURE schedules)."""
         await self._client._impl.pause_schedule(
             PauseScheduleInput(
                 id=self.id,
@@ -517,7 +517,7 @@ class ScheduleHandle:
         rpc_timeout: Optional[timedelta] = None,
     ) -> None:
         """Unpause this schedule (DBOS ``resume_schedule``). ``note`` is accepted
-        but not persisted (DEVIATIONS schedules)."""
+        but not persisted (ARCHITECTURE schedules)."""
         await self._client._impl.unpause_schedule(
             UnpauseScheduleInput(
                 id=self.id,
@@ -539,7 +539,7 @@ class ScheduleHandle:
     ) -> None:
         """Trigger an immediate action on this schedule. The action runs under
         the schedule's configured overlap policy; a per-call ``overlap`` override
-        is accepted only as ``ALLOW_ALL`` (others raise — DEVIATIONS schedules)."""
+        is accepted only as ``ALLOW_ALL`` (others raise — ARCHITECTURE schedules)."""
         await self._client._impl.trigger_schedule(
             TriggerScheduleInput(
                 id=self.id,
@@ -562,7 +562,7 @@ class ScheduleHandle:
         """Backfill this schedule over the given time periods. Backfilled actions
         run under the schedule's configured overlap policy; a per-backfill
         ``overlap`` override is accepted only as ``ALLOW_ALL`` (others raise —
-        DEVIATIONS schedules)."""
+        ARCHITECTURE schedules)."""
         await self._client._impl.backfill_schedule(
             BackfillScheduleInput(
                 id=self.id,
@@ -837,7 +837,7 @@ def compile_spec(spec: ScheduleSpec) -> "tuple[str, Optional[str]]":
     """Compile a ``ScheduleSpec`` to a (cron, timezone_name) pair for DBOS.
 
     cron_expressions win, then intervals, then calendars. Extra entries beyond
-    the first are dropped with a deviation (DEVIATIONS schedules)."""
+    the first are dropped with a deviation (ARCHITECTURE schedules)."""
     tz_name = spec.time_zone_name
     if spec.cron_expressions:
         if len(spec.cron_expressions) > 1:
@@ -928,7 +928,7 @@ def _list_description_from_row(row: Mapping[str, Any]) -> ScheduleListDescriptio
 
 
 def require_supported_overlap(overlap: Optional[ScheduleOverlapPolicy]) -> None:
-    """Reject overlap policies dbosify does not implement (DEVIATIONS schedules).
+    """Reject overlap policies dbosify does not implement (ARCHITECTURE schedules).
 
     SKIP, CANCEL_OTHER, TERMINATE_OTHER, and ALLOW_ALL are honored;
     BUFFER_ONE/BUFFER_ALL need durable start-after-completion queueing we don't
@@ -949,7 +949,7 @@ def require_overlap_override_supported(
     overlap: Optional[ScheduleOverlapPolicy],
 ) -> None:
     """Reject a per-call (trigger/backfill) overlap override we don't honor
-    (DEVIATIONS schedules). A per-call override can't be threaded through DBOS's
+    (ARCHITECTURE schedules). A per-call override can't be threaded through DBOS's
     trigger/backfill, so only ``None`` (use the schedule's configured policy)
     and ``ALLOW_ALL`` (the least-restrictive, no-op case) are accepted; any
     other value raises rather than being silently ignored."""

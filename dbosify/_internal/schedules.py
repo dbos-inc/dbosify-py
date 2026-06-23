@@ -1,4 +1,4 @@
-"""Cron-expression helpers (DESIGN §6.4 cron; §6.7 schedules build on this).
+"""Cron-expression helpers.
 
 DBOS vendors a croniter; we reuse it so client-side fire computations and the
 DBOS worker-side scheduler agree on semantics. Temporal cron strings are
@@ -7,11 +7,11 @@ DBOS worker-side scheduler agree on semantics. Temporal cron strings are
 (trailing year) expressions are accepted as an extension — Temporal rejects
 them, but they are invaluable for fast tests and cost nothing to support.
 
-§6.7 schedules compile a ``ScheduleSpec`` (intervals / calendars / cron
+Schedules compile a ``ScheduleSpec`` (intervals / calendars / cron
 expressions) down to a single cron string + timezone for ``DBOS.create_schedule``.
 Interval periods that don't divide a cron boundary evenly, calendar fields
 beyond cron's expressiveness, and interval offsets are approximated with a
-logged deviation (DEVIATIONS schedules).
+logged deviation (ARCHITECTURE schedules).
 """
 
 import logging
@@ -137,7 +137,7 @@ def calendar_to_cron(
 
     Emits a 6-field (seconds-first) expression when any second range is
     non-default, else 5-field. The ``year`` field has no cron equivalent and
-    is dropped with a deviation when constraining (DEVIATIONS schedules).
+    is dropped with a deviation when constraining (ARCHITECTURE schedules).
     """
     if year:
         logger.debug(

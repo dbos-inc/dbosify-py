@@ -1,11 +1,11 @@
 """Per-type DBOS workflow dispatchers and the workflow-task retry loop.
 
 Each registered Temporal workflow type gets its own thin DBOS workflow named
-``wf:{type}`` (resolved decision §10.1) that delegates to the interpreter.
+``wf:{type}`` that delegates to the interpreter.
 Per-type registration keeps DBOS-native listing/filtering by name working
 and lets clients enqueue by name without importing user code.
 
-Workflow-task failure semantics (§4.2): a non-failure exception from
+Workflow-task failure semantics: a non-failure exception from
 workflow code does NOT fail the workflow. The dispatcher logs loudly, sleeps
 with capped backoff (a real sleep — this is outside the deterministic
 boundary), rewinds the DBOS checkpoint cursor (``ctx.function_id``) to where
@@ -128,10 +128,10 @@ def register_worker(
     registry.set_worker_interceptors(interceptors)
     registry.set_worker_task_queue(task_queue)
     registry.set_worker_namespace(namespace)
-    # The generic schedule-fire dispatcher is process-global (§6.7); register
+    # The generic schedule-fire dispatcher is process-global; register
     # it so this worker can run schedules whose action targets it.
     register_schedule_dispatcher()
-    # The generic queued-activity dispatcher (§6.1.2) is likewise process-global,
+    # The generic queued-activity dispatcher is likewise process-global,
     # registered for every worker so any host can run cross-queue activities.
     register_activity_dispatcher()
     for cls in workflows:
@@ -176,7 +176,7 @@ def _make_dbos_workflow(
             # status maps to CONTINUED_AS_NEW and awaiters follow new_run_id.
             raise SerializedContinueAsNew({"new_run_id": can.new_run_id}) from None
         except WorkflowCancelled as cancelled:
-            # Cooperative cancellation maps to CANCELED (§6.2), distinct from
+            # Cooperative cancellation maps to CANCELED, distinct from
             # FAILED and TERMINATED; it ends the chain (no retry, no cron).
             raise SerializedWorkflowCancellation(
                 serialize_failure(cancelled.cause)
@@ -403,8 +403,8 @@ async def _enqueue_next_run(
     return new_run_id
 
 
-# Schedules (§6.7): per-occurrence fire dispatcher — enforces bounds/jitter, applies
-# the overlap policy (DEVIATIONS schedules, _apply_overlap_policy), starts the action.
+# Schedules: per-occurrence fire dispatcher — enforces bounds/jitter, applies
+# the overlap policy (ARCHITECTURE schedules, _apply_overlap_policy), starts the action.
 
 SCHEDULE_FIRE_NAME = "__temporal_schedule_fire"
 _schedule_dispatcher_registered = False
@@ -487,7 +487,7 @@ async def _apply_overlap_policy(
         await DBOS.cancel_workflow_async(prior, cancel_children=True)
     elif overlap == _OVERLAP_CANCEL_OTHER:
         # Cooperative cancel (lets the running action's cleanup run); we do not
-        # wait for it to unwind before starting the next (DEVIATIONS schedules).
+        # wait for it to unwind before starting the next (ARCHITECTURE schedules).
         await DBOS.send_async(
             prior, inbox.cancel_envelope("schedule overlap"), inbox.INBOX_TOPIC
         )
@@ -507,7 +507,7 @@ async def _running_prior_occurrence(
     statuses in a single batch; the most recent occurrence that actually left an
     action row (skipped fires leave none) is the candidate, and it counts as a
     running prior iff still open. Bounded to the most recent
-    ``_OVERLAP_LOOKBACK_LIMIT`` fires (DEVIATIONS schedules)."""
+    ``_OVERLAP_LOOKBACK_LIMIT`` fires (ARCHITECTURE schedules)."""
     base = action["id"]
     schedule_name = context["schedule_id"]
     before_epoch = int(fired_at.timestamp())

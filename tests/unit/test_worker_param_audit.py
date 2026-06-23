@@ -1,4 +1,4 @@
-"""Accepted-parameter audit for ``Worker`` (DESIGN §9): every parameter of
+"""Accepted-parameter audit for ``Worker``: every parameter of
 ``temporalio.worker.Worker.__init__`` is classified — honored, inert (accepted
 but a defensible no-op), rejected (behavior-changing + unsupported → raises), or
 a fundamental deviation. The completeness check is machine-enforced: a new
@@ -55,11 +55,11 @@ DEVIATION: Set[str] = {"client"}
 # Accepted but genuinely a no-op in our model — each with a defensible reason.
 INERT: Dict[str, str] = {
     "workflow_task_executor": "interpreter runs on the event loop; no separate workflow-task thread pool",
-    "nexus_task_executor": "Nexus not supported (DESIGN §1)",
+    "nexus_task_executor": "Nexus not supported",
     "workflow_runner": "no workflow sandbox (no-sandbox)",
     "unsandboxed_workflow_runner": "no workflow sandbox (no-sandbox)",
     "max_cached_workflows": "no sticky cache; workflows replay from DBOS checkpoints",
-    "max_concurrent_nexus_tasks": "Nexus not supported (DESIGN §1)",
+    "max_concurrent_nexus_tasks": "Nexus not supported",
     "max_concurrent_workflow_task_polls": "DBOS queue listener, not Temporal long-polling",
     "nonsticky_to_sticky_poll_ratio": "no sticky cache",
     "max_concurrent_activity_task_polls": "DBOS queue listener, not Temporal long-polling",
@@ -73,9 +73,9 @@ INERT: Dict[str, str] = {
     "disable_safe_workflow_eviction": "no sticky-cache eviction",
     "workflow_task_poller_behavior": "DBOS queue listener, not Temporal pollers",
     "activity_task_poller_behavior": "DBOS queue listener, not Temporal pollers",
-    "nexus_task_poller_behavior": "Nexus not supported (DESIGN §1)",
-    "disable_payload_error_limit": "Temporal payload-size caps not enforced (blocking-stalls-worker/§6.9)",
-    "max_workflow_task_external_storage_concurrency": "no external payload storage (§6.9)",
+    "nexus_task_poller_behavior": "Nexus not supported",
+    "disable_payload_error_limit": "Temporal payload-size caps not enforced (blocking-stalls-worker)",
+    "max_workflow_task_external_storage_concurrency": "no external payload storage",
 }
 
 

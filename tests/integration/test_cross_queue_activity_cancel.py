@@ -1,4 +1,4 @@
-"""Cooperative cancellation of a cross-queue activity (§6.1.2).
+"""Cooperative cancellation of a cross-queue activity.
 
 The activity runs on a different worker than the workflow, so cancellation must
 cross the process boundary *cooperatively*: the interpreter sets a checkpointed

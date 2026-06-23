@@ -6,8 +6,8 @@ The classes are re-exported from
 ``dbosify.client.Interceptor`` exactly as it would
 ``temporalio.client.Interceptor``.
 
-The ``*Input`` dataclasses are copied field-for-field from the SDK (DESIGN
-§6.8) so signature parity holds; fields dbosify does not act on (e.g.
+The ``*Input`` dataclasses are copied field-for-field from the SDK so
+signature parity holds; fields dbosify does not act on (e.g.
 ``callbacks``, ``links``, ``request_id``, ``versioning_override``, ``priority``,
 ``rpc_metadata``/``rpc_timeout``, ``data_converter_override``) are carried but
 inert. ``headers`` is *not* inert: a header set on ``start_workflow`` /

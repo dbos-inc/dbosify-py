@@ -1,4 +1,4 @@
-"""Namespace -> DBOS schema mapping (DEVIATIONS no-server)."""
+"""Namespace -> DBOS schema mapping (ARCHITECTURE no-server)."""
 
 import pytest
 

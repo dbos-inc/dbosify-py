@@ -1,4 +1,4 @@
-"""Conformance: the samples-python ``schedules/`` corpus (DESIGN §9).
+"""Conformance: the samples-python ``schedules/`` corpus.
 
 Unlike ``hello/`` and ``message_passing/``, this corpus is a long-running
 worker (``run_worker.py``) plus a series of independent operation scripts

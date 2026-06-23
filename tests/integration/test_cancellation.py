@@ -1,4 +1,4 @@
-"""The §6.5 cancellation matrix, in-process: cooperative cancel (parked,
+"""The cancellation matrix, in-process: cooperative cancel (parked,
 swallowed, cleanup-during-unwind, mid-activity), forceful terminate, and the
 TERMINATE_EXISTING conflict policy. The SIGKILL-during-unwind recovery test
 lives in test_cancellation_recovery.py.
@@ -99,7 +99,7 @@ class CleanupWorkflow:
         try:
             await workflow.wait_condition(lambda: False)
         finally:
-            # The load-bearing §6.5 row: cleanup during cancellation unwind
+            # The load-bearing row: cleanup during cancellation unwind
             # may still execute activities.
             await workflow.execute_activity(
                 record,

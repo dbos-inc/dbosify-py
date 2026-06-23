@@ -1,4 +1,4 @@
-"""Workflow retry policies (DESIGN §6.4): a failed run starts run n+1 of the
+"""Workflow retry policies: a failed run starts run n+1 of the
 chain with attempt+1 and backoff, `workflow.info().attempt` is
 real, attempts see the previous failure via `workflow.get_last_failure()`,
 and `result(follow_runs=True)` follows a failed run to its retry successor.

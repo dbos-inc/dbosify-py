@@ -16,8 +16,8 @@ The chains are built per workflow execution in ``_internal/interpreter.py``
 outbound so ``start_activity`` / ``start_child_workflow`` / signals /
 ``continue_as_new`` route through it.
 
-The ``*Input`` dataclasses are copied field-for-field from the SDK (DESIGN
-§6.8) so signature parity holds; fields dbosify does not act on (e.g.
+The ``*Input`` dataclasses are copied field-for-field from the SDK so
+signature parity holds; fields dbosify does not act on (e.g.
 ``versioning_intent``, ``initial_versioning_behavior``, ``priority``,
 ``disable_eager_execution``, ``arg_types``/``ret_type``) are carried but
 inert. Annotations use our own types or ``Any`` (the parity test checks
@@ -78,7 +78,7 @@ class WorkflowInterceptorClassInput:
     """Input for :py:meth:`dbosify.worker.Interceptor.workflow_interceptor_class`.
 
     ``unsafe_extern_functions`` is carried for parity; dbosify has no
-    workflow sandbox (DEVIATIONS dbos-native-management), so there is nothing to expose extern
+    workflow sandbox (ARCHITECTURE dbos-native-management), so there is nothing to expose extern
     functions *into* — the mapping is inert.
     """
 

@@ -1,4 +1,4 @@
-"""Legacy cron workflows (DESIGN §6.4): ``start_workflow(
+"""Legacy cron workflows: ``start_workflow(
 cron_schedule=...)`` creates the first run immediately (delayed to the next
 cron occurrence — Temporal's first-task backoff), and each close enqueues
 run n+1 of the chain at the next occurrence. Tests use the 6-field

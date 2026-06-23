@@ -1,4 +1,4 @@
-"""Subprocess worker for cross-version PINNED-recovery (DEVIATIONS worker-versioning).
+"""Subprocess worker for cross-version PINNED-recovery (ARCHITECTURE worker-versioning).
 
 Run as: python version_recovery_worker.py <start|idle|resume> <workflow_id>
 with env DBOSIFY_BUILD_ID selecting the worker's build id (= DBOS application_version).

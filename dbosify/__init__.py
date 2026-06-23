@@ -4,6 +4,4 @@ DBOS Transact (Postgres) instead of a Temporal server.
 Modules mirror ``temporalio``'s layout: ``dbosify.workflow``,
 ``.activity``, ``.client``, ``.worker``, ``.common``, ``.exceptions``,
 ``.converter``, ``.testing``. Migration from Temporal is an import-root swap.
-
-See DESIGN.md for the architecture and compatibility contract.
 """

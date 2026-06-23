@@ -62,7 +62,7 @@ def install_shim() -> None:
     from dbosify.client import Client
     from dbosify.worker import Worker
 
-    # The default namespace maps to its own DBOS schema (DEVIATIONS no-server); the
+    # The default namespace maps to its own DBOS schema (ARCHITECTURE no-server); the
     # client must use it, and the Worker derives the same from namespace="default".
     schema = namespace_schema(DEFAULT_NAMESPACE)
 
@@ -105,7 +105,7 @@ def install_shim() -> None:
     Client.connect = classmethod(patched_connect)  # type: ignore[assignment, method-assign]
 
     # -- dbosify.api.common.v1 stand-in: register the module chain so samples'
-    # annotation-only Payload imports resolve. Protobuf API is a non-goal (DEVIATIONS no-server).
+    # annotation-only Payload imports resolve. Protobuf API is a non-goal (ARCHITECTURE no-server).
     import dbosify as _dbosify_pkg
     from dbosify import converter as _dbosify_converter
 
