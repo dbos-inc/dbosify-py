@@ -12,27 +12,38 @@ the whole workflow function: each step replays from its copy (no real activity
 runs), and any divergence surfaces as a failure on the scratch run's result.
 After verifying, the scratch fork is deleted.
 
-Two divergence kinds DBOS does *not* catch on its own are handled by a guard the
-interpreter consults (see ``current_guard_for``):
+Two divergence kinds DBOS does *not* catch on its own are handled by the
+interpreter while it replays a scratch fork:
 
 * **extends beyond history** — current code launches a *new* durable operation
   past the recorded horizon (would execute a real activity in the fork);
 * **finishes early** — current code completes having claimed fewer steps than
   were recorded.
 
-The guard is a process-global dict keyed by the scratch run id, **not** a
-``ContextVar``: DBOS runs workflow functions on a thread pool, so a ContextVar
-set on the engine's task would not reach the fork's execution context. Keying on
-the unique scratch id keeps the guard inert for every other (real) workflow that
-happens to run concurrently.
+The interpreter recognizes "I am a replay, and which kind" from the scratch
+run's *own* workflow id: ``start_replay_fork`` names the fork deterministically
+with a reserved suffix (``--v`` verify, ``--q`` rehydrate; see ``ids``) via
+``SetWorkflowID``, and the interpreter reads ``ids.replay_scratch_mode`` on its
+own id. Because the signal lives in the id rather than in the forker's process
+memory, *whichever* worker dequeues the fork runs it correctly — the fork is
+created with no pinned application version, so a worker in a different process
+than the forker (e.g. a pure client querying a closed run) handles it. The
+horizon the interpreter checks against is the one it derives from its own copied
+steps, so nothing about the replay has to be passed out of band.
 
-The same fork-and-guard machinery (``start_replay_fork`` with ``mode``) backs
+The same fork machinery (``start_replay_fork`` with ``mode``) backs
 **query-on-closed-workflow rehydrate** (DEVIATIONS replay): the client forks a
 closed run in ``mode="rehydrate"``, the forked run replays to its final state
 and then *keeps serving* one query against the reconstructed instance (it is not
 deleted-after-verify but stops on a client signal or the
 ``REHYDRATE_SERVE_SECONDS`` deadline), and the client then discards it. The
 ``REHYDRATE_*`` constants below tune that serve/settle/poll timing.
+
+There is at most one scratch per (run, mode), so the id is a fixed suffix. A
+scratch left behind by a crash is reclaimed simply by re-forking the same id
+(``start_replay_fork`` deletes any stale scratch first); the trade-off is that
+two concurrent replays/rehydrates of the *same* run and mode contend for the one
+id rather than each spinning up their own.
 """
 
 import logging
@@ -48,6 +59,8 @@ from typing import (
     Optional,
     Sequence,
 )
+
+from . import ids
 
 if TYPE_CHECKING:
     from ..client import WorkflowHistory
@@ -70,40 +83,6 @@ REHYDRATE_SETTLE_SECONDS = 10.0
 # Inbox-recv timeout a rehydrate scratch run uses while serving queries, so its
 # serve deadline stays effective even if the client never sends a stop signal.
 REHYDRATE_POLL_SECONDS = 1.0
-
-
-# ---------------------------------------------------------------------------
-# Replay guard — consulted by the interpreter/dispatcher during a forked replay
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _ReplayGuard:
-    """State the interpreter consults while replaying a forked scratch run."""
-
-    scratch_id: str
-    horizon: int
-    # "verify" detects non-determinism; "rehydrate" replays a closed workflow to
-    # serve a query against its reconstructed state.
-    mode: str = "verify"
-
-
-_active_guards: Dict[str, _ReplayGuard] = {}
-
-
-def register_guard(guard: _ReplayGuard) -> None:
-    _active_guards[guard.scratch_id] = guard
-
-
-def unregister_guard(scratch_id: str) -> None:
-    _active_guards.pop(scratch_id, None)
-
-
-def current_guard_for(workflow_id: str) -> Optional[_ReplayGuard]:
-    """The active replay guard for ``workflow_id``, or None. Returns a guard
-    only when it was registered for *this exact* (scratch) run, so a guard set
-    for one replay never affects another run."""
-    return _active_guards.get(workflow_id)
 
 
 # ---------------------------------------------------------------------------
@@ -140,24 +119,36 @@ async def start_replay_fork(
     mode: str = "verify",
 ) -> Any:
     """Fork ``run_id`` one step past its last recorded checkpoint — copying
-    *every* recorded step — and register the replay guard for the scratch run.
-    Returns the fork handle.
+    *every* recorded step — into a deterministically-named scratch run. Returns
+    the fork handle.
 
-    This is the single source of the fork-bound convention shared by the
-    verification path and the query-on-closed rehydrate path: the copy bound is
-    ``function_id < start_step`` and ids are 1-based and contiguous, so
-    ``horizon + 1`` includes the final step. ``forker`` is anything exposing
-    ``fork_workflow_async`` (the ``DBOS`` runtime or a ``DBOSClient``). The fork
-    is created with no pinned application version (NULL), so the *current*
-    worker dequeues and runs it — replay verifies today's code, not the
-    recorded run's version.
+    The scratch id is ``ids.replay_scratch_id(run_id, mode)`` (a reserved ``--v``
+    / ``--q`` suffix), forced with ``SetWorkflowID``. Naming it — rather than
+    tracking it in this process's memory — is what lets a worker in a *different*
+    process recognize and correctly run the replay: it reads the mode off its own
+    id. The fork is created with no pinned application version (NULL), so the
+    current worker for the type (anywhere) dequeues and runs it, verifying
+    today's code rather than the recorded run's version.
+
+    Fork bound: the copy is ``function_id < start_step`` and ids are 1-based and
+    contiguous, so ``horizon + 1`` includes the final step. ``forker`` is
+    anything exposing ``fork_workflow_async`` + ``delete_workflow_async`` (the
+    ``DBOS`` runtime or a ``DBOSClient``).
+
+    There is one scratch per (run, mode), so a stale scratch from a crashed prior
+    replay/rehydrate would block the fork; reclaim it first (best-effort delete).
     """
+    from dbos import SetWorkflowID
+
     horizon = max((s["function_id"] for s in steps), default=0)
-    handle = await forker.fork_workflow_async(run_id, horizon + 1)
-    register_guard(
-        _ReplayGuard(scratch_id=handle.get_workflow_id(), horizon=horizon, mode=mode)
-    )
-    return handle
+    scratch_id = ids.replay_scratch_id(run_id, mode)
+    try:
+        # delete_children=False: the scratch parents no real children.
+        await forker.delete_workflow_async(scratch_id, delete_children=False)
+    except Exception:  # noqa: BLE001 — no stale scratch to reclaim is the norm
+        pass
+    with SetWorkflowID(scratch_id):
+        return await forker.fork_workflow_async(run_id, horizon + 1)
 
 
 async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
@@ -219,7 +210,6 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
         except NondeterminismError as err:  # defensive: surfaced directly
             replay_failure = err
     finally:
-        unregister_guard(scratch_id)
         try:
             # delete_children stays False: a replayed fork starts no real children
             # (it parents nothing) and we must never touch the source run's subtree.

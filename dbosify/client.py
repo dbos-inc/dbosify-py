@@ -1032,11 +1032,14 @@ class WorkflowExecutionAsyncIterator:
         raw_count = len(raw)
         self._fetch_offset += raw_count
         # Only user Temporal workflows (named ``wf:{type}``) are visible: skip
-        # DBOS plumbing rows (``__temporal_activity`` / ``__temporal_schedule_fire``).
+        # DBOS plumbing rows (``__temporal_activity`` / ``__temporal_schedule_fire``)
+        # and replay scratch forks (``--v`` / ``--q``), which share the source
+        # run's ``wf:`` name but are internal, short-lived reconstructions.
         survivors = [
             r
             for r in raw
             if (r.name or "").startswith("wf:")
+            and not ids.is_replay_scratch(r.workflow_id)
             and (self._post_filter is None or self._post_filter(r))
         ]
         self._current_page = [
@@ -2128,7 +2131,10 @@ class WorkflowHandle:
             WorkflowExecutionStatus.CANCELED,
         ):
             # Query on a closed workflow: rehydrate by replay (fork, serve,
-            # discard). Requires a worker in this process to drive the fork.
+            # discard). The fork is named with a reserved suffix and runs with no
+            # pinned version, so any worker for the type (this process need not be
+            # one) dequeues and serves it — matching Temporal's "any worker on the
+            # task queue answers a closed-workflow query" (DEVIATIONS replay).
             reply = await self._rehydrate_query(target, envelope, request_id, timeout)
         else:
             # TERMINATED/TIMED_OUT/CONTINUED_AS_NEW can't be faithfully replayed
@@ -2147,9 +2153,13 @@ class WorkflowHandle:
         self, target: str, envelope: Any, request_id: str, timeout: float
     ) -> Optional[Any]:
         """Answer a query on a closed workflow by replaying it: fork the run one
-        step past its last checkpoint (copying every recorded step), let the
-        forked run replay to its final state and then serve this one query
-        against that reconstructed state, then discard the scratch run."""
+        step past its last checkpoint (copying every recorded step) into a
+        deterministically-named scratch run, let it replay to its final state and
+        serve this one query against the reconstructed state, then discard it.
+
+        The fork is dequeued and executed by whatever worker is registered for
+        the type — which need not be this process — so a pure client with no
+        co-located worker can query a closed run."""
         client = self._client._dbos_client
         steps = await client.list_workflow_steps_async(target)
         # The fork-one-past-horizon convention + guard registration are shared
@@ -2166,16 +2176,18 @@ class WorkflowHandle:
             )
             if reply is None:
                 # Fork terminated without serving the query: it diverged (code
-                # changed) or no in-process worker drove it (DEVIATIONS replay).
+                # changed since the run, so replay can't reconstruct state) or no
+                # worker for this type is running anywhere to drive the fork
+                # within the timeout (DEVIATIONS replay).
                 raise WorkflowQueryFailedError(
                     "rehydrate-by-replay produced no query reply: the workflow's "
                     "code may have changed since it ran, or no worker for this "
-                    "type is running in the querying process"
+                    "type is running to serve the query"
                 )
             return reply
         finally:
-            # Stop the scratch run and let it settle BEFORE unregistering the
-            # guard; cancel if it overruns the settle window, then delete.
+            # Stop the scratch run and let it settle; cancel if it overruns the
+            # settle window, then delete.
             try:
                 await client.send_async(
                     scratch_id, inbox.rehydrate_stop_envelope(), inbox.INBOX_TOPIC
@@ -2194,7 +2206,6 @@ class WorkflowHandle:
                     pass
             except Exception:  # noqa: BLE001 — the run reached a terminal state
                 pass
-            _replay.unregister_guard(scratch_id)
             try:
                 # delete_children stays False: the fork owns no real children and
                 # we must never delete the source run's subtree.

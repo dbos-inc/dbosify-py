@@ -98,9 +98,9 @@ Payloads convert through a temporalio-shaped `DataConverter` to readable JSON wi
 
 A `Schedule` compiles to one DBOS cron (non-dividing intervals approximated; calendar `year` / interval `offset` dropped), honors SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL but rejects BUFFER_ONE/BUFFER_ALL, makes `update` a delete-then-recreate, and tracks no schedule history.
 
-### replay — Replay and queries-on-closed run over DBOS checkpoints, in-process
+### replay — Replay and queries-on-closed run over DBOS checkpoints
 
-`Replayer` / `fetch_history` are DB-bound (no offline JSON history), and queries on closed workflows use rehydrate-by-replay, which needs a worker for that type in the querying process.
+`Replayer` / `fetch_history` are DB-bound (no offline JSON history). Queries on closed workflows use rehydrate-by-replay: the run is forked into a deterministically-named scratch run (a reserved `--q` id suffix; `--v` for verification replays) that replays its checkpoints to the final state and serves the query, then is discarded. The replay's nature (verify vs. rehydrate) and horizon are carried by the scratch run's own id and its own copied steps, not by in-process state, so the fork is served by *any* worker registered for the type — including one in a different process than the client — matching Temporal, where a closed-workflow query is answered by any worker on the task queue. There is one scratch per (run, mode): a fixed suffix, so a stale scratch from a crash is reclaimed by re-forking the same id, at the cost that two concurrent rehydrates of the same closed run contend for the one id.
 
 ### dynamic-handlers — Dynamic handlers and activities are supported; dynamic workflows are not
 
