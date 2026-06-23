@@ -127,9 +127,7 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
                 }
 
     attempt = int(meta.get("attempt", 1))
-    # Elapsed budget consumed before the current attempt starts; reconstructed
-    # deterministically from recorded ``ended_at`` + the durable backoff sleeps,
-    # so it replays identically (measured from started_at, like retry_decision).
+    # Budget consumed before this attempt, reconstructed deterministically from recorded ended_at + durable backoffs (measured from started_at).
     elapsed_before = 0.0
     while True:
         meta["attempt"] = attempt
@@ -145,9 +143,7 @@ async def _run_queued_activity(payload: Dict[str, Any]) -> Dict[str, Any]:
         meta["deadline_type"] = deadline_type
         envelope: Dict[str, Any] = await step_fn(args, deadline, meta)
         if envelope.get("async_pending"):
-            # raise_complete_async(): park for external completion, bounded by the
-            # same deadline. A fail re-runs per policy (fall through); complete/
-            # cancelled/timeout end here.
+            # raise_complete_async(): park for external completion, bounded by the same deadline; a fail re-runs per policy.
             wait_timeout = (
                 deadline if deadline is not None else inbox.RECV_TIMEOUT_SECONDS
             )

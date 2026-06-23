@@ -1856,9 +1856,7 @@ class Interpreter(_Runtime):
             "workflow_type": self._defn.name,
             "headers": exec_state.headers,
         }
-        # Bound the attempt by min(start_to_close, remaining schedule_to_close).
-        # Remaining is computed from virtual time (deterministic), so the deadline
-        # replays identically; the timeout outcome is recorded in the envelope.
+        # Bound the attempt by min(start_to_close, remaining schedule_to_close); remaining uses virtual time, so it replays identically.
         remaining_stc = (
             exec_state.schedule_to_close
             - (self._vloop.time() - exec_state.scheduled_at)
@@ -2069,10 +2067,7 @@ class Interpreter(_Runtime):
             # raise_complete_async(): the function returned but the activity stays
             # pending until an activity_result envelope resolves it (checkpointed).
             exec_state.async_pending = True
-            # Park a deadline = min(remaining start_to_close, remaining
-            # schedule_to_close); without the latter an async-pending activity with
-            # only schedule_to_close set would wait forever. On budget exhaustion the
-            # give-up cause is corrected to SCHEDULE_TO_CLOSE (_activity_failure_cause).
+            # Park min(remaining start_to_close, remaining schedule_to_close); else a schedule_to_close-only async activity waits forever.
             attempt_elapsed = float(envelope.get("ended_at", 0.0)) - float(
                 envelope.get("started_at", envelope.get("ended_at", 0.0))
             )
@@ -2281,12 +2276,7 @@ class Interpreter(_Runtime):
     def _activity_failure_cause(
         failure: FailureEnvelope, retry_state: Optional[exceptions.RetryState]
     ) -> BaseException:
-        """The ``ActivityError`` cause for a terminal failure. When retries stop on
-        the schedule_to_close budget (``RetryState.TIMEOUT``) with a non-timeout last
-        failure, temporalio surfaces a SCHEDULE_TO_CLOSE timeout nesting it — so wrap
-        it. A last failure that is itself a timeout (start-to-close, schedule-to-close,
-        schedule-to-start, or heartbeat) already carries its specific TimeoutType and
-        passes through unchanged."""
+        """Wrap a non-timeout last failure as SCHEDULE_TO_CLOSE when retries stop on the budget (temporalio parity); an already-typed timeout passes through."""
         cause = deserialize_failure(failure)
         if retry_state == exceptions.RetryState.TIMEOUT and not isinstance(
             cause, exceptions.TimeoutError

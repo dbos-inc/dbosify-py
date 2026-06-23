@@ -124,12 +124,7 @@ def retry_decision(
 def effective_deadline(
     start_to_close: Optional[float], remaining_schedule_to_close: Optional[float]
 ) -> Tuple[Optional[float], str]:
-    """The deadline bounding a single in-flight attempt: the smaller of the
-    per-attempt ``start_to_close`` and the remaining ``schedule_to_close`` budget,
-    plus a label for which bound is binding (so a timeout reports the right type).
-    ``None`` means unbounded (neither timeout set). The caller computes the
-    remaining budget from deterministic time so the result replays identically.
-    """
+    """``min(start_to_close, remaining schedule_to_close)`` + the binding bound's label (so a timeout reports the right type); ``None`` is unbounded."""
     candidates: List[Tuple[float, str]] = []
     if start_to_close is not None:
         candidates.append((max(0.0, start_to_close), "start_to_close"))
@@ -200,9 +195,7 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
     ) -> Dict[str, Any]:
         from .. import activity as activity_api
 
-        # The per-attempt deadline is the smaller of start_to_close and the
-        # remaining schedule_to_close budget (computed by the caller); the label
-        # says which, so a timeout reports the right TimeoutType.
+        # Labels the caller-computed deadline so a timeout reports the right type.
         deadline_type = meta.get("deadline_type", "start_to_close")
 
         # The dynamic step handles any unmatched type: resolve the single dynamic
@@ -356,8 +349,7 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
                         }
 
         async def run_to_deadline() -> Dict[str, Any]:
-            # Enforce the attempt deadline ourselves: it is authoritative, so once
-            # it passes we cancel and abandon the attempt and discard any late result.
+            # Enforce the attempt deadline ourselves: once it passes, cancel and discard any late result.
             if deadline is None:
                 return await run_attempt()
             task = asyncio.ensure_future(run_attempt())
