@@ -158,12 +158,24 @@ class TestWorkflowRetryDelay:
         assert _workflow_retry_delay(policy, 1, _failure(type="Boom")) is None
         assert _workflow_retry_delay(policy, 1, _failure(type="Other")) == 1.0
 
-    def test_non_retryable_error_types_fall_back_to_envelope_class(self) -> None:
+    def test_non_retryable_error_types_match_coerced_exception_class(self) -> None:
+        # An arbitrary exception is serialized as an ApplicationError typed by
+        # its class name (payloads.serialize_failure), so matching that name
+        # mirrors Temporal.
+        policy = serialize_retry_policy(
+            RetryPolicy(non_retryable_error_types=["ValueError"])
+        )
+        assert _workflow_retry_delay(policy, 1, _failure(type="ValueError")) is None
+
+    def test_non_retryable_error_types_ignore_envelope_class(self) -> None:
+        # Structured envelope classes (no user-defined ``type``) are never
+        # matched against non_retryable_error_types: Temporal matches the failure
+        # type string, not the failure category, so this stays retryable.
         policy = serialize_retry_policy(
             RetryPolicy(non_retryable_error_types=["ActivityError"])
         )
         failure = {"cls": "ActivityError", "message": "a"}
-        assert _workflow_retry_delay(policy, 1, failure) is None
+        assert _workflow_retry_delay(policy, 1, failure) == 1.0
 
     def test_next_retry_delay_override(self) -> None:
         assert (
