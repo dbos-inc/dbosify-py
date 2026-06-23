@@ -56,11 +56,11 @@ ID-conflict / id-reuse start policies are check-then-start from the client (but 
 
 ### durable-messages — Signals, cancels, and updates are durable messages, not RPCs
 
-Because there is no server to validate targets, sends to closed workflows are silent no-ops (not "already completed"), ops on nonexistent workflows raise a DB/`RuntimeError` (not `NOT_FOUND`), exhausted waits raise `TimeoutError` (not `RPCError`), and signals/cancels are not request-deduplicated.
+Because there is no server to validate targets, sends to closed workflows are silent no-ops (not "already completed"), operations on nonexistent workflows raise a DB/`RuntimeError` (not `NOT_FOUND`), exhausted waits raise `TimeoutError` (not `RPCError`), and signals/cancels are not request-deduplicated.
 
 ### terminate-no-reason — Terminate stores no reason or details
 
-`handle.terminate(reason=...)` accepts and drops the reason; awaiters get a generic `TerminatedError`.
+`handle.terminate(reason=...)` does not store the reason; awaiters get a generic `TerminatedError`.
 
 ### async-activity-cancel — Async activities are more cancellable than Temporal's
 
@@ -96,7 +96,7 @@ Payloads convert through a temporalio-shaped `DataConverter` to readable JSON wi
 
 ### schedules — Schedules compile to a single cron; overlap and history are partial
 
-A `Schedule` compiles to a cron expression (non-dividing intervals approximated; calendar `year` / interval `offset` dropped).  BUFFER_ONE and BUFFER_ALL are not supported. Schedule history is not tracked.
+A `Schedule` compiles to a cron expression (non-dividing intervals approximated; calendar `year` / interval `offset` not supported).  BUFFER_ONE and BUFFER_ALL are not supported. Schedule history is not tracked.
 
 ### replay — Replay and queries-on-closed run over DBOS checkpoints
 
