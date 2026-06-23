@@ -292,6 +292,12 @@ def serialize_failure(
                 int(exc.retry_state) if exc.retry_state is not None else None
             ),
         }
+    elif isinstance(exc, exceptions.ServerError):
+        env = {
+            "cls": "ServerError",
+            "message": exc.message,
+            "non_retryable": exc.non_retryable,
+        }
     else:
         # Anything else (including FailureError subclasses we don't model
         # structurally) becomes an ApplicationError keyed by class name.
@@ -305,7 +311,11 @@ def serialize_failure(
         }
     if exc.__traceback__ is not None:
         env["stack_trace"] = "".join(traceback.format_tb(exc.__traceback__))
+    # Explicit `raise ... from` wins; else fall back to the implicit __context__
+    # chain unless suppressed — matching temporalio.
     cause = exc.__cause__
+    if cause is None and not exc.__suppress_context__:
+        cause = exc.__context__
     env["cause"] = serialize_failure(cause, converter) if cause is not None else None
     return env
 
@@ -369,6 +379,11 @@ def deserialize_failure(env: FailureEnvelope) -> exceptions.FailureError:
             initiated_event_id=0,
             started_event_id=0,
             retry_state=_retry_state(env.get("retry_state")),
+        )
+    elif cls == "ServerError":
+        exc = exceptions.ServerError(
+            env["message"],
+            non_retryable=bool(env.get("non_retryable", False)),
         )
     else:
         raise ValueError(f"unknown failure envelope class: {cls!r}")
