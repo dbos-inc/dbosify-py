@@ -1031,10 +1031,7 @@ class WorkflowExecutionAsyncIterator:
         )
         raw_count = len(raw)
         self._fetch_offset += raw_count
-        # Only user Temporal workflows (named ``wf:{type}``) are visible: skip
-        # DBOS plumbing rows (``__temporal_activity`` / ``__temporal_schedule_fire``)
-        # and replay scratch forks (``--v`` / ``--q``), which share the source
-        # run's ``wf:`` name but are internal, short-lived reconstructions.
+        # Visible rows are user workflows; skip DBOS plumbing and scratch forks.
         survivors = [
             r
             for r in raw
@@ -2130,11 +2127,7 @@ class WorkflowHandle:
             WorkflowExecutionStatus.FAILED,
             WorkflowExecutionStatus.CANCELED,
         ):
-            # Query on a closed workflow: rehydrate by replay (fork, serve,
-            # discard). The fork is named with a reserved suffix and runs with no
-            # pinned version, so any worker for the type (this process need not be
-            # one) dequeues and serves it — matching Temporal's "any worker on the
-            # task queue answers a closed-workflow query" (DEVIATIONS replay).
+            # Closed workflow: rehydrate by replay, served by any worker for the type.
             reply = await self._rehydrate_query(target, envelope, request_id, timeout)
         else:
             # TERMINATED/TIMED_OUT/CONTINUED_AS_NEW can't be faithfully replayed
@@ -2164,9 +2157,7 @@ class WorkflowHandle:
         independent scratch forks and do not interfere."""
         client = self._client._dbos_client
         steps = await client.list_workflow_steps_async(target)
-        # The fork-one-past-horizon convention is shared with the verification
-        # replayer (replay.start_replay_fork); the request id makes this query's
-        # scratch unique so concurrent queriers never contend for one id.
+        # request_id makes this query's scratch unique, so queriers don't contend.
         scratch_handle = await _replay.start_replay_fork(
             client, target, steps, mode="rehydrate", scratch_suffix=request_id
         )
@@ -2178,10 +2169,7 @@ class WorkflowHandle:
                 scratch_handle, scratch_id, reply_key, timeout
             )
             if reply is None:
-                # Fork terminated without serving the query: it diverged (code
-                # changed since the run, so replay can't reconstruct state) or no
-                # worker for this type is running anywhere to drive the fork
-                # within the timeout (DEVIATIONS replay).
+                # No reply: code diverged, or no worker ran the fork in time.
                 raise WorkflowQueryFailedError(
                     "rehydrate-by-replay produced no query reply: the workflow's "
                     "code may have changed since it ran, or no worker for this "
@@ -2189,8 +2177,7 @@ class WorkflowHandle:
                 )
             return reply
         finally:
-            # Stop the scratch run and let it settle; cancel if it overruns the
-            # settle window, then delete.
+            # Stop the scratch, let it settle (cancel if it overruns), then delete.
             try:
                 await client.send_async(
                     scratch_id, inbox.rehydrate_stop_envelope(), inbox.INBOX_TOPIC

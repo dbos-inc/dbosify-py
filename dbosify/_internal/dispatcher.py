@@ -182,9 +182,7 @@ def _make_dbos_workflow(
                 serialize_failure(cancelled.cause)
             ) from None
         except (NondeterminismError, dbos_error.DBOSUnexpectedStepError) as nde:
-            # A replay diverged: stamp the nondeterminism marker so the engine can
-            # tell it from a faithful failure. Only convert while replaying — which
-            # the run recognizes from its own scratch id (ids.replay_scratch_mode).
+            # Mark nondeterminism only while replaying (per scratch id).
             dispatch_ctx = get_local_dbos_context()
             in_replay = (
                 dispatch_ctx is not None

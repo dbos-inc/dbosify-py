@@ -34,8 +34,7 @@ async def test_pure_client_queries_closed_workflow_cross_process() -> None:
     try:
         worker.wait_for_line("READY", timeout=60)
 
-        # This process is a *pure client*: it constructs no Worker, so it cannot
-        # run the rehydrate fork itself — only the subprocess worker can.
+        # Pure client: no Worker here, so only the subprocess can run the fork.
         client = await connect_client()
         try:
             handle = await client.start_workflow(
@@ -49,9 +48,7 @@ async def test_pure_client_queries_closed_workflow_cross_process() -> None:
 
             await retry_until_success_async(_is_completed)
 
-            # The closed-workflow query: the client forks the run, the subprocess
-            # worker dequeues the fork, replays it to its final state, and serves
-            # the query. No worker exists in this (querying) process.
+            # Closed-workflow query: forked here, served by the subprocess worker.
             assert (
                 await handle.query(
                     GreetingWf.greeting, rpc_timeout=timedelta(seconds=30)
@@ -59,8 +56,7 @@ async def test_pure_client_queries_closed_workflow_cross_process() -> None:
                 == "Goodbye, World!"
             )
 
-            # A second query works too: the deterministic scratch id from the
-            # first query was reclaimed/torn down, not left blocking this one.
+            # A second query also works: the first query's scratch was torn down.
             assert (
                 await handle.query(
                     GreetingWf.greeting, rpc_timeout=timedelta(seconds=30)
@@ -68,8 +64,7 @@ async def test_pure_client_queries_closed_workflow_cross_process() -> None:
                 == "Goodbye, World!"
             )
 
-            # The scratch rehydrate fork is gone; only the real run survives, and
-            # it is never surfaced to the visibility API.
+            # Scratch forks are gone and never surfaced; only the real run remains.
             survivors = [w async for w in client.list_workflows()]
             assert [w.id for w in survivors] == ["xproc-1"], [w.id for w in survivors]
         finally:

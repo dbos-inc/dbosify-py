@@ -43,8 +43,7 @@ def test_nondeterminism_error_is_temporal_error() -> None:
 
 
 def test_scratch_id_round_trips_mode() -> None:
-    # The mode is encoded in the id so any worker that runs the fork — including
-    # one in a different process than the forker — recognizes the replay.
+    # The mode is encoded in the id, so any worker that runs the fork recognizes it.
     for run_id in ("w", "w--r3", "w--r2_5"):
         verify = ids.replay_scratch_id(run_id, "verify")
         rehydrate = ids.replay_scratch_id(run_id, "rehydrate")
@@ -55,9 +54,7 @@ def test_scratch_id_round_trips_mode() -> None:
 
 
 def test_rehydrate_scratch_ids_are_unique_per_query() -> None:
-    # Each query passes its request id as the suffix, so concurrent queries of
-    # the same closed run get distinct scratch ids (and never contend) — but both
-    # are still recognized as rehydrate replays by their reserved separator.
+    # The request-id suffix makes concurrent queries' scratch ids distinct.
     a = ids.replay_scratch_id("w", "rehydrate", "req-aaaa")
     b = ids.replay_scratch_id("w", "rehydrate", "req-bbbb")
     assert a != b
@@ -66,8 +63,7 @@ def test_rehydrate_scratch_ids_are_unique_per_query() -> None:
 
 
 def test_real_run_ids_are_not_replay_scratch() -> None:
-    # A real run, child, activity, or chained run must never be mistaken for a
-    # scratch fork (which would hide it from visibility and skip its close logic).
+    # A real run/child/activity must never be mistaken for a scratch fork.
     for real in ("w", "w--r1", "w--r2_5", "w--a3", "my-order-123"):
         assert ids.replay_scratch_mode(real) is None
         assert not ids.is_replay_scratch(real)

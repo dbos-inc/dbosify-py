@@ -44,8 +44,7 @@ async def main() -> None:
         activities=[],
     ):
         print("READY", flush=True)
-        # Stay alive until the test tears us down; the worker keeps polling the
-        # task queue, so it dequeues and serves the client's rehydrate fork.
+        # Stay alive so the worker keeps polling and serves the client's rehydrate fork.
         await asyncio.Event().wait()
 
 

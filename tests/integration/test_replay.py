@@ -351,9 +351,7 @@ async def test_query_on_closed_workflow_rehydrates() -> None:
 
 
 async def test_concurrent_queries_on_closed_workflow() -> None:
-    # Each query rehydrates on its own uniquely-named scratch fork, so concurrent
-    # queries of the *same* closed run do not contend for one scratch id (which,
-    # under a fixed suffix, made one query spuriously fail). All must succeed.
+    # Each query gets its own scratch fork, so concurrent queries never contend.
     async with _worker(GreetingWf):
         client = await connect_client()
         try:

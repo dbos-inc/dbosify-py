@@ -907,9 +907,7 @@ class Interpreter(_Runtime):
         # info().namespace and on parent/child references.
         self._namespace = registry.worker_namespace or DEFAULT_NAMESPACE
         self._replay_horizon = 0
-        # None for a real run; "verify"/"rehydrate" when this run is a replay
-        # scratch fork — derived from our own workflow id (ids.replay_scratch_mode)
-        # in execute(), so it holds no matter which worker process runs the fork.
+        # None, or "verify"/"rehydrate" when this run is a replay scratch fork.
         self._replay_mode: Optional[str] = None
         # workflow.patched()/deprecate_patch() state (DESIGN §6.8): recorded
         # marker ids, the per-id decision memo, and markers queued for this turn.
@@ -982,9 +980,7 @@ class Interpreter(_Runtime):
         ctx = get_local_dbos_context()
         assert ctx is not None, "interpreter must run inside a DBOS workflow"
         self._workflow_id = ctx.workflow_id
-        # A replay scratch fork (verify/rehydrate) is recognized purely from its
-        # own id, so this is correct even when a *different* worker than the
-        # forker dequeues and runs it (DEVIATIONS replay).
+        # Recognized purely from our own id, so it holds in any worker process.
         self._replay_mode = ids.replay_scratch_mode(self._workflow_id)
 
         # The checkpoint horizon: highest recorded function_id; below it we replay.

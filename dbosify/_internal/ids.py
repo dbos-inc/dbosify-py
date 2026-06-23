@@ -17,12 +17,7 @@ RUN_SEPARATOR = "--r"
 # separator keeps an activity workflow id from colliding with any user/child id.
 ACTIVITY_SEPARATOR = "--a"
 
-# Replay scratch forks reconstruct a closed run read-only (DEVIATIONS replay).
-# Their DBOS id is the source run id plus a reserved separator, so whichever
-# worker dequeues the fork recognizes "I am a replay, and which kind" from its
-# *own* workflow id — no in-process guard has to cross from the forker to the
-# executing worker. ``--v`` verifies determinism (Replayer); ``--q`` serves a
-# query against a closed run (query-on-closed rehydrate).
+# Replay scratch fork ids: run id + reserved separator (--v verify, --q rehydrate).
 VERIFY_SEPARATOR = "--v"
 REHYDRATE_SEPARATOR = "--q"
 
