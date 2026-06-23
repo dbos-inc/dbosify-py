@@ -54,6 +54,17 @@ def test_scratch_id_round_trips_mode() -> None:
         assert ids.is_replay_scratch(verify) and ids.is_replay_scratch(rehydrate)
 
 
+def test_rehydrate_scratch_ids_are_unique_per_query() -> None:
+    # Each query passes its request id as the suffix, so concurrent queries of
+    # the same closed run get distinct scratch ids (and never contend) — but both
+    # are still recognized as rehydrate replays by their reserved separator.
+    a = ids.replay_scratch_id("w", "rehydrate", "req-aaaa")
+    b = ids.replay_scratch_id("w", "rehydrate", "req-bbbb")
+    assert a != b
+    assert ids.replay_scratch_mode(a) == ids.replay_scratch_mode(b) == "rehydrate"
+    assert ids.is_replay_scratch(a) and ids.is_replay_scratch(b)
+
+
 def test_real_run_ids_are_not_replay_scratch() -> None:
     # A real run, child, activity, or chained run must never be mistaken for a
     # scratch fork (which would hide it from visibility and skip its close logic).

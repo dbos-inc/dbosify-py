@@ -8,13 +8,14 @@ activities the workflow runs — standing in for a code change between the
 recorded run and the replay.
 """
 
+import asyncio
 from datetime import timedelta
 from typing import AsyncIterator, Dict, List
 
 import pytest
 
 from dbosify import activity, workflow
-from dbosify._internal import ids, registry
+from dbosify._internal import registry
 from dbosify.client import (
     WorkflowExecutionStatus,
     WorkflowFailureError,
@@ -349,34 +350,29 @@ async def test_query_on_closed_workflow_rehydrates() -> None:
             await client.close()
 
 
-async def test_rehydrate_reclaims_stale_scratch_fork() -> None:
-    # A crash can leave a rehydrate scratch behind. Because the scratch id is a
-    # fixed suffix, a later query would collide with it — so the rehydrate path
-    # reclaims any stale scratch (unconditional delete) before re-forking.
+async def test_concurrent_queries_on_closed_workflow() -> None:
+    # Each query rehydrates on its own uniquely-named scratch fork, so concurrent
+    # queries of the *same* closed run do not contend for one scratch id (which,
+    # under a fixed suffix, made one query spuriously fail). All must succeed.
     async with _worker(GreetingWf):
         client = await connect_client()
         try:
             handle = await client.start_workflow(
-                GreetingWf.run, "World", id="rp-stale", task_queue=TASK_QUEUE
+                GreetingWf.run, "World", id="rp-concurrent", task_queue=TASK_QUEUE
             )
             assert await handle.result() == "Goodbye, World!"
 
-            # Leave a stale scratch behind, as a crashed prior rehydrate would.
-            from dbos import SetWorkflowID
+            replies = await asyncio.gather(
+                *(
+                    handle.query(GreetingWf.greeting, rpc_timeout=timedelta(seconds=30))
+                    for _ in range(5)
+                )
+            )
+            assert replies == ["Goodbye, World!"] * 5
 
-            raw = client._dbos_client
-            steps = await raw.list_workflow_steps_async("rp-stale")
-            horizon = max((s["function_id"] for s in steps), default=0)
-            stale_id = ids.replay_scratch_id("rp-stale", "rehydrate")
-            with SetWorkflowID(stale_id):
-                await raw.fork_workflow_async("rp-stale", horizon + 1)
-
-            # The query reclaims the stale scratch and still answers correctly.
-            assert await handle.query(GreetingWf.greeting) == "Goodbye, World!"
-
-            # No scratch lingers afterward.
-            survivors = await raw.list_workflows_async(load_input=False)
-            assert [s.workflow_id for s in survivors] == ["rp-stale"], [
+            # Every per-query scratch fork was torn down; only the real run remains.
+            survivors = await client._dbos_client.list_workflows_async(load_input=False)
+            assert [s.workflow_id for s in survivors] == ["rp-concurrent"], [
                 s.workflow_id for s in survivors
             ]
         finally:

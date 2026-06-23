@@ -2154,18 +2154,21 @@ class WorkflowHandle:
     ) -> Optional[Any]:
         """Answer a query on a closed workflow by replaying it: fork the run one
         step past its last checkpoint (copying every recorded step) into a
-        deterministically-named scratch run, let it replay to its final state and
+        scratch run named for this query, let it replay to its final state and
         serve this one query against the reconstructed state, then discard it.
 
         The fork is dequeued and executed by whatever worker is registered for
         the type — which need not be this process — so a pure client with no
-        co-located worker can query a closed run."""
+        co-located worker can query a closed run. The scratch id is unique to this
+        query (``request_id``), so concurrent queries of the same closed run use
+        independent scratch forks and do not interfere."""
         client = self._client._dbos_client
         steps = await client.list_workflow_steps_async(target)
-        # The fork-one-past-horizon convention + guard registration are shared
-        # with the verification replayer (replay.start_replay_fork).
+        # The fork-one-past-horizon convention is shared with the verification
+        # replayer (replay.start_replay_fork); the request id makes this query's
+        # scratch unique so concurrent queriers never contend for one id.
         scratch_handle = await _replay.start_replay_fork(
-            client, target, steps, mode="rehydrate"
+            client, target, steps, mode="rehydrate", scratch_suffix=request_id
         )
         scratch_id = scratch_handle.get_workflow_id()
         reply_key = inbox.query_result_key(request_id)
