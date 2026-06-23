@@ -56,7 +56,7 @@ ID-conflict / id-reuse start policies are check-then-start from the client (but 
 
 ### durable-messages — Signals, cancels, and updates are durable messages, not RPCs
 
-Because there is no server to validate targets, sends to closed workflows are silent no-ops (not "already completed"), ops on nonexistent workflows raise a DB/`RuntimeError` (not `NOT_FOUND`), exhausted waits raise builtin `TimeoutError` (not `RPCError`), and signals/cancels are not request-deduplicated.
+Because there is no server to validate targets, sends to closed workflows are silent no-ops (not "already completed"), ops on nonexistent workflows raise a DB/`RuntimeError` (not `NOT_FOUND`), exhausted waits raise `TimeoutError` (not `RPCError`), and signals/cancels are not request-deduplicated.
 
 ### terminate-no-reason — Terminate stores no reason or details
 
@@ -82,7 +82,7 @@ Determinism violations surface as nondeterminism errors at replay rather than be
 
 ### uncapped-payloads — Payloads live in the system database, uncapped
 
-Payloads and history length are uncapped Postgres rows — Temporal's 2MB/4MB payload and ~50k-event limits are not enforced.
+Payloads and history length are uncapped Postgres rows. Temporal's 2MB/4MB payload and ~50k-event limits are not enforced.
 
 ### memo-search-attributes — Subset of visibility query language
 
@@ -96,19 +96,19 @@ Payloads convert through a temporalio-shaped `DataConverter` to readable JSON wi
 
 ### schedules — Schedules compile to a single cron; overlap and history are partial
 
-A `Schedule` compiles to one DBOS cron (non-dividing intervals approximated; calendar `year` / interval `offset` dropped), honors SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL but rejects BUFFER_ONE/BUFFER_ALL, makes `update` a delete-then-recreate, and tracks no schedule history.
+A `Schedule` compiles to a cron expression (non-dividing intervals approximated; calendar `year` / interval `offset` dropped).  BUFFER_ONE and BUFFER_ALL are not supported. Schedule history is not tracked.
 
 ### replay — Replay and queries-on-closed run over DBOS checkpoints
 
-`Replayer` / `fetch_history` are DB-bound (no offline JSON history), and queries on closed workflows are answered by replaying their checkpoints under the currently-registered code rather than from retained history, so they require a running worker for that workflow type and fail if its code has changed since the run.
+`Replayer` / `fetch_history` are DB-bound (no offline JSON history), and queries on closed workflows are answered by replaying their checkpoints under the currently-registered code rather than from retained history, so they require a running worker for that workflow type.
 
 ### dynamic-handlers — Dynamic handlers and activities are supported; dynamic workflows are not
 
-Dynamic signal/query/update handlers and dynamic activities are supported, but dynamic *workflows* (`@workflow.defn(dynamic=True)`) are not supported.
+Dynamic signal/query/update handlers and dynamic activities are supported, but dynamic workflows (`@workflow.defn(dynamic=True)`) are not supported.
 
 ### worker-versioning — Worker deployment versioning = DBOS versioning: PINNED is enforced, AUTO_UPGRADE is not
 
-A build ID is the DBOS `application_version`, so PINNED is enforced (a workflow recovers/dequeues only on its build ID) while AUTO_UPGRADE, ramping, and cluster routing are not supported.
+A build ID is the DBOS `application_version`, so PINNED is enforced (a workflow recovers/dequeues only on its build ID) but AUTO_UPGRADE, ramping, and cluster routing are not supported.
 
 ### current-details — Current details are in-memory, reconstructed on replay, not in describe()
 
@@ -116,7 +116,7 @@ A build ID is the DBOS `application_version`, so PINNED is enforced (a workflow 
 
 ### random-seed — Random seed is fixed per run; reseed callbacks never fire
 
-The per-run random seed never changes, so any `register_random_seed_callback` is not supported.
+The per-run random seed never changes, so `register_random_seed_callback` is not supported.
 
 ### activity-cancel-details — Activity cancellation details are not tracked
 
@@ -136,4 +136,4 @@ The following start parameters are not yet supported: `start_child_workflow.cron
 
 ### dynamic-handler-signature — Dynamic signal/query/update handlers require the new-style signature
 
-A `dynamic=True` handler must use `(self, name: str, args: Sequence[RawValue])`; the legacy `(self, name, *args)` form is rejected at registration.
+A `dynamic=True` handler must use `(self, name: str, args: Sequence[RawValue])`. The legacy `(self, name, *args)` form is rejected at registration.
