@@ -65,10 +65,9 @@ def replay_scratch_id(run_id: str, mode: str, suffix: str = "") -> str:
 
     The mode travels *in the id* so a worker in a different process than the
     forker recognizes the replay (DEVIATIONS replay, query-on-closed rehydrate).
-    ``suffix`` makes the id unique per operation: query-on-closed rehydrate
-    passes the per-query request id so concurrent queries of the same closed run
-    each get their own scratch (no contention), whereas verification replays use
-    a fixed id (no suffix), since the Replayer runs them one at a time."""
+    ``suffix`` is a unique token per operation (the request id for a query, a
+    fresh token for a verification), so concurrent replays/queries of the same run
+    each get their own scratch and never collide on one id."""
     sep = VERIFY_SEPARATOR if mode == "verify" else REHYDRATE_SEPARATOR
     return f"{run_id}{sep}{suffix}"
 
@@ -78,8 +77,8 @@ def replay_scratch_mode(dbos_id: str) -> Optional[str]:
     (``"verify"`` / ``"rehydrate"``); else None. The interpreter calls this on
     its own workflow id to decide whether it is replaying a closed run.
 
-    A substring test (not a suffix test): a rehydrate id carries a trailing
-    unique token after ``--q``. The reserved separators cannot appear in a real
+    A substring test (not a suffix test): a scratch id carries a trailing
+    unique token after ``--v`` / ``--q``. The reserved separators cannot appear in a real
     run/child/activity id, so the match is unambiguous."""
     if VERIFY_SEPARATOR in dbos_id:
         return "verify"

@@ -377,6 +377,27 @@ async def test_concurrent_queries_on_closed_workflow() -> None:
             await client.close()
 
 
+async def test_concurrent_verify_replays_of_same_history() -> None:
+    # Each verification fork has a unique scratch id, so replaying the same
+    # history concurrently runs on independent scratch forks without colliding.
+    async with _worker():
+        client = await connect_client()
+        try:
+            handle = await client.start_workflow(
+                ReplayWf.run, "hi", id="rp-cc-verify", task_queue=TASK_QUEUE
+            )
+            await handle.result()
+            history = await handle.fetch_history()
+
+            replayer = Replayer(workflows=[ReplayWf])
+            results = await asyncio.gather(
+                *(replayer.replay_workflow(history) for _ in range(4))
+            )
+            assert all(r.replay_failure is None for r in results)
+        finally:
+            await client.close()
+
+
 async def test_replay_canceled_workflow_replays_as_pass() -> None:
     async with _worker(TimerSignalWf):
         client = await connect_client()

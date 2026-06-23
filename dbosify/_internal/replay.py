@@ -39,15 +39,15 @@ deleted-after-verify but stops on a client signal or the
 ``REHYDRATE_SERVE_SECONDS`` deadline), and the client then discards it. The
 ``REHYDRATE_*`` constants below tune that serve/settle/poll timing.
 
-Query-on-closed rehydrate gives each query a *unique* scratch id (the suffix is
-the per-query request id), so concurrent queries of the same closed run run on
-independent scratch forks and never contend. Verification replays use a fixed id
-(no suffix) since the Replayer runs them one at a time; a fixed-id scratch left
-behind by a crash is reclaimed by re-forking the same id (``start_replay_fork``
-deletes any stale scratch first).
+Every scratch id carries a unique suffix (the per-query request id for a
+rehydrate, a fresh token for a verification), so concurrent replays or queries of
+the same run run on independent scratch forks and never collide on one id. A
+scratch left behind by a crash is simply orphaned (harmless: hidden from
+visibility, runs no real activity, self-completes at its serve deadline).
 """
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import (
@@ -118,39 +118,31 @@ async def start_replay_fork(
     steps: Sequence[Mapping[str, Any]],
     *,
     mode: str = "verify",
-    scratch_suffix: str = "",
+    scratch_suffix: str,
 ) -> Any:
     """Fork ``run_id`` one step past its last recorded checkpoint — copying
-    *every* recorded step — into a named scratch run. Returns the fork handle.
+    *every* recorded step — into a uniquely-named scratch run. Returns the fork
+    handle.
 
     The scratch id is ``ids.replay_scratch_id(run_id, mode, scratch_suffix)`` (a
     reserved ``--v`` / ``--q`` suffix), forced with ``SetWorkflowID``. Naming it
-    — rather than tracking it in this process's memory — is what lets a worker in
-    a *different* process recognize and correctly run the replay: it reads the
-    mode off its own id. The fork is created with no pinned application version
-    (NULL), so the current worker for the type (anywhere) dequeues and runs it,
-    verifying today's code rather than the recorded run's version.
+    — rather than tracking it in this process's memory — lets a worker in a
+    *different* process recognize and correctly run the replay from its own id.
+    The fork is created with no pinned application version (NULL), so the current
+    worker for the type (anywhere) dequeues and runs it, verifying today's code.
+
+    ``scratch_suffix`` is unique per operation (the request id for a query, a
+    fresh token for a verification), so concurrent replays/queries of the same run
+    never collide on one scratch id.
 
     Fork bound: the copy is ``function_id < start_step`` and ids are 1-based and
-    contiguous, so ``horizon + 1`` includes the final step. ``forker`` is
-    anything exposing ``fork_workflow_async`` + ``delete_workflow_async`` (the
-    ``DBOS`` runtime or a ``DBOSClient``).
-
-    ``scratch_suffix`` makes the id unique per operation: a unique id never
-    collides, so concurrent operations on the same run are independent. A
-    suffix-less (fixed) id may have a stale predecessor from a crashed prior
-    replay, so it is reclaimed first (best-effort delete).
+    contiguous, so ``horizon + 1`` includes the final step. ``forker`` is the
+    ``DBOS`` runtime or a ``DBOSClient`` (anything exposing ``fork_workflow_async``).
     """
     from dbos import SetWorkflowID
 
     horizon = max((s["function_id"] for s in steps), default=0)
     scratch_id = ids.replay_scratch_id(run_id, mode, scratch_suffix)
-    if not scratch_suffix:
-        try:
-            # delete_children=False: the scratch parents no real children.
-            await forker.delete_workflow_async(scratch_id, delete_children=False)
-        except Exception:  # noqa: BLE001 — no stale scratch to reclaim is the norm
-            pass
     with SetWorkflowID(scratch_id):
         return await forker.fork_workflow_async(run_id, horizon + 1)
 
@@ -186,7 +178,11 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
         )
 
     handle = await start_replay_fork(
-        DBOS, history.run_id, history.recorded_steps, mode="verify"
+        DBOS,
+        history.run_id,
+        history.recorded_steps,
+        mode="verify",
+        scratch_suffix=uuid.uuid4().hex,
     )
     scratch_id = handle.get_workflow_id()
     replay_failure: Optional[Exception] = None
