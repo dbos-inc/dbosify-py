@@ -89,8 +89,7 @@ class InfoWorkflow:
             schedule_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
-        # workflow.now()/start_time are tz-aware UTC (parity with temporalio); a
-        # fixed aware reference keeps this comparison deterministic on replay.
+        # Fixed aware ref keeps the tz-aware compare below deterministic on replay.
         aware_ref = datetime(2000, 1, 1, tzinfo=timezone.utc)
         return {
             "first_execution_run_id": info.first_execution_run_id,
@@ -105,8 +104,7 @@ class InfoWorkflow:
                 workflow.now().tzinfo is not None
                 and workflow.now().utcoffset() == timedelta(0)
             ),
-            # Comparing the workflow clock against a tz-aware datetime must not
-            # raise (the naive-local bug raised "can't compare offset-naive...").
+            # Comparing the clock to a tz-aware datetime must not raise.
             "now_after_aware_ref": workflow.now() > aware_ref,
             "has_parent": info.parent is not None,
             "task_queue": info.task_queue,

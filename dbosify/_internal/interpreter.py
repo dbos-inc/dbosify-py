@@ -2933,8 +2933,7 @@ class Interpreter(_Runtime):
             if self._meta.root is not None
             else None
         )
-        # Timezone-aware UTC (matches temporalio); the epoch source is checkpointed
-        # so the rendered datetime is replay-stable regardless of the worker's local tz.
+        # Tz-aware UTC (temporalio parity), replay-stable via the checkpointed epoch.
         start_time = datetime.fromtimestamp(self._start_time, timezone.utc)
         return Info(
             attempt=self._meta.attempt,

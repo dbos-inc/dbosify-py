@@ -1219,8 +1219,7 @@ def upsert_search_attributes(
 def now() -> datetime:
     """Current workflow time: deterministic, advances only on events.
 
-    Returns a timezone-aware UTC datetime, matching temporalio (whose
-    ``workflow.now()`` documents UTC as the set time zone)."""
+    Tz-aware UTC, matching temporalio."""
     return datetime.fromtimestamp(time(), timezone.utc)
 
 
