@@ -88,7 +88,7 @@ Additionally, memos and search attributes are untyped.
 
 ### json-conversion — Data conversion: JSON transport, no protobuf payloads
 
-Payloads convert through a temporalio-shaped `DataConverter` to readable JSON with no protobuf encoders (a raw protobuf payload fails loudly), and a `PayloadCodec` is skipped on failure `details` / `last_heartbeat_details` / cron `last_completion`.
+Payloads are stored in JSON with no protobuf encoders.
 
 ### schedules — Schedules compile to a single cron
 
