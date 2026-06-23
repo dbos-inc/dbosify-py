@@ -17,6 +17,10 @@ RUN_SEPARATOR = "--r"
 # separator keeps an activity workflow id from colliding with any user/child id.
 ACTIVITY_SEPARATOR = "--a"
 
+# Replay scratch fork ids: run id + reserved separator (--v verify, --q rehydrate).
+VERIFY_SEPARATOR = "--v"
+REHYDRATE_SEPARATOR = "--q"
+
 # Chain resolution probes (see resolve_latest_run): chains up to this many
 # runs resolve in a single batched primary-key lookup.
 DENSE_PROBE_LIMIT = 16
@@ -29,7 +33,12 @@ REFINE_BATCH = 16
 def validate_workflow_id(workflow_id: str) -> None:
     if not workflow_id:
         raise ValueError("Workflow id must be non-empty")
-    for separator in (RUN_SEPARATOR, ACTIVITY_SEPARATOR):
+    for separator in (
+        RUN_SEPARATOR,
+        ACTIVITY_SEPARATOR,
+        VERIFY_SEPARATOR,
+        REHYDRATE_SEPARATOR,
+    ):
         if separator in workflow_id:
             raise ValueError(
                 f"Workflow id {workflow_id!r} may not contain the reserved "
@@ -49,6 +58,39 @@ def activity_dbos_id(run_id: str, seq: int) -> str:
     Deterministic in ``seq``, and in the reserved ``--a`` namespace so it cannot
     collide with any user/child/run id."""
     return f"{run_id}{ACTIVITY_SEPARATOR}{seq}"
+
+
+def replay_scratch_id(run_id: str, mode: str, suffix: str = "") -> str:
+    """The DBOS id for a replay scratch fork of ``run_id``.
+
+    The mode travels *in the id* so a worker in a different process than the
+    forker recognizes the replay (DEVIATIONS replay, query-on-closed rehydrate).
+    ``suffix`` is a unique token per operation (the request id for a query, a
+    fresh token for a verification), so concurrent replays/queries of the same run
+    each get their own scratch and never collide on one id."""
+    sep = VERIFY_SEPARATOR if mode == "verify" else REHYDRATE_SEPARATOR
+    return f"{run_id}{sep}{suffix}"
+
+
+def replay_scratch_mode(dbos_id: str) -> Optional[str]:
+    """If ``dbos_id`` names a replay scratch fork, its mode
+    (``"verify"`` / ``"rehydrate"``); else None. The interpreter calls this on
+    its own workflow id to decide whether it is replaying a closed run.
+
+    A substring test (not a suffix test): a scratch id carries a trailing
+    unique token after ``--v`` / ``--q``. The reserved separators cannot appear in a real
+    run/child/activity id, so the match is unambiguous."""
+    if VERIFY_SEPARATOR in dbos_id:
+        return "verify"
+    if REHYDRATE_SEPARATOR in dbos_id:
+        return "rehydrate"
+    return None
+
+
+def is_replay_scratch(dbos_id: str) -> bool:
+    """Whether ``dbos_id`` is a replay scratch fork — hidden from visibility,
+    since it is internal plumbing, not a user run."""
+    return replay_scratch_mode(dbos_id) is not None
 
 
 def parse_run(dbos_id: str) -> "tuple[str, int]":

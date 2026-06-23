@@ -96,9 +96,9 @@ Payloads convert through a temporalio-shaped `DataConverter` to readable JSON wi
 
 A `Schedule` compiles to one DBOS cron (non-dividing intervals approximated; calendar `year` / interval `offset` dropped), honors SKIP/CANCEL_OTHER/TERMINATE_OTHER/ALLOW_ALL but rejects BUFFER_ONE/BUFFER_ALL, makes `update` a delete-then-recreate, and tracks no schedule history.
 
-### replay — Replay and queries-on-closed run over DBOS checkpoints, in-process
+### replay — Replay and queries-on-closed run over DBOS checkpoints
 
-`Replayer` / `fetch_history` are DB-bound (no offline JSON history), and queries on closed workflows use rehydrate-by-replay, which needs a worker for that type in the querying process.
+`Replayer` / `fetch_history` are DB-bound (no offline JSON history), and queries on closed workflows are answered by replaying their checkpoints under the currently-registered code rather than from retained history, so they require a running worker for that workflow type and fail if its code has changed since the run.
 
 ### dynamic-handlers — Dynamic handlers and activities are supported; dynamic workflows are not
 

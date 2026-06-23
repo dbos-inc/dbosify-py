@@ -8,6 +8,7 @@ activities the workflow runs — standing in for a code change between the
 recorded run and the replay.
 """
 
+import asyncio
 from datetime import timedelta
 from typing import AsyncIterator, Dict, List
 
@@ -345,6 +346,54 @@ async def test_query_on_closed_workflow_rehydrates() -> None:
             assert all(s.workflow_id == "rp-query" for s in survivors), [
                 s.workflow_id for s in survivors
             ]
+        finally:
+            await client.close()
+
+
+async def test_concurrent_queries_on_closed_workflow() -> None:
+    # Each query gets its own scratch fork, so concurrent queries never contend.
+    async with _worker(GreetingWf):
+        client = await connect_client()
+        try:
+            handle = await client.start_workflow(
+                GreetingWf.run, "World", id="rp-concurrent", task_queue=TASK_QUEUE
+            )
+            assert await handle.result() == "Goodbye, World!"
+
+            replies = await asyncio.gather(
+                *(
+                    handle.query(GreetingWf.greeting, rpc_timeout=timedelta(seconds=30))
+                    for _ in range(5)
+                )
+            )
+            assert replies == ["Goodbye, World!"] * 5
+
+            # Every per-query scratch fork was torn down; only the real run remains.
+            survivors = await client._dbos_client.list_workflows_async(load_input=False)
+            assert [s.workflow_id for s in survivors] == ["rp-concurrent"], [
+                s.workflow_id for s in survivors
+            ]
+        finally:
+            await client.close()
+
+
+async def test_concurrent_verify_replays_of_same_history() -> None:
+    # Each verification fork has a unique scratch id, so replaying the same
+    # history concurrently runs on independent scratch forks without colliding.
+    async with _worker():
+        client = await connect_client()
+        try:
+            handle = await client.start_workflow(
+                ReplayWf.run, "hi", id="rp-cc-verify", task_queue=TASK_QUEUE
+            )
+            await handle.result()
+            history = await handle.fetch_history()
+
+            replayer = Replayer(workflows=[ReplayWf])
+            results = await asyncio.gather(
+                *(replayer.replay_workflow(history) for _ in range(4))
+            )
+            assert all(r.replay_failure is None for r in results)
         finally:
             await client.close()
 

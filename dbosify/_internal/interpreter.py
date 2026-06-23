@@ -907,6 +907,8 @@ class Interpreter(_Runtime):
         # info().namespace and on parent/child references.
         self._namespace = registry.worker_namespace or DEFAULT_NAMESPACE
         self._replay_horizon = 0
+        # None, or "verify"/"rehydrate" when this run is a replay scratch fork.
+        self._replay_mode: Optional[str] = None
         # workflow.patched()/deprecate_patch() state (DESIGN §6.8): recorded
         # marker ids, the per-id decision memo, and markers queued for this turn.
         self._patches_recorded: Set[str] = set()
@@ -978,6 +980,8 @@ class Interpreter(_Runtime):
         ctx = get_local_dbos_context()
         assert ctx is not None, "interpreter must run inside a DBOS workflow"
         self._workflow_id = ctx.workflow_id
+        # Recognized purely from our own id, so it holds in any worker process.
+        self._replay_mode = ids.replay_scratch_mode(self._workflow_id)
 
         # The checkpoint horizon: highest recorded function_id; below it we replay.
         # Read on an executor thread (no DBOS context) so it stays live, uncheckpointed.
@@ -1043,7 +1047,7 @@ class Interpreter(_Runtime):
                 if self._outcome is not None:
                     # A rehydrate (query-on-closed) scratch run keeps serving queries
                     # until the client is done or the deadline elapses; others close.
-                    if self._rehydrate_guard() is None or self._rehydrate_stop:
+                    if self._replay_mode != "rehydrate" or self._rehydrate_stop:
                         break
                     if self._rehydrate_deadline_passed():
                         break
@@ -1059,7 +1063,7 @@ class Interpreter(_Runtime):
         finally:
             # A replay scratch run (verify/rehydrate) reconstructs a closed workflow
             # read-only: skip the terminal-close side effects below, only teardown runs.
-            is_replay = _replay.current_guard_for(self._workflow_id) is not None
+            is_replay = self._replay_mode is not None
             if (
                 not is_replay
                 and self._outcome is not None
@@ -1119,11 +1123,9 @@ class Interpreter(_Runtime):
         if kind == "ok":
             # During a verification replay, completing with fewer steps than
             # recorded means the code finished early — a divergence DBOS can't see.
-            guard = _replay.current_guard_for(self._workflow_id)
             if (
-                guard is not None
-                and guard.mode == "verify"
-                and self.runtime_history_length() < guard.horizon
+                self._replay_mode == "verify"
+                and self.runtime_history_length() < self._replay_horizon
             ):
                 raise NondeterminismError(
                     f"workflow type {self._defn.name!r} completed before "
@@ -1281,7 +1283,7 @@ class Interpreter(_Runtime):
         # terminal: surface it as a workflow failure, not a (retried, masked) task.
         if isinstance(
             err, (dbos_error.DBOSUnexpectedStepError, NondeterminismError)
-        ) and (_replay.current_guard_for(self._workflow_id) is not None):
+        ) and (self._replay_mode is not None):
             self._set_outcome(("failure", err))
             return
         if self._cancel_requested and exceptions.is_cancelled_exception(err):
@@ -1508,12 +1510,6 @@ class Interpreter(_Runtime):
             return
         exec_state.future.cancel()
 
-    def _rehydrate_guard(self) -> Optional["_replay._ReplayGuard"]:
-        """The active guard for this run iff it is a rehydrate (query-on-closed)
-        replay — else None."""
-        guard = _replay.current_guard_for(self._workflow_id)
-        return guard if guard is not None and guard.mode == "rehydrate" else None
-
     def _rehydrate_deadline_passed(self) -> bool:
         """Whether the rehydrate serve window has elapsed. A fallback that lets
         the scratch run complete if the client never sends a stop signal (e.g.
@@ -1532,13 +1528,12 @@ class Interpreter(_Runtime):
         contiguous, so the workflow context's ``function_id`` equals the count
         of steps claimed so far; if it has already reached the horizon, the next
         claim would exceed it. A faithful rehydrate never reaches this (it only
-        replays recorded steps, then serves queries), so the guard is mode-
+        replays recorded steps, then serves queries), so this is mode-
         agnostic."""
-        guard = _replay.current_guard_for(self._workflow_id)
-        if guard is None:
+        if self._replay_mode is None:
             return
         ctx = get_local_dbos_context()
-        if ctx is not None and ctx.function_id >= guard.horizon:
+        if ctx is not None and ctx.function_id >= self._replay_horizon:
             raise NondeterminismError(
                 f"workflow type {self._defn.name!r} produced new commands "
                 "beyond its recorded history"
@@ -1985,7 +1980,7 @@ class Interpreter(_Runtime):
     def _ensure_inbox_waiter(self) -> None:
         if not any(w.kind == "inbox" for w in self._waiters):
             recv_timeout = inbox.RECV_TIMEOUT_SECONDS
-            if self._rehydrate_guard() is not None:
+            if self._replay_mode == "rehydrate":
                 # Serving a rehydrate query: poll often so the serve deadline stays
                 # effective with no stop signal, not pinned for a full RECV_TIMEOUT.
                 recv_timeout = min(recv_timeout, _replay.REHYDRATE_POLL_SECONDS)

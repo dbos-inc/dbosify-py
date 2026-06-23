@@ -1,13 +1,13 @@
 """Unit tests for the replay surface that need no Postgres: WorkflowHistory
-math, the NondeterminismError type, the id-scoped replay guard, and Replayer
-constructor validation."""
+math, the NondeterminismError type, the scratch-id naming scheme that lets a
+replay be recognized cross-process, and Replayer constructor validation."""
 
 from typing import Any, Dict, List
 
 import pytest
 
 from dbosify import workflow
-from dbosify._internal import replay
+from dbosify._internal import ids, replay
 from dbosify.client import WorkflowHistory
 from dbosify.exceptions import TemporalError
 from dbosify.worker import (
@@ -42,15 +42,37 @@ def test_nondeterminism_error_is_temporal_error() -> None:
     assert str(err) == "boom"
 
 
-def test_guard_is_scoped_to_its_scratch_id() -> None:
-    guard = replay._ReplayGuard(scratch_id="scratch-A", horizon=3)
-    replay.register_guard(guard)
-    try:
-        assert replay.current_guard_for("scratch-A") is guard
-        assert replay.current_guard_for("some-other-run") is None
-    finally:
-        replay.unregister_guard("scratch-A")
-    assert replay.current_guard_for("scratch-A") is None
+def test_scratch_id_round_trips_mode() -> None:
+    # The mode is encoded in the id, so any worker that runs the fork recognizes it.
+    for run_id in ("w", "w--r3", "w--r2_5"):
+        verify = ids.replay_scratch_id(run_id, "verify")
+        rehydrate = ids.replay_scratch_id(run_id, "rehydrate")
+        assert verify != rehydrate
+        assert ids.replay_scratch_mode(verify) == "verify"
+        assert ids.replay_scratch_mode(rehydrate) == "rehydrate"
+        assert ids.is_replay_scratch(verify) and ids.is_replay_scratch(rehydrate)
+
+
+def test_rehydrate_scratch_ids_are_unique_per_query() -> None:
+    # The request-id suffix makes concurrent queries' scratch ids distinct.
+    a = ids.replay_scratch_id("w", "rehydrate", "req-aaaa")
+    b = ids.replay_scratch_id("w", "rehydrate", "req-bbbb")
+    assert a != b
+    assert ids.replay_scratch_mode(a) == ids.replay_scratch_mode(b) == "rehydrate"
+    assert ids.is_replay_scratch(a) and ids.is_replay_scratch(b)
+
+
+def test_real_run_ids_are_not_replay_scratch() -> None:
+    # A real run/child/activity must never be mistaken for a scratch fork.
+    for real in ("w", "w--r1", "w--r2_5", "w--a3", "my-order-123"):
+        assert ids.replay_scratch_mode(real) is None
+        assert not ids.is_replay_scratch(real)
+
+
+def test_scratch_separators_are_reserved_in_user_ids() -> None:
+    for bad in ("order--v", "order--q", "a--qb"):
+        with pytest.raises(ValueError, match="reserved separator"):
+            ids.validate_workflow_id(bad)
 
 
 def test_replayer_requires_at_least_one_workflow() -> None:
