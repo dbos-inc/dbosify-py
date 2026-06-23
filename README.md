@@ -1,13 +1,16 @@
 # DBOSify
 
-A drop-in replacement for the [Temporal Python SDK](https://github.com/temporalio/sdk-python) backed by a Postgres database (through [DBOS Transact](https://github.com/dbos-inc/dbos-transact-py)) instead of a Temporal server.
-
-To use this library, import `dbosify` instead of `temporalio` and connect your workers and clients to a Postgres database instead of a Temporal server.
-The library uses Postgres to orchestrate your durable workflows and messaging, providing the same reliability guarantees with no infrastructure requirements.
-All you need is Postgres.
+DBOSify is a drop-in replacement for [Temporal Python](https://github.com/temporalio/sdk-python) that uses Postgres (through [DBOS Transact](https://github.com/dbos-inc/dbos-transact-py)) instead of a Temporal server.
+This lets you run durable workflows, activities, signals, updates, retries, and recovery without needing any infrastructure except Postgres.
 
 <p align="center">
-  <img src="docs/architecture.png" alt="DBOSify architecture: a DBOSify Client and DBOSify Workers coordinate through Postgres, which handles workflow orchestration" width="720">
+  <img src="docs/img/architecture.png" alt="DBOSify architecture: a DBOSify Client and DBOSify Workers coordinate through Postgres, which handles workflow orchestration" width="720">
+</p>
+
+To use this library, import `dbosify` instead of `temporalio` and connect your workers and clients to a Postgres database:
+
+<p align="center">
+  <img src="docs/img/dbosify.gif" alt="DBOSify is a drop-in replacement for Temporal Python" width="720">
 </p>
 
 ## Usage
@@ -23,13 +26,15 @@ Further documentation [here](https://docs.dbos.dev/explanations/migrating-from-t
 
 ```python
 import asyncio
+import os
 from datetime import timedelta
 
 from dbosify import activity, workflow
 from dbosify.client import Client
 from dbosify.worker import Worker
 
-DB_URL = "postgresql://postgres:dbos@localhost:5432/dbosify"
+# Set this to a connection string to your Postgres database
+DB_URL = os.environ.get("DBOS_SYSTEM_DATABASE_URL")
 
 
 @activity.defn
@@ -88,7 +93,7 @@ This repository incorporates following testing strategies:
 
 ## What This Is Not
 
-- **Not a Temporal server replacement.** There is no gRPC wire compatibility. Temporal SDKs in other languages cannot connect. This replaces the Temporal server and Python SDK altogether for Python-only applications.
+- **No wire protocol compatibility.** There is no gRPC wire compatibility. Temporal SDKs in other languages cannot connect. This replaces the Temporal server and Python SDK altogether for Python-only applications.
 - **No Temporal Web UI, `temporal` CLI, or tctl.** You operate workflows with DBOS's workflow-management APIs and DBOS Conductor instead.
 
 See [this documentation](./docs/ARCHITECTURE.md) for information on architectural differences and feature compatibility.
