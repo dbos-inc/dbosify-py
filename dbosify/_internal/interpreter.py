@@ -1,4 +1,4 @@
-"""The deterministic interpreter (DESIGN.md §4) — the load-bearing component.
+"""The deterministic interpreter — the load-bearing component.
 
 A Temporal workflow is a class: a primary ``run()`` coroutine plus
 signal/update/query handlers, multiplexed on a *deterministic* event loop
@@ -113,7 +113,7 @@ class WorkflowTaskFailure(Exception):
     """Internal: a non-failure exception escaped workflow code. In Temporal
     this fails the *workflow task*, not the workflow: the dispatcher logs,
     backs off, and re-runs the interpreter from checkpoints while the
-    workflow stays RUNNING (DESIGN.md §4.2).
+    workflow stays RUNNING.
     """
 
     def __init__(self, cause: BaseException) -> None:
@@ -133,7 +133,7 @@ class WorkflowContinuedAsNew(Exception):
 
 class WorkflowCancelled(Exception):
     """Internal: the workflow ended via cooperative cancellation. The
-    dispatcher converts this into the cancelled marker (DESIGN §6.5)."""
+    dispatcher converts this into the cancelled marker."""
 
     def __init__(self, cause: BaseException) -> None:
         super().__init__(repr(cause))
@@ -312,7 +312,7 @@ def _child_id_taken(child_id: str) -> Any:
 
 
 def _await_activity_result(activity_id: str) -> Any:
-    """The queued-activity result waiter (the cross-queue path, §6.1.2): our
+    """The queued-activity result waiter (the cross-queue path): our
     own step wrapping the non-recording wait on the ``__temporal_activity``
     workflow, returning its envelope. Same rationale as ``_await_child_result``
     — DBOS's ``get_result`` claims its function_id at completion (a
@@ -603,7 +603,7 @@ class _Waiter:
 
 @dataclass
 class _ActivityExec:
-    """Per-activity retry state machine (DESIGN.md §6.1.2): each attempt is
+    """Per-activity retry state machine: each attempt is
     its own DBOS step, each backoff its own durable sleep — both launched
     only from checkpointed event-delivery points so recovery resumes at the
     right attempt.
@@ -632,7 +632,7 @@ class _ActivityExec:
     # registered return annotation.
     result_type: Optional[type] = None
     # execute_activity(task_queue=...): when set and different from the workflow's
-    # own queue, the activity runs on another worker via the queued path (§6.1.2).
+    # own queue, the activity runs on another worker via the queued path.
     task_queue: Optional[str] = None
     # The ``__temporal_activity`` workflow id once dispatched on the queued path
     # (None on the local path); cancellation natively cancels this workflow.
@@ -909,7 +909,7 @@ class Interpreter(_Runtime):
         self._replay_horizon = 0
         # None, or "verify"/"rehydrate" when this run is a replay scratch fork.
         self._replay_mode: Optional[str] = None
-        # workflow.patched()/deprecate_patch() state (DESIGN §6.8): recorded
+        # workflow.patched()/deprecate_patch() state: recorded
         # marker ids, the per-id decision memo, and markers queued for this turn.
         self._patches_recorded: Set[str] = set()
         self._patches_memoized: Dict[str, bool] = {}
@@ -928,7 +928,7 @@ class Interpreter(_Runtime):
         self._memo: Dict[str, Any] = {}
         self._typed_sa: TypedSearchAttributes = TypedSearchAttributes.empty
         # Free-form UI/CLI details set via workflow.set_current_details(): pure
-        # in-memory state, reconstructed deterministically on recovery (DEVIATIONS current-details).
+        # in-memory state, reconstructed deterministically on recovery (ARCHITECTURE current-details).
         self._current_details: str = ""
         self._random = Random(0)
         # The deterministic random seed (checkpointed once at run start), exposed
@@ -991,7 +991,7 @@ class Interpreter(_Runtime):
         self._replay_horizon = max((step["function_id"] for step in steps), default=0)
 
         # Rebuild the set of recorded patch ids by id (set membership), not by
-        # position, so patched() is stable across checkpoint shifts (DESIGN §6.8).
+        # position, so patched() is stable across checkpoint shifts.
         self._patches_recorded = {
             step["output"]
             for step in steps
@@ -1583,7 +1583,7 @@ class Interpreter(_Runtime):
                     # Local / same-queue path: run as an in-process step.
                     self._launch_attempt(exec_state)
                 else:
-                    # Cross-queue path (§6.1.2): enqueue on another worker.
+                    # Cross-queue path: enqueue on another worker.
                     await self._launch_queued_activity(exec_state)
             elif kind == "child":
                 self._check_replay_horizon()
@@ -1763,7 +1763,7 @@ class Interpreter(_Runtime):
         (which records nothing — replays like a crash); ABANDON detaches it; WAIT
         is handled in ``_request_activity_cancel`` (kept open until confirmed).
 
-        Activities (queued path, §6.1.2): the activity runs on another worker, so
+        Activities (queued path): the activity runs on another worker, so
         cancellation is delivered cross-process by ``_signal_queued_activity_cancel``
         (a cancel event the running attempt polls, plus a marker that wakes an
         async-parked activity). ABANDON leaves it running. WAIT keeps the exec open until
@@ -1887,7 +1887,7 @@ class Interpreter(_Runtime):
         return envelope
 
     async def _launch_queued_activity(self, exec_state: _ActivityExec) -> None:
-        """Cross-queue / distributed activity dispatch (§6.1.2): enqueue the
+        """Cross-queue / distributed activity dispatch: enqueue the
         ``__temporal_activity`` workflow on the target DBOS queue and await its
         result envelope, mirroring the child-workflow enqueue (``_start_child``).
 
@@ -2182,7 +2182,7 @@ class Interpreter(_Runtime):
         child.result_future.set_exception(error)
 
     async def _sweep_children_on_close(self) -> None:
-        """ParentClosePolicy (§6.5): when the parent reaches a terminal
+        """ParentClosePolicy: when the parent reaches a terminal
         outcome, deal with still-running children. TERMINATE (the default)
         native-cancels them — recursively, applying *their* recorded
         policies, since a terminated child runs no code of its own;
@@ -2440,7 +2440,7 @@ class Interpreter(_Runtime):
             )
 
     def _apply_cancel(self, envelope: inbox.Envelope) -> None:
-        """Cooperative cancellation (§6.5): raise CancelledError into the
+        """Cooperative cancellation: raise CancelledError into the
         primary task at the next event boundary. Cleanup code runs — and may
         still execute activities, because the outer loop keeps servicing
         events until the unwind produces an outcome.
@@ -2923,8 +2923,8 @@ class Interpreter(_Runtime):
             if self._parent_run_id is not None
             else None
         )
-        # Root of this run's tree, threaded in via the child-start meta-envelope
-        # (§6.6); None for a top-level workflow (itself the root).
+        # Root of this run's tree, threaded in via the child-start meta-envelope;
+        # None for a top-level workflow (itself the root).
         root = (
             RootInfo(
                 run_id=self._meta.root["run_id"],
@@ -3029,7 +3029,7 @@ class Interpreter(_Runtime):
         self, callback: Callable[[int], None]
     ) -> None:
         # Accepted for parity but intentionally a no-op: our seed is fixed per
-        # run, so the callback could never fire (DEVIATIONS random-seed).
+        # run, so the callback could never fire (ARCHITECTURE random-seed).
         return None
 
     def runtime_instance(self) -> Any:
@@ -3115,7 +3115,7 @@ class Interpreter(_Runtime):
 
     async def _resolve_current_run(self, workflow_id: str) -> str:
         """Resolve a Temporal workflow id to its current run's DBOS id
-        (§6.4 run chains) via exact-id probes (ids.resolve_latest_run; no
+        (run chains) via exact-id probes (ids.resolve_latest_run; no
         prefix scan). Each batched lookup is a checkpointed management call,
         and the probe sequence is driven by the recorded results, so the
         resolution replays deterministically.
@@ -3144,7 +3144,7 @@ class Interpreter(_Runtime):
         return self._read_only
 
     def _patch(self, id: str) -> bool:
-        """Shared patched()/deprecate_patch() logic (DESIGN §6.8).
+        """Shared patched()/deprecate_patch() logic.
 
         Returns whether the *newer* code path should run, mirroring temporalio:
         true on first (non-replaying) execution or when this patch's marker is
@@ -3188,7 +3188,7 @@ class Interpreter(_Runtime):
         self,
     ) -> Optional[WorkerDeploymentVersion]:
         # Deployment name is a process-global set by the Worker; build_id is read
-        # live from the worker's DBOS application_version (DEVIATIONS worker-versioning).
+        # live from the worker's DBOS application_version (ARCHITECTURE worker-versioning).
         from . import registry
 
         name = registry.worker_deployment_name

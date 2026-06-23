@@ -1,4 +1,4 @@
-"""Accepted-parameter audit for ``Client`` (DESIGN §9), mirroring the Worker
+"""Accepted-parameter audit for ``Client``, mirroring the Worker
 audit. Every parameter of ``temporalio.client.Client.connect`` / ``__init__`` is
 classified — honored, subsumed by the ``DBOSClient`` we wrap (connection-surface), or a
 fundamental deviation. Unlike the Worker, our ``Client`` has no ``**kwargs``

@@ -1,4 +1,4 @@
-"""In-process interpreter tests: happy paths plus the §4.3 cases that don't
+"""In-process interpreter tests: happy paths plus the cases that don't
 need a SIGKILL (3: gather + retry exhaustion; 4: update validator,
 accepted half; 6: non-failure exception keeps the workflow running until the
 implementation is swapped). The SIGKILL-recovery suite lives in
@@ -322,7 +322,7 @@ def test_updates_queries_and_validator() -> None:
 
 @pytest.mark.usefixtures("dbosify")
 def test_gather_with_retry_exhaustion() -> None:
-    """§4.3 test 3: gather of three activities; one fails through its retry
+    """Test 3: gather of three activities; one fails through its retry
     policy and surfaces as ActivityError(cause=ApplicationError)."""
     attempt_counts.clear()
     dispatcher.register_worker(
@@ -343,7 +343,7 @@ def test_gather_with_retry_exhaustion() -> None:
 def test_buggy_workflow_stays_running_until_fixed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """§4.3 test 6: a non-failure exception fails the workflow task, not the
+    """Test 6: a non-failure exception fails the workflow task, not the
     workflow; swapping in a fixed implementation lets it complete."""
     monkeypatch.setenv(dispatcher.TASK_RETRY_INITIAL_ENV, "0.2")
 

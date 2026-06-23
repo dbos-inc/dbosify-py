@@ -1,7 +1,7 @@
 """Serialized envelope formats stored in DBOS checkpoints.
 
 The failure envelope is the stable, bidirectional serialization of the
-Temporal exception tree (DESIGN.md §6.3): exception -> plain dict -> equal
+Temporal exception tree: exception -> plain dict -> equal
 exception. It is used for activity results, workflow results, and
 child-workflow errors, so reconstruction is exact across processes — pickle
 of exception objects loses ``__cause__`` chains, envelopes don't.
@@ -58,7 +58,7 @@ class RunMeta:
     # ExecuteWorkflowInput.headers and carried across cron/retry hops.
     headers: Optional[Dict[str, Any]] = None
     # The root workflow of this run's tree ({"workflow_id", "run_id"}); None for a
-    # top-level workflow (workflow.info().root, §6.6). Carries across chain hops.
+    # top-level workflow (workflow.info().root). Carries across chain hops.
     root: Optional[Dict[str, str]] = None
 
     def is_empty(self) -> bool:
@@ -205,7 +205,7 @@ class SerializedWorkflowFailure(Exception):
 
 
 class SerializedWorkflowCancellation(SerializedWorkflowFailure):
-    """The ``_TemporalCancelledMarker`` of DESIGN §6.2: a workflow that ended
+    """The ``_TemporalCancelledMarker``: a workflow that ended
     via *cooperative cancellation* records this subclass, so status mapping
     can distinguish CANCELED (this, recorded by the dispatcher) from FAILED
     (plain SerializedWorkflowFailure) and TERMINATED (native DBOS cancel,

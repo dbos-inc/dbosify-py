@@ -1,4 +1,4 @@
-"""The data-conversion boundary (DESIGN §6.9).
+"""The data-conversion boundary.
 
 User values are converted to/from small tagged payload dicts at the Temporal
 boundaries — where function signatures supply the type hints that rebuild the
@@ -29,7 +29,7 @@ from typing import (
 
 from ..converter import DataConverter, Payload
 
-# Checkpoints embed a user value as a small dict (DESIGN §6.9 envelope), not a raw
+# Checkpoints embed a user value as a small dict (envelope), not a raw
 # Payload: codec-less json/plain inlines its JSON; binary/codec bytes use base64.
 _active_converter: DataConverter = DataConverter.default
 

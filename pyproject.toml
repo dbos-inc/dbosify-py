@@ -1,14 +1,13 @@
 [project]
 name = "dbosify"
 dynamic = ["version"]
-description = "A drop-in replacement for the Temporal Python SDK, backed by DBOS Transact (Postgres) instead of a Temporal server"
+description = "A drop-in replacement for the Temporal Python SDK, backed by DBOS Transact and Postgres instead of a Temporal server"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "DBOS, Inc." }]
 license = { text = "MIT" }
 keywords = ["temporal", "dbos", "workflow", "durable-execution"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -35,7 +34,7 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "pytest-timeout>=2.4.0",
     "sqlalchemy>=2.0",
-    # Dev-only, for signature-parity tests. Never a runtime dependency (see DESIGN.md §2).
+    # Dev-only, for signature-parity tests. Never a runtime dependency.
     "temporalio>=1.28,<2",
 ]
 
@@ -60,9 +59,7 @@ atomic = true
 strict = true
 files = ["dbosify", "tests", "publish"]
 
-# dateutil (the pre-3.11 ISO datetime fallback) ships no type stubs; the import
-# is also unreachable on 3.11+, so an inline ignore would be flagged unused
-# there. Silence it at the module level to stay version-robust.
+# dateutil (the pre-3.11 ISO datetime fallback) ships no type stubs
 [[tool.mypy.overrides]]
 module = ["dateutil.*"]
 ignore_missing_imports = true

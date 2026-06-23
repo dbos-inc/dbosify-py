@@ -1,6 +1,6 @@
 """WorkflowEnvironment.start_local: an isolated throwaway database per
 environment on the externally provided Postgres server, torn down on
-shutdown (DESIGN §6.10).
+shutdown.
 """
 
 from datetime import timedelta

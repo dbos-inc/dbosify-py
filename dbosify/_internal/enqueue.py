@@ -1,4 +1,4 @@
-"""Shared in-workflow run enqueue (§6.4 chain hops).
+"""Shared in-workflow run enqueue.
 
 Every durable chain hop starts one run under a deterministic id with the same
 DBOS context plumbing: continue-as-new (``interpreter._begin_continue_as_new``),

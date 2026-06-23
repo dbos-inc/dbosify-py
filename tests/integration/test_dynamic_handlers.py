@@ -1,5 +1,5 @@
 """End-to-end dispatch of dynamic signal/query/update handlers and dynamic
-activities (DESIGN §6.1/§6.8), driven through a real Worker + Client. Exact
+activities, driven through a real Worker + Client. Exact
 matches always win over the catch-all; unmatched names/types fall back to it,
 and the handler decodes its RawValue args via payload_converter()."""
 

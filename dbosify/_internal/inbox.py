@@ -22,7 +22,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence
 INBOX_TOPIC = "__dbosify_inbox"
 
 # The topic a queued activity workflow parks on for external completion
-# (raise_complete_async, §6.1.2): AsyncActivityHandle sends the envelope here.
+# (raise_complete_async): AsyncActivityHandle sends the envelope here.
 ASYNC_COMPLETE_TOPIC = "__dbosify_async_complete"
 
 # recv timeout per wait; on (checkpointed, deterministic) timeout the
@@ -112,8 +112,8 @@ def async_activity_gone_key(activity_id: str) -> str:
 
 
 def activity_cancel_key(activity_id: str) -> str:
-    """Event set on the workflow run when a cross-queue activity is cancelled
-    (§6.1.2): the activity's attempt step on the other worker polls it and, when
+    """Event set on the workflow run when a cross-queue activity is cancelled:
+    the activity's attempt step on the other worker polls it and, when
     set, delivers cancellation into the running activity. (The local path uses an
     in-process threading.Event instead — same process, no event needed.)"""
     return f"__dbosify_act_{activity_id}_cancel"

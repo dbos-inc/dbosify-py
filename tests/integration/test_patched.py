@@ -1,5 +1,5 @@
-"""In-process behavior tests for ``workflow.patched`` / ``deprecate_patch``
-(DESIGN §6.8). These cover the first-execution semantics, per-id memoization,
+"""In-process behavior tests for ``workflow.patched`` / ``deprecate_patch``.
+These cover the first-execution semantics, per-id memoization,
 the durable marker, and the read-only rejection. The replay semantics — old
 in-flight runs taking the OLD path after a redeploy, and new runs replaying the
 NEW path across a crash — need real recovery and live in

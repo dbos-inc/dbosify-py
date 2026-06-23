@@ -1,4 +1,4 @@
-"""schedule_to_start on the cross-queue activity path (§6.1.2).
+"""schedule_to_start on the cross-queue activity path.
 
 schedule_to_start bounds how long a queued activity may sit before a worker
 starts it. The test enqueues the activity (workflow worker up) but delays the

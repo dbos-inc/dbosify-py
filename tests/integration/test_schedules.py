@@ -1,4 +1,4 @@
-"""Schedules (DESIGN §6.7): create/describe/list/update/pause/trigger/backfill/
+"""Schedules: create/describe/list/update/pause/trigger/backfill/
 delete against real Postgres, plus an automatic cron fire and persistence
 across a worker restart.
 """
@@ -451,7 +451,7 @@ async def test_schedule_persists_across_worker_restart() -> None:
         await handle.delete()
 
 
-# --- overlap policies (DEVIATIONS schedules) --------------------------------------
+# --- overlap policies (ARCHITECTURE schedules) --------------------------------------
 
 
 async def test_overlap_skip_suppresses_runs() -> None:

@@ -1,4 +1,4 @@
-"""Subprocess worker for cross-queue (queued) activity versioning (DEVIATIONS
+"""Subprocess worker for cross-queue (queued) activity versioning (ARCHITECTURE
 worker-versioning). Two roles run as separate processes, both on the same build id:
 
   activity            an activities-only Worker on the activity queue.

@@ -1,4 +1,4 @@
-"""SIGKILL mid scheduled-action (DESIGN §6.7 + recovery is the product).
+"""SIGKILL mid scheduled-action (recovery is the product).
 
 The kill lands while scheduled actions are in flight (every-second fires with
 ~2s actions overlap, so several run at once). Recovery must:
@@ -6,7 +6,7 @@ The kill lands while scheduled actions are in flight (every-second fires with
   * keep the persisted schedule firing after restart (more occurrences),
 with each occurrence's deterministic id ensuring no *twin* execution.
 
-Note on at-least-once (DEVIATIONS failover): an action whose ``record_occurrence``
+Note on at-least-once (ARCHITECTURE failover): an action whose ``record_occurrence``
 activity wrote its side-effect but had not yet checkpointed that step when the
 worker was killed re-executes that activity on recovery — so an occurrence may
 legitimately be recorded twice. The deterministic per-occurrence id still bars
@@ -55,5 +55,5 @@ def test_sigkill_mid_scheduled_action(tmp_path: Path) -> None:
     # the one in flight at kill time).
     assert len(counts) >= 2, occurrences
     # The deterministic per-occurrence id bars a twin / replay storm: no occurrence
-    # is recorded more than twice (original write + one at-least-once re-run, DEVIATIONS failover).
+    # is recorded more than twice (original write + one at-least-once re-run, ARCHITECTURE failover).
     assert max(counts.values()) <= 2, occurrences

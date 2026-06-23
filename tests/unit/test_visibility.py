@@ -1,4 +1,4 @@
-"""Unit tests for the visibility-query parser (no Postgres) — the §6.2 subset:
+"""Unit tests for the visibility-query parser (no Postgres):
 field/operator coverage, AND conjunction, the SA-equality containment shape,
 the ExecutionStatus mapping (incl. the ERROR-family post-filter), and rejection
 of everything outside the supported grammar."""

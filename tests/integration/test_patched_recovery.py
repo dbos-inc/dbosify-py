@@ -1,4 +1,4 @@
-"""SIGKILL-recovery tests for workflow.patched() (DESIGN §6.8) — the replay
+"""SIGKILL-recovery tests for workflow.patched() — the replay
 semantics that the in-process suite (test_patched.py) can't reach.
 
 Two scenarios, both crashing a parked run mid-flight and resuming a fresh

@@ -2,7 +2,7 @@
 currently-registered code to detect non-determinism, mirroring
 ``temporalio.worker.Replayer``.
 
-Mechanism (DESIGN.md §9, "Replayer over DBOS step checkpoints / fork_workflow"):
+Mechanism ("Replayer over DBOS step checkpoints / fork_workflow"):
 re-execution from checkpoints is exactly the path crash-recovery already takes,
 and DBOS itself raises ``DBOSUnexpectedStepError`` when a re-run claims a
 different step at a recorded ``function_id``. So a replay is a *fork* of the
@@ -32,7 +32,7 @@ horizon the interpreter checks against is the one it derives from its own copied
 steps, so nothing about the replay has to be passed out of band.
 
 The same fork machinery (``start_replay_fork`` with ``mode``) backs
-**query-on-closed-workflow rehydrate** (DEVIATIONS replay): the client forks a
+**query-on-closed-workflow rehydrate** (ARCHITECTURE replay): the client forks a
 closed run in ``mode="rehydrate"``, the forked run replays to its final state
 and then *keeps serving* one query against the reconstructed instance (it is not
 deleted-after-verify but stops on a client signal or the
@@ -165,7 +165,7 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     )
     from .status import WorkflowExecutionStatus
 
-    # States that cannot be faithfully reconstructed by replay (DEVIATIONS
+    # States that cannot be faithfully reconstructed by replay (ARCHITECTURE
     # replay): partial-history (TERMINATED/TIMED_OUT) or CONTINUED_AS_NEW.
     if history.status in (
         WorkflowExecutionStatus.TERMINATED,
@@ -174,7 +174,7 @@ async def replay_one(history: "WorkflowHistory") -> Optional[Exception]:
     ):
         return ValueError(
             f"cannot replay a {history.status.name} workflow: it cannot be "
-            "faithfully reconstructed from its checkpoints (DEVIATIONS replay)"
+            "faithfully reconstructed from its checkpoints (ARCHITECTURE replay)"
         )
 
     handle = await start_replay_fork(
@@ -241,7 +241,7 @@ class Replayer:
     mutate it: ``data_converter``, ``interceptors``, and
     ``workflow_failure_exception_types`` are accepted for API parity but the
     running Worker's values are authoritative (overriding them here would
-    clobber the live Worker, since one Worker owns the process; DEVIATIONS replay).
+    clobber the live Worker, since one Worker owns the process; ARCHITECTURE replay).
     Parameters with no dbosify analog (``namespace``, ``build_id``,
     ``identity``, ``workflow_runner``/``unsandboxed_workflow_runner``,
     ``debug_mode``, ``runtime``, ``plugins``, ``workflow_task_executor``, ...)

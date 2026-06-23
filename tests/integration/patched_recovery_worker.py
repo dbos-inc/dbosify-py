@@ -1,4 +1,4 @@
-"""Subprocess worker for workflow.patched() recovery (DESIGN §6.8).
+"""Subprocess worker for workflow.patched() recovery.
 
 Run as: python patched_recovery_worker.py <start|resume> <workflow_id>
 with env PATCH_VERSION in {"v1", "v2"} selecting the deployed code.

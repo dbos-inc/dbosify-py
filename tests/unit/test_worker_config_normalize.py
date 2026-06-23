@@ -1,6 +1,6 @@
 """The Worker accepts either a Postgres URL or a full ``DBOSConfig`` as its
 first argument, and forces the DBOS admin server off either way (DBOSify exposes
-DBOS's management APIs, not the admin HTTP port — DESIGN §1). These cover
+DBOS's management APIs, not the admin HTTP port). These cover
 ``_normalize_config`` without launching DBOS.
 """
 

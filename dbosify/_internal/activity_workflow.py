@@ -1,5 +1,5 @@
 """The ``__temporal_activity`` dispatcher: the cross-queue / distributed
-activity path (DESIGN.md §6.1.2).
+activity path.
 
 When ``execute_activity(..., task_queue=)`` names a queue other than the
 workflow's own, the interpreter does not run the activity as an in-process

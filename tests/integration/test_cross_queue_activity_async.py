@@ -1,4 +1,4 @@
-"""External (async) completion of a cross-queue activity (§6.1.2).
+"""External (async) completion of a cross-queue activity.
 
 ``raise_complete_async()`` on the queued path parks the ``__temporal_activity``
 workflow on its completion topic (rather than the parent run's inbox), addressed

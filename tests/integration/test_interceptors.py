@@ -1,4 +1,4 @@
-"""Interceptor tests (DESIGN §6.8): client outbound + activity inbound/outbound.
+"""Interceptor tests: client outbound + activity inbound/outbound.
 
 Both run against an in-process Worker and a Client over the same database, so
 the recording interceptor instances (and their event lists) live in the test

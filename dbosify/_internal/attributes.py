@@ -1,5 +1,5 @@
 """Memo and search-attribute conversion, backed by DBOS native workflow
-attributes (DESIGN §6.2).
+attributes.
 
 Temporal has two metadata namespaces — ``memo`` (opaque, converter-encoded,
 codec-capable) and ``search_attributes`` (typed, indexed, queryable). DBOS

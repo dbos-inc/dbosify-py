@@ -1,4 +1,4 @@
-"""Unit coverage (no database) for the §6.7 schedule building blocks:
+"""Unit coverage (no database) for the schedule building blocks:
 ``ScheduleSpec`` cron compilation and the schedule ``context`` round-trip.
 """
 

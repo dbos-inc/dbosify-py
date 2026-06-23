@@ -1,4 +1,4 @@
-"""Shared harness for the accepted-parameter audits (DESIGN §9).
+"""Shared harness for the accepted-parameter audits.
 
 The Worker, Client, and start-verb audits each classify every temporalio
 parameter of one or more callables into named buckets — some plain sets

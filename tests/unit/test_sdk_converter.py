@@ -124,7 +124,7 @@ async def test_converter_default() -> None:
     await assert_payload(None, "binary/null", "")
     await assert_payload(b"some binary", "binary/plain", "some binary")
     # Adapted: dropped the json/protobuf WorkflowExecution case — our converter
-    # has no protobuf payload converter (DESIGN: lightweight Payload, no proto).
+    # has no protobuf payload converter.
     await assert_payload(
         {"foo": "bar", "baz": "qux"}, "json/plain", '{"baz":"qux","foo":"bar"}'
     )

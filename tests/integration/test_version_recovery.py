@@ -1,4 +1,4 @@
-"""Cross-version PINNED recovery (DEVIATIONS worker-versioning): the behavioral proof that a
+"""Cross-version PINNED recovery (ARCHITECTURE worker-versioning): the behavioral proof that a
 build id (= DBOS application_version) actually pins a workflow to its version.
 
 A workflow stamped with build id ``v1`` is crashed mid-flight. A ``v2`` worker

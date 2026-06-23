@@ -1,5 +1,5 @@
-"""Subprocess worker for cross-queue (distributed) activity recovery tests
-(DESIGN §6.1.2). Two roles run as separate processes so an activity genuinely
+"""Subprocess worker for cross-queue (distributed) activity recovery tests.
+Two roles run as separate processes so an activity genuinely
 executes on a different worker than the workflow that calls it:
 
   activity                 an activities-only Worker on the activity queue,

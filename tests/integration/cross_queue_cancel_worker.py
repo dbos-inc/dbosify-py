@@ -1,5 +1,5 @@
-"""Subprocess worker for cross-queue activity *cancellation* tests
-(§6.1.2). The activity runs on a different worker than the workflow, so
+"""Subprocess worker for cross-queue activity *cancellation* tests.
+The activity runs on a different worker than the workflow, so
 cancellation must reach it cross-process: the interpreter sets a checkpointed
 cancel event, the activity's attempt step polls it on the other worker and
 delivers an ``asyncio.CancelledError`` into the (async) activity.

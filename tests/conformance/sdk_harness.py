@@ -39,7 +39,7 @@ async def new_worker(
     ``client`` already targets the same database.
 
     ``data_converter``/``interceptors`` are forwarded to the Worker. The
-    converter is process-global (DESIGN §6.9), so configuring it on the Worker
+    converter is process-global, so configuring it on the Worker
     also applies to the ``client`` for the duration of the test."""
     worker = Worker(
         default_config(),
@@ -96,7 +96,7 @@ class _SchemaWarmupWorkflow:
 
 async def warm_schema(client: Client) -> None:
     """Migrate the namespace schema before a client-before-worker test issues
-    start/describe/update calls. Our Worker owns schema creation (DESIGN §5), so
+    start/describe/update calls. Our Worker owns schema creation, so
     on a freshly-dropped test database the schema does not exist until a Worker
     launches; production always has it pre-migrated. Launching and immediately
     stopping a throwaway worker creates the schema (it persists), faithfully

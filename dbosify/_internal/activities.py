@@ -1,7 +1,7 @@
 """Activity execution: one single-attempt DBOS step per activity type.
 
 Each registered activity gets its own step function named ``act:{type}``
-(decision §10.1: per-type naming keeps DBOS-native step listings readable
+(per-type naming keeps DBOS-native step listings readable
 and makes replay-mismatch detection precise). The step body resolves the
 activity from the registry at execution time, so re-registering an activity
 implementation takes effect without re-decoration.
@@ -78,7 +78,7 @@ def retry_decision(
     elapsed: Optional[float],
     schedule_to_close: Optional[float],
 ) -> Tuple[Optional[float], exceptions.RetryState]:
-    """The activity retry decision (DESIGN §6.1.2), clock-independent so both
+    """The activity retry decision, clock-independent so both
     execution paths share it: the local path (interpreter, virtual time) and the
     queued path (the ``__temporal_activity`` workflow, recorded-timestamp time).
 
@@ -193,7 +193,7 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
         attempt_key = (str(meta.get("workflow_run_id", "")), int(meta.get("seq", -1)))
         heartbeat_timeout = meta.get("heartbeat_timeout")
         # On the queued path the workflow can't set our in-process cancel Event;
-        # it sets a checkpointed cancel event on its run that we poll here (§6.1.2).
+        # it sets a checkpointed cancel event on its run that we poll here.
         queued = bool(meta.get("queued"))
         cancel_target = str(meta.get("workflow_run_id", ""))
         cancel_key = inbox.activity_cancel_key(str(meta.get("activity_id", "")))
@@ -231,8 +231,8 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
             activity_api._register_attempt(attempt_key, ctx)
             token = activity_api._current_context.set(ctx)
             try:
-                # Build the activity interceptor chain for this attempt (DESIGN
-                # §6.8): inbound wraps the invocation, outbound wraps info()/heartbeat().
+                # Build the activity interceptor chain for this attempt:
+                # inbound wraps the invocation, outbound wraps info()/heartbeat().
                 impl: activity_interceptor.ActivityInboundInterceptor = (
                     _RootActivityInbound(ctx, defn.is_async)
                 )

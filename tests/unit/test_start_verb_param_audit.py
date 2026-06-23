@@ -1,4 +1,4 @@
-"""Accepted-parameter audit for the *start verbs* (DESIGN §9), the third audit
+"""Accepted-parameter audit for the *start verbs*, the third audit
 alongside the Worker and Client constructor audits. The start verbs
 (``Client.start_workflow``, ``workflow.start_child_workflow``,
 ``workflow.start_activity``, ``workflow.continue_as_new``) accept every
@@ -11,7 +11,7 @@ fails the test until it is classified, so no behavior-changing option can be
 silently swallowed unnoticed.
 
 The pending set is the point of the audit: it is the explicit, reviewed list of
-behavior-changing options we accept but do not yet honor (see DEVIATIONS start-params).
+behavior-changing options we accept but do not yet honor (see ARCHITECTURE start-params).
 ``execute_*`` variants share the start verbs' parameter surface and impl path;
 their signatures are pinned separately by ``test_signature_parity``.
 """

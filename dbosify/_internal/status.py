@@ -1,4 +1,4 @@
-"""DBOS workflow status -> Temporal ``WorkflowExecutionStatus`` (DESIGN §6.2).
+"""DBOS workflow status -> Temporal ``WorkflowExecutionStatus``.
 
 The enum lives here (re-exported by ``dbosify.client``) so internal
 modules can map statuses without importing the client facade.
@@ -28,7 +28,7 @@ _OPEN_DBOS_STATUSES = ("PENDING", "ENQUEUED", "DELAYED")
 def to_execution_status(
     dbos_status: Optional[str], *, error: Optional[BaseException] = None
 ) -> WorkflowExecutionStatus:
-    """Map a DBOS status string per the DESIGN §6.2 table. For ERROR, the
+    """Map a DBOS status string to a Temporal status. For ERROR, the
     recorded error distinguishes cooperative cancellation (CANCELED) from
     failure; pass it when available.
 
@@ -48,7 +48,7 @@ def to_execution_status(
             return WorkflowExecutionStatus.CANCELED
         return WorkflowExecutionStatus.FAILED
     if dbos_status == "CANCELLED":
-        # Native DBOS cancel is reserved for terminate (decision §10.4).
+        # Native DBOS cancel is reserved for terminate.
         return WorkflowExecutionStatus.TERMINATED
     if dbos_status == "MAX_RECOVERY_ATTEMPTS_EXCEEDED":
         return WorkflowExecutionStatus.RUNNING

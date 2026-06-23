@@ -102,7 +102,7 @@ __all__ = [
 logger = logging.getLogger("dbosify.worker")
 
 # A stable default DBOS application version. Pinning a constant (vs DBOS's code-hash
-# auto-version) lets workers agree and deploys preserve in-flight work (DESIGN §6.8).
+# auto-version) lets workers agree and deploys preserve in-flight work.
 DEFAULT_APP_VERSION = "0.1"
 
 # Default DBOS application name when the Worker is given only a Postgres URL.
@@ -111,7 +111,7 @@ DEFAULT_APP_NAME = "dbosify"
 # Behavior-changing AND unsupported options: passing a non-default value raises
 # rather than silently no-ops. arg name -> hint; arrive via ``**unsupported``.
 _REJECTED_OPTIONS = {
-    "nexus_service_handlers": "Nexus is not supported (DESIGN §1)",
+    "nexus_service_handlers": "Nexus is not supported",
     "tuner": "resource-based slot tuning has no DBOS analog; use "
     "max_concurrent_workflow_tasks / max_concurrent_activities",
     "plugins": "Worker plugins are not supported; use interceptors=",
@@ -151,7 +151,7 @@ def _normalize_config(config: str | DBOSConfig) -> DBOSConfig:
     A bare string is a Postgres URL: expand it into a minimal config under the
     default application name, pointed at that system database. A ``DBOSConfig``
     is taken as given. Either way the DBOS admin server is forced off — DBOSify
-    exposes DBOS's management APIs, not the admin HTTP port (DESIGN §1), and an
+    exposes DBOS's management APIs, not the admin HTTP port, and an
     always-on port collides when workers share a host.
     """
     if isinstance(config, str):
@@ -190,7 +190,7 @@ class WorkerDeploymentConfig:
     The ``version.build_id`` becomes the DBOS ``application_version``, which DBOS
     uses to pin workflow recovery/dequeue — i.e. Temporal's PINNED behavior,
     enforced. ``default_versioning_behavior`` / ``use_worker_versioning`` are
-    accepted for parity; AUTO_UPGRADE has no DBOS analog (DEVIATIONS worker-versioning).
+    accepted for parity; AUTO_UPGRADE has no DBOS analog (ARCHITECTURE worker-versioning).
     """
 
     version: WorkerDeploymentVersion
@@ -237,7 +237,7 @@ class Worker:
         system database) or a full ``dbos.DBOSConfig``. A URL is expanded into a
         minimal config under a default application name; pass a ``DBOSConfig``
         for full control (custom engine, executor, telemetry, ...). The DBOS
-        admin server is disabled regardless (DESIGN §1).
+        admin server is disabled regardless.
 
         ``build_id`` / ``deployment_config`` set the worker's deployment version
         (surfaced via ``workflow.Info.get_current_deployment_version()``). The
@@ -246,7 +246,7 @@ class Worker:
         and continued only on workers of its build ID. That pinning *is*
         Temporal's PINNED versioning behavior, enforced. What DBOS has no analog
         for is AUTO_UPGRADE (moving a running workflow to a newer version) and
-        the cluster routing-fleet / ramping concepts; see DEVIATIONS worker-versioning.
+        the cluster routing-fleet / ramping concepts; see ARCHITECTURE worker-versioning.
         ``use_worker_versioning`` is accepted for parity. When neither build_id
         nor deployment_config is given, the deployment version is derived from
         the DBOS application name + application_version.
@@ -315,7 +315,7 @@ class Worker:
         # The interpreter decodes run args / encodes results with this
         # converter; configure the Client the same.
         conversion.set_converter(data_converter)
-        # The namespace owns the DBOS system schema (DEVIATIONS no-server); a
+        # The namespace owns the DBOS system schema (ARCHITECTURE no-server); a
         # conflicting explicit dbos_system_schema is an error.
         schema = namespace_schema(namespace)
         configured_schema = config.get("dbos_system_schema")
@@ -337,7 +337,7 @@ class Worker:
         if identity is not None:
             config = {**config, "executor_id": identity}
         # An explicit build_id / deployment_config IS the DBOS application_version
-        # (DEVIATIONS worker-versioning); without one, pin DEFAULT_APP_VERSION.
+        # (ARCHITECTURE worker-versioning); without one, pin DEFAULT_APP_VERSION.
         explicit_build = (
             deployment_config.version.build_id
             if deployment_config is not None

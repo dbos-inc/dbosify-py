@@ -1,4 +1,4 @@
-"""Conformance: the samples-python ``message_passing/`` corpus (DESIGN §9).
+"""Conformance: the samples-python ``message_passing/`` corpus.
 
 Unlike ``hello/``, these are multi-file packages run as two processes: a
 worker (runs until interrupted) and a starter (drives the workflow and

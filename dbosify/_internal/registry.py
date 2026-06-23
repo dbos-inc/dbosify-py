@@ -95,7 +95,7 @@ class WorkflowDefinition:
     arg_types: Optional[List[type]] = None
     ret_type: Optional[type] = None
     # @workflow.defn(versioning_behavior=...): stored for parity. PINNED is what
-    # DBOS enforces; AUTO_UPGRADE has no analog (DEVIATIONS worker-versioning).
+    # DBOS enforces; AUTO_UPGRADE has no analog (ARCHITECTURE worker-versioning).
     versioning_behavior: Optional[int] = None
 
 
@@ -109,7 +109,7 @@ class ActivityDefinition:
     arg_types: Optional[List[type]] = None
     ret_type: Optional[type] = None
     # A *dynamic* activity (catch-all): invoked as ``fn(Sequence[RawValue])`` for
-    # any activity type with no exact registration (§6.1.2). ``name`` is not routed.
+    # any activity type with no exact registration. ``name`` is not routed.
     dynamic: bool = False
 
 
@@ -138,7 +138,7 @@ def dbos_workflow_for(name: str) -> Callable[..., Any]:
 
 
 # The process-global ``__temporal_activity`` dispatcher (the cross-queue activity
-# path, §6.1.2). Lives here so the interpreter can resolve it without a cycle.
+# path). Lives here so the interpreter can resolve it without a cycle.
 _activity_dispatcher: Optional[Callable[..., Any]] = None
 
 
@@ -170,7 +170,7 @@ def add_worker_failure_exception_types(
 
 
 # Worker-level activity interceptors (Worker(interceptors=...)); the activity
-# attempt step folds these around each attempt (DESIGN §6.8). One Worker owns them.
+# attempt step folds these around each attempt. One Worker owns them.
 worker_interceptors: Tuple[Any, ...] = ()
 
 
@@ -200,7 +200,7 @@ def set_worker_namespace(namespace: Optional[str]) -> None:
 
 
 # This process's worker deployment NAME (None when no Worker is active). The build_id
-# half is read live from the DBOS application_version (DEVIATIONS worker-versioning).
+# half is read live from the DBOS application_version (ARCHITECTURE worker-versioning).
 worker_deployment_name: Optional[str] = None
 
 

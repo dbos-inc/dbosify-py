@@ -8,7 +8,7 @@ The context is set by the worker's attempt step for real runs and by
 ``heartbeat`` raises CancelledError when cancellation of the activity has
 been requested (how sync activities observe cancellation, as in Temporal)
 and records details for the next retry attempt — in worker memory, not
-durably (DEVIATIONS failover). ``raise_complete_async`` parks the activity for
+durably (ARCHITECTURE failover). ``raise_complete_async`` parks the activity for
 external completion via ``client.get_async_activity_handle``.
 """
 
@@ -115,14 +115,14 @@ def defn(
 
     ``dynamic=True`` makes this the catch-all activity, invoked for any
     activity type with no exact registration; it must accept a single
-    ``Sequence[RawValue]`` and cannot also set ``name`` (§6.1.2).
+    ``Sequence[RawValue]`` and cannot also set ``name``.
 
     ``no_thread_cancel_exception`` defaults to ``True`` (temporalio's default is
     ``False``): dbosify delivers cancellation to sync activities
     *cooperatively* and never raises into their worker thread, so it always
     behaves as ``True``. Setting it ``False`` — asking for Temporal's
     raise-into-the-thread behavior — raises ``NotImplementedError`` rather than
-    silently doing something else (DEVIATIONS sync-activity-cancel).
+    silently doing something else (ARCHITECTURE sync-activity-cancel).
     """
     if name is not None and dynamic:
         raise RuntimeError("Cannot provide name and dynamic boolean")
@@ -215,7 +215,7 @@ class Info:
 class ActivityCancellationDetails:
     """The reasons for an activity's cancellation, mirroring
     ``temporalio.activity.ActivityCancellationDetails``. Accepted for parity;
-    dbosify never populates it (DEVIATIONS activity-cancel-details), so
+    dbosify never populates it (ARCHITECTURE activity-cancel-details), so
     :py:func:`cancellation_details` always returns ``None``."""
 
     not_found: bool = False
@@ -239,7 +239,7 @@ class _Context:
     # (workflow_run_id, seq) for real runs; None in ActivityEnvironment.
     attempt_key: Optional[Tuple[str, int]] = None
     # Head of the activity *outbound* interceptor chain, installed per attempt
-    # (DESIGN §6.8); ``info()``/``heartbeat()`` route through it. None in tests.
+    # ``info()``/``heartbeat()`` route through it. None in tests.
     outbound: Optional[Any] = None
     # A Temporal client set explicitly by ``ActivityEnvironment(client=...)``;
     # None on real worker runs, where ``client()`` uses ``worker_state`` below.
@@ -590,7 +590,7 @@ def shield_thread_cancel_exception() -> Iterator[None]:
 
     In dbosify this is always a no-op: cancellation is delivered
     cooperatively (via ``is_cancelled()``/``heartbeat()``) and never raised into
-    a sync activity's worker thread (DEVIATIONS sync-activity-cancel), so there is nothing to
+    a sync activity's worker thread (ARCHITECTURE sync-activity-cancel), so there is nothing to
     shield against — matching temporalio's own no-op behavior for async and
     multiprocess activities.
     """
@@ -636,7 +636,7 @@ def _make_info(meta: dict[str, Any]) -> Info:
     if seq is not None:
         heartbeat_details = tuple(_heartbeat_store.get((run_id, int(seq)), ()))
         # An opaque structured token (no string separator is safe). On the queued
-        # path it carries the activity workflow id ("qwf") so completion routes there (§6.1.2).
+        # path it carries the activity workflow id ("qwf") so completion routes there.
         token: dict[str, Any] = {
             "run": run_id,
             "aid": str(meta.get("activity_id", "")),

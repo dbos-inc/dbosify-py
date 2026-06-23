@@ -1,5 +1,5 @@
-"""Subprocess workers for the cross-queue activity *interceptor* test
-(DESIGN §6.1.2 + §6.8). The activity runs on a different worker process than the
+"""Subprocess workers for the cross-queue activity *interceptor* test.
+The activity runs on a different worker process than the
 workflow that calls it, and that activity worker carries its own
 ``Worker(interceptors=[...])`` — so this proves activity interceptors fire on the
 queued path, applied by whichever worker actually runs the activity.

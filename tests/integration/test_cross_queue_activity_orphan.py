@@ -1,4 +1,4 @@
-"""A cross-queue activity must not outlive its workflow (§6.1.2).
+"""A cross-queue activity must not outlive its workflow.
 
 When a workflow continues-as-new (or completes / is cancelled) with a
 fire-and-forget cross-queue activity still in flight, the close path must

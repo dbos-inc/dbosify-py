@@ -1,5 +1,5 @@
 """Worker deployment versioning (audit item 2), built on DBOS versioning
-(DEVIATIONS worker-versioning): a build ID *is* the DBOS ``application_version`` (set via
+(ARCHITECTURE worker-versioning): a build ID *is* the DBOS ``application_version`` (set via
 ``build_id`` / ``deployment_config``, else derived from the app name +
 ``application_version``), surfaced via
 ``workflow.Info.get_current_deployment_version()``. Because DBOS scopes recovery
@@ -109,7 +109,7 @@ async def test_explicit_build_id() -> None:
     assert result["build_id_method"] == "bld-xyz"
     assert result["target_changed"] is False
     # The build_id IS the DBOS application_version scoping recovery/dequeue, so
-    # the reported version is the actual pinned routing one (DEVIATIONS worker-versioning).
+    # the reported version is the actual pinned routing one (ARCHITECTURE worker-versioning).
     probe = make_dbos_client()
     try:
         status = probe.retrieve_workflow("dv-build-id").get_status()
@@ -173,7 +173,7 @@ async def test_continue_as_new_successor_inherits_build_id() -> None:
     assert result == "done-1"
     probe = make_dbos_client()
     try:
-        # Run-chain id scheme (§6.4): successor run n=1 is "<id>--r1".
+        # Run-chain id scheme: successor run n=1 is "<id>--r1".
         successor = probe.retrieve_workflow("dv-can--r1").get_status()
     finally:
         probe.destroy()

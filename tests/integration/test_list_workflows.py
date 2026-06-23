@@ -1,4 +1,4 @@
-"""Visibility: ``Client.list_workflows`` / ``count_workflows`` (DESIGN §6.2).
+"""Visibility: ``Client.list_workflows`` / ``count_workflows``.
 
 Exercises the query subset end-to-end against Postgres: filtering by workflow
 type, ExecutionStatus (clean + the ERROR-family post-filter), WorkflowId

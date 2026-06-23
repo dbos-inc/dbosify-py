@@ -1,8 +1,8 @@
-"""Temporal workflow IDs vs DBOS workflow IDs (DESIGN.md §6.4).
+"""Temporal workflow IDs vs DBOS workflow IDs.
 
 DBOS allows exactly one execution per DBOS workflow id, ever; Temporal
 allows reusing a workflow id across *closed* runs, each run having its own
-run id. Scheme (resolved decision §10.3):
+run id. Scheme:
 
   - run n of Temporal id W has DBOS id ``W`` for n=0, else ``W--r{n}``
   - the user-visible ``run_id`` IS that DBOS id (stable and unique;
@@ -13,7 +13,7 @@ run id. Scheme (resolved decision §10.3):
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 RUN_SEPARATOR = "--r"
-# Cross-queue activity workflow ids are ``{run}--a{seq}`` (§6.1.2). Reserving this
+# Cross-queue activity workflow ids are ``{run}--a{seq}``. Reserving this
 # separator keeps an activity workflow id from colliding with any user/child id.
 ACTIVITY_SEPARATOR = "--a"
 
@@ -54,7 +54,7 @@ def run_dbos_id(workflow_id: str, run_index: int) -> str:
 
 
 def activity_dbos_id(run_id: str, seq: int) -> str:
-    """The ``__temporal_activity`` workflow id for a cross-queue activity (§6.1.2).
+    """The ``__temporal_activity`` workflow id for a cross-queue activity.
     Deterministic in ``seq``, and in the reserved ``--a`` namespace so it cannot
     collide with any user/child/run id."""
     return f"{run_id}{ACTIVITY_SEPARATOR}{seq}"
@@ -64,7 +64,7 @@ def replay_scratch_id(run_id: str, mode: str, suffix: str = "") -> str:
     """The DBOS id for a replay scratch fork of ``run_id``.
 
     The mode travels *in the id* so a worker in a different process than the
-    forker recognizes the replay (DEVIATIONS replay, query-on-closed rehydrate).
+    forker recognizes the replay (ARCHITECTURE replay, query-on-closed rehydrate).
     ``suffix`` is a unique token per operation (the request id for a query, a
     fresh token for a verification), so concurrent replays/queries of the same run
     each get their own scratch and never collide on one id."""

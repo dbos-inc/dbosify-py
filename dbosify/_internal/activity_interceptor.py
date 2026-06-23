@@ -11,7 +11,7 @@ inbound/outbound classes and their ``*Input`` dataclasses live in
 A worker ``Interceptor`` advertises an activity interceptor via
 ``intercept_activity`` and a workflow interceptor via
 ``workflow_interceptor_class``. Nexus interception is unsupported
-(DEVIATIONS no-server) and intentionally absent.
+(ARCHITECTURE no-server) and intentionally absent.
 
 The activity chain is built per attempt in ``_internal/activities.py``
 (mirroring temporalio's ``_activity.py`` chaining): inbound interceptors wrap
@@ -66,7 +66,7 @@ class Interceptor:
     ) -> "Optional[Type[WorkflowInboundInterceptor]]":
         """Class that will be instantiated and used to intercept workflows.
 
-        Called once per workflow execution (DESIGN §6.8). The returned class
+        Called once per workflow execution. The returned class
         must take the same constructor as
         :py:meth:`WorkflowInboundInterceptor.__init__` (a single ``next``).
         Returning ``None`` (the default) means this interceptor does not
@@ -74,7 +74,7 @@ class Interceptor:
 
         Args:
             input: Carries ``unsafe_extern_functions`` for parity; inert here
-                (dbosify has no workflow sandbox, DEVIATIONS dbos-native-management).
+                (dbosify has no workflow sandbox, ARCHITECTURE dbos-native-management).
 
         Returns:
             The class to construct to intercept each workflow, or ``None``.

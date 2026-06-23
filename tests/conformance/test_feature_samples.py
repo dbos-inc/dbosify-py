@@ -101,24 +101,23 @@ SAMPLES = {
         package="custom_converter",
         skip="sample's PayloadConverter is built on protobuf "
         "temporalio.api.common.v1.Payload; our Payload is a lightweight dict and "
-        "protobuf payloads are a non-goal (DEVIATIONS no-server)",
+        "protobuf payloads are a non-goal (ARCHITECTURE no-server)",
     ),
     "encryption": Sample(
         package="encryption",
         skip="EncryptionCodec serializes protobuf Payloads (.SerializeToString); "
         "our PayloadCodec operates on a lightweight Payload, and protobuf payloads "
-        "are a non-goal (DEVIATIONS no-server)",
+        "are a non-goal (ARCHITECTURE no-server)",
     ),
     "worker_specific_task_queues": Sample(
         package="worker_specific_task_queues",
-        skip="runs two Workers in one process; dbosify is one Worker per "
-        "process (DESIGN §5)",
+        skip="runs two Workers in one process; dbosify is one Worker per " "process",
     ),
     # ---- skip: not runnable in this harness ---------------------------------
     "sleep_for_days": Sample(
         package="sleep_for_days",
         skip="workflow sleeps timedelta(days=30) with no auto-complete; needs a "
-        "time-skipping WorkflowEnvironment (out of scope — DESIGN §9)",
+        "time-skipping WorkflowEnvironment (out of scope)",
     ),
     "polling_infrequent": Sample(
         package="polling",
@@ -136,68 +135,67 @@ SAMPLES = {
         "harness rewrites imports but does not install per-sample deps",
     ),
     # ---- skip: sample depends on a non-goal/unsupported Temporal feature (coverage gaps) ----
-    # Nexus — non-goal (DESIGN §1, DEVIATIONS no-server).
+    # Nexus — non-goal (ARCHITECTURE no-server).
     "hello_nexus": Sample(
-        package="hello_nexus", skip="Nexus is a non-goal (DEVIATIONS no-server)"
+        package="hello_nexus", skip="Nexus is a non-goal (ARCHITECTURE no-server)"
     ),
     "nexus_cancel": Sample(
-        package="nexus_cancel", skip="Nexus is a non-goal (DEVIATIONS no-server)"
+        package="nexus_cancel", skip="Nexus is a non-goal (ARCHITECTURE no-server)"
     ),
     "nexus_messaging": Sample(
-        package="nexus_messaging", skip="Nexus is a non-goal (DEVIATIONS no-server)"
+        package="nexus_messaging", skip="Nexus is a non-goal (ARCHITECTURE no-server)"
     ),
     "nexus_multiple_args": Sample(
-        package="nexus_multiple_args", skip="Nexus is a non-goal (DEVIATIONS no-server)"
+        package="nexus_multiple_args",
+        skip="Nexus is a non-goal (ARCHITECTURE no-server)",
     ),
-    # Metrics + telemetry runtime — not implemented (DEVIATIONS no-metrics).
+    # Metrics + telemetry runtime — not implemented (ARCHITECTURE no-metrics).
     "custom_metric": Sample(
         package="custom_metric",
-        skip="metrics are not implemented (DEVIATIONS no-metrics)",
+        skip="metrics are not implemented (ARCHITECTURE no-metrics)",
     ),
     "prometheus": Sample(
         package="prometheus",
-        skip="metrics / Prometheus telemetry not implemented (DEVIATIONS no-metrics)",
+        skip="metrics / Prometheus telemetry not implemented (ARCHITECTURE no-metrics)",
     ),
     "open_telemetry": Sample(
         package="open_telemetry",
-        skip="OpenTelemetry metrics/tracing runtime not implemented (DEVIATIONS no-metrics)",
+        skip="OpenTelemetry metrics/tracing runtime not implemented (ARCHITECTURE no-metrics)",
     ),
-    # Client-initiated (standalone) activities — unsupported (DEVIATIONS no-client-activities).
+    # Client-initiated (standalone) activities — unsupported (ARCHITECTURE no-client-activities).
     "hello_standalone_activity": Sample(
         package="hello_standalone_activity",
-        skip="client-initiated standalone activities are unsupported (DEVIATIONS no-client-activities)",
+        skip="client-initiated standalone activities are unsupported (ARCHITECTURE no-client-activities)",
     ),
-    # Pydantic converter — not provided; configure a custom DataConverter (§6.9).
+    # Pydantic converter — not provided; configure a custom DataConverter.
     "pydantic_converter": Sample(
         package="pydantic_converter",
-        skip="contrib.pydantic is not provided; configure a custom DataConverter "
-        "(DESIGN §6.9)",
+        skip="contrib.pydantic is not provided; configure a custom DataConverter",
     ),
     "pydantic_converter_v1": Sample(
         package="pydantic_converter_v1",
-        skip="contrib.pydantic is not provided; configure a custom DataConverter "
-        "(DESIGN §6.9)",
+        skip="contrib.pydantic is not provided; configure a custom DataConverter",
     ),
-    # External payload storage — not implemented (DESIGN §6.9).
+    # External payload storage — not implemented.
     "external_storage": Sample(
         package="external_storage",
-        skip="external payload storage is not implemented (DESIGN §6.9)",
+        skip="external payload storage is not implemented",
     ),
     "external_storage_redis": Sample(
         package="external_storage_redis",
-        skip="external payload storage (redis) is not implemented (DESIGN §6.9)",
+        skip="external payload storage (redis) is not implemented",
     ),
-    # Multiprocess activity worker — one Worker per process (DESIGN §5).
+    # Multiprocess activity worker — one Worker per process.
     "worker_multiprocessing": Sample(
         package="worker_multiprocessing",
-        skip="multiprocess activity executors are unsupported (DESIGN §5)",
+        skip="multiprocess activity executors are unsupported",
     ),
     # Worker deployment versioning walkthrough — protobuf + 3 version-workers +
-    # AUTO_UPGRADE; we enforce PINNED only (DEVIATIONS worker-versioning).
+    # AUTO_UPGRADE; we enforce PINNED only (ARCHITECTURE worker-versioning).
     "worker_versioning": Sample(
         package="worker_versioning",
         skip="multi-version-worker walkthrough using protobuf + AUTO_UPGRADE; we "
-        "support PINNED only (DEVIATIONS worker-versioning)",
+        "support PINNED only (ARCHITECTURE worker-versioning)",
     ),
     # ---- skip: sample structure / non-Temporal dependency makes it un-runnable here ----
     # Patching across worker code versions (like hello_patch) — not a single run.
@@ -212,9 +210,9 @@ SAMPLES = {
     "replay": Sample(
         package="replay",
         # Our Replayer re-executes checkpoints through a running Worker's DBOS runtime,
-        # so it needs a Worker for the types (DEVIATIONS replay), unlike temporalio's.
+        # so it needs a Worker for the types (ARCHITECTURE replay), unlike temporalio's.
         skip="our Replayer needs a Worker for the types in the process; the "
-        "sample's replayer.py is client-only (DEVIATIONS replay)",
+        "sample's replayer.py is client-only (ARCHITECTURE replay)",
     ),
     # Eager workflow start — a server-side optimization (inert, no server); the
     # sample also reads the temporalio-internal __temporal_eagerly_started flag.
