@@ -21,7 +21,7 @@ schedule update); schedule history (recent_actions) is not tracked.
 import asyncio
 import inspect
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from enum import IntEnum
 from typing import (
     TYPE_CHECKING,
@@ -35,6 +35,7 @@ from typing import (
     Sequence,
     Union,
 )
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ._internal import attributes as _attributes
 from ._internal import conversion
@@ -880,14 +881,17 @@ def compile_spec(spec: ScheduleSpec) -> "tuple[str, Optional[str]]":
 def _next_action_times(ctx: Mapping[str, Any], count: int) -> List[datetime]:
     try:
         spec = _deserialize_spec(ctx.get("spec", {}))
-        cron, _tz = compile_spec(spec)
-    except ValueError:
+        cron, tz_name = compile_spec(spec)
+        tz: tzinfo = ZoneInfo(tz_name) if tz_name else timezone.utc
+    except (ValueError, ZoneInfoNotFoundError):
         return []
     from dbos._croniter import croniter  # type: ignore[attr-defined]
 
+    # Iterate in the schedule's timezone (the DBOS scheduler fires there), then
+    # report each instant in UTC for parity with temporalio.
     now = datetime.now(timezone.utc)
-    it = croniter(cron, now, second_at_beginning=True)
-    return [it.get_next(datetime) for _ in range(count)]
+    it = croniter(cron, now.astimezone(tz), second_at_beginning=True)
+    return [it.get_next(datetime).astimezone(timezone.utc) for _ in range(count)]
 
 
 async def _description_from_row(row: Mapping[str, Any]) -> ScheduleDescription:

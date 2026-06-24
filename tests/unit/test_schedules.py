@@ -17,6 +17,7 @@ from dbosify._schedule import (
     ScheduleRange,
     ScheduleSpec,
     ScheduleState,
+    _next_action_times,
     _schedule_from_context,
     compile_spec,
     encode_action_attributes,
@@ -115,6 +116,33 @@ def test_compile_spec_timezone() -> None:
 def test_compile_spec_requires_a_spec() -> None:
     with pytest.raises(ValueError):
         compile_spec(ScheduleSpec())
+
+
+def test_next_action_times_honor_schedule_timezone() -> None:
+    # A 09:00 daily calendar in America/New_York must report next fire times in
+    # UTC at 13:00/14:00 (EDT/EST) — not a naive 09:00 read in UTC.
+    schedule = Schedule(
+        action=ScheduleActionStartWorkflow("W", id="w", task_queue="tq"),
+        spec=ScheduleSpec(
+            calendars=[ScheduleCalendarSpec(hour=(ScheduleRange(9),))],
+            time_zone_name="America/New_York",
+        ),
+    )
+    times = _next_action_times(serialize_schedule_context(schedule), 3)
+    assert times
+    for t in times:
+        assert t.utcoffset() == timedelta(0)  # reported in UTC
+        assert t.hour in (13, 14)  # 09:00 New York is 13:00 (EDT) / 14:00 (EST) UTC
+
+
+def test_next_action_times_utc_schedule_unchanged() -> None:
+    # A plain UTC schedule still reports the wall-clock hour (no regression).
+    schedule = Schedule(
+        action=ScheduleActionStartWorkflow("W", id="w", task_queue="tq"),
+        spec=ScheduleSpec(calendars=[ScheduleCalendarSpec(hour=(ScheduleRange(9),))]),
+    )
+    times = _next_action_times(serialize_schedule_context(schedule), 1)
+    assert times and times[0].hour == 9 and times[0].utcoffset() == timedelta(0)
 
 
 async def test_context_round_trip() -> None:

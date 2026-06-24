@@ -22,7 +22,7 @@ pip install dbosify
 ```
 
 This is a drop-in replacement: simply import `dbosify` instead of `temporalio` and connect your clients and workers to a Postgres database instead of a Temporal server.
-Further documentation [here](https://docs.dbos.dev/explanations/migrating-from-temporal).
+Further documentation [here](https://docs.dbos.dev/explanations/dbosify).
 
 ```python
 import asyncio

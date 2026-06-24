@@ -89,11 +89,23 @@ class InfoWorkflow:
             schedule_to_close_timeout=timedelta(seconds=30),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
+        # Fixed aware ref keeps the tz-aware compare below deterministic on replay.
+        aware_ref = datetime(2000, 1, 1, tzinfo=timezone.utc)
         return {
             "first_execution_run_id": info.first_execution_run_id,
             "run_id": info.run_id,
             "workflow_id": info.workflow_id,
             "start_time_eq": info.workflow_start_time == info.start_time,
+            "start_time_is_utc": (
+                info.start_time.tzinfo is not None
+                and info.start_time.utcoffset() == timedelta(0)
+            ),
+            "now_is_utc": (
+                workflow.now().tzinfo is not None
+                and workflow.now().utcoffset() == timedelta(0)
+            ),
+            # Comparing the clock to a tz-aware datetime must not raise.
+            "now_after_aware_ref": workflow.now() > aware_ref,
             "has_parent": info.parent is not None,
             "task_queue": info.task_queue,
             "activity": act,
@@ -263,6 +275,9 @@ def test_workflow_and_activity_info_parity_fields() -> None:
     assert res["run_id"] == "infowf"
     assert res["workflow_id"] == "infowf"
     assert res["start_time_eq"] is True
+    assert res["start_time_is_utc"] is True
+    assert res["now_is_utc"] is True
+    assert res["now_after_aware_ref"] is True
     assert res["has_parent"] is False
     # No Worker registered a queue (in-process harness), so the workflow's queue
     # falls back to "default"; a local activity reports the workflow's queue.

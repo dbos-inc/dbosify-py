@@ -124,7 +124,11 @@ def test_workflow_id_bad_operator_rejected() -> None:
 
 def test_status_running_is_clean_multi_map() -> None:
     parsed = parse_query("ExecutionStatus = 'Running'")
-    assert parsed.to_dbos_filters() == {"status": ["PENDING", "ENQUEUED", "DELAYED"]}
+    # MAX_RECOVERY_ATTEMPTS_EXCEEDED is included: a stuck workflow maps to RUNNING
+    # in describe(), so the filter must surface it too.
+    assert parsed.to_dbos_filters() == {
+        "status": ["PENDING", "ENQUEUED", "DELAYED", "MAX_RECOVERY_ATTEMPTS_EXCEEDED"]
+    }
     assert parsed.post_filter() is None  # no ERROR-family member
 
 
@@ -164,7 +168,13 @@ def test_status_canceled_post_filter_keeps_only_cancellations() -> None:
 def test_status_in_unions_dbos_statuses() -> None:
     parsed = parse_query("ExecutionStatus IN ('Running', 'Completed')")
     statuses = parsed.to_dbos_filters()["status"]
-    assert set(statuses) == {"PENDING", "ENQUEUED", "DELAYED", "SUCCESS"}
+    assert set(statuses) == {
+        "PENDING",
+        "ENQUEUED",
+        "DELAYED",
+        "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+        "SUCCESS",
+    }
     assert parsed.post_filter() is None
 
 

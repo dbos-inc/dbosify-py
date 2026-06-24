@@ -85,8 +85,8 @@ def retry_decision(
     Returns ``(backoff delay before the next attempt, or None to give up;
     the retry state to report when giving up)``. ``elapsed`` is the time since
     the activity was scheduled; pass it (with ``schedule_to_close``) so the
-    schedule-to-close budget gates retries — like Temporal, it bounds the retry
-    sequence, not an in-flight attempt (``start_to_close`` bounds that).
+    schedule-to-close budget gates retries between attempts. An in-flight attempt
+    is bounded separately by :func:`effective_deadline`.
     """
     if failure.get("non_retryable"):
         return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
@@ -100,6 +100,11 @@ def retry_decision(
         and failure_type in set(policy.non_retryable_error_types)
     ):
         return None, exceptions.RetryState.NON_RETRYABLE_FAILURE
+    # A schedule-to-close timeout is terminal, never retried (Temporal parity).
+    if failure.get("cls") == "TimeoutError" and failure.get("timeout_type") == int(
+        exceptions.TimeoutType.SCHEDULE_TO_CLOSE
+    ):
+        return None, exceptions.RetryState.TIMEOUT
     if policy.maximum_attempts and attempt >= policy.maximum_attempts:
         return None, exceptions.RetryState.MAXIMUM_ATTEMPTS_REACHED
     override = failure.get("next_retry_delay")
@@ -119,6 +124,20 @@ def retry_decision(
         if elapsed + delay >= schedule_to_close:
             return None, exceptions.RetryState.TIMEOUT
     return delay, exceptions.RetryState.IN_PROGRESS
+
+
+def effective_deadline(
+    start_to_close: Optional[float], remaining_schedule_to_close: Optional[float]
+) -> Tuple[Optional[float], str]:
+    """``min(start_to_close, remaining schedule_to_close)`` + the binding bound's label (so a timeout reports the right type); ``None`` is unbounded."""
+    candidates: List[Tuple[float, str]] = []
+    if start_to_close is not None:
+        candidates.append((max(0.0, start_to_close), "start_to_close"))
+    if remaining_schedule_to_close is not None:
+        candidates.append((max(0.0, remaining_schedule_to_close), "schedule_to_close"))
+    if not candidates:
+        return None, "start_to_close"
+    return min(candidates, key=lambda c: c[0])
 
 
 class _RootActivityInbound(activity_interceptor.ActivityInboundInterceptor):
@@ -177,9 +196,12 @@ class _RootActivityOutbound(activity_interceptor.ActivityOutboundInterceptor):
 
 def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptStep:
     async def attempt(
-        args: List[Any], start_to_close: Optional[float], meta: Dict[str, Any]
+        args: List[Any], deadline: Optional[float], meta: Dict[str, Any]
     ) -> Dict[str, Any]:
         from .. import activity as activity_api
+
+        # Labels the caller-computed deadline so a timeout reports the right type.
+        deadline_type = meta.get("deadline_type", "start_to_close")
 
         # The dynamic step handles any unmatched type: resolve the single dynamic
         # activity rather than one keyed by the requested name (the real type is in meta).
@@ -332,13 +354,12 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
                         }
 
         async def run_to_deadline() -> Dict[str, Any]:
-            # Enforce start-to-close ourselves: the deadline is authoritative, so once
-            # it passes we cancel and abandon the attempt and discard any late result.
-            if start_to_close is None:
+            # Enforce the attempt deadline ourselves: once it passes, cancel and discard any late result.
+            if deadline is None:
                 return await run_attempt()
             task = asyncio.ensure_future(run_attempt())
             try:
-                done, _ = await asyncio.wait({task}, timeout=start_to_close)
+                done, _ = await asyncio.wait({task}, timeout=deadline)
             except asyncio.CancelledError:
                 # External cancellation (workflow cancel / scope): propagate the
                 # cancel into the attempt, then re-raise.
@@ -355,7 +376,7 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
 
         try:
             # User exceptions (including user-raised TimeoutError) are converted inside
-            # call_user_activity, so a TimeoutError here is the start-to-close deadline.
+            # call_user_activity, so a TimeoutError here is the attempt deadline.
             return await run_to_deadline()
         except activity_api_complete_async_error():
             # raise_complete_async(): the function returned but the activity stays
@@ -369,9 +390,18 @@ def _make_attempt_step(activity_name: str, *, dynamic: bool = False) -> AttemptS
             # Mark the context so a hung sync thread (which cancellation
             # cannot interrupt) still unwinds at its next heartbeat.
             ctx.cancelled.set()
+            is_stc = deadline_type == "schedule_to_close"
             timeout_failure = exceptions.TimeoutError(
-                "activity Start-To-Close timeout",
-                type=exceptions.TimeoutType.START_TO_CLOSE,
+                (
+                    "activity Schedule-To-Close timeout"
+                    if is_stc
+                    else "activity Start-To-Close timeout"
+                ),
+                type=(
+                    exceptions.TimeoutType.SCHEDULE_TO_CLOSE
+                    if is_stc
+                    else exceptions.TimeoutType.START_TO_CLOSE
+                ),
                 last_heartbeat_details=[],
             )
             return {

@@ -621,9 +621,17 @@ class _ActivityExec:
     cancellation_type: int = 0  # ActivityCancellationType; 2 = ABANDON
     attempt: int = 1
     in_backoff: bool = False
+    # In-flight backoff/park seconds, charged to virtual time on completion so the budget counts them (replay-stable).
+    pending_wait_seconds: float = 0.0
     last_failure: Optional[FailureEnvelope] = None
     cancel_requested: bool = False  # WAIT_CANCELLATION_COMPLETED in flight
     async_pending: bool = False  # raise_complete_async(): awaiting external
+    # The binding bound for the async-pending park timer (act_s2c): START_TO_CLOSE
+    # or SCHEDULE_TO_CLOSE. Set when the park is armed so the timeout reports the
+    # right type; recomputed deterministically on replay (same code path).
+    async_park_timeout_type: "exceptions.TimeoutType" = (
+        exceptions.TimeoutType.START_TO_CLOSE
+    )
     heartbeat_timeout: Optional[float] = None
     # Whether a completer heartbeat arrived within the current watch window
     # (the timeout check counts envelopes between timer fires — no clock reads).
@@ -1856,9 +1864,20 @@ class Interpreter(_Runtime):
             "workflow_type": self._defn.name,
             "headers": exec_state.headers,
         }
+        # Bound the attempt by min(start_to_close, remaining schedule_to_close); remaining uses virtual time, so it replays identically.
+        remaining_stc = (
+            exec_state.schedule_to_close
+            - (self._vloop.time() - exec_state.scheduled_at)
+            if exec_state.schedule_to_close is not None
+            else None
+        )
+        deadline, deadline_type = activities_mod.effective_deadline(
+            exec_state.start_to_close, remaining_stc
+        )
+        meta["deadline_type"] = deadline_type
         # Call step_fn synchronously so its function_id is claimed here; the result
         # decode rides outside the recorded step, replaying from the envelope.
-        step_coro = step_fn(exec_state.args, exec_state.start_to_close, meta)
+        step_coro = step_fn(exec_state.args, deadline, meta)
         self._launch_waiter(
             "activity",
             exec_state.seq,
@@ -2024,8 +2043,20 @@ class Interpreter(_Runtime):
             elif waiter.kind == "q_activity":
                 self._deliver_queued_activity_event(waiter)
             elif waiter.kind == "act_s2c":
+                parked_state = self._pending_activities.get(waiter.seq)
+                if parked_state is not None:
+                    # Charge the elapsed park to virtual time (counts toward a retry's budget).
+                    self._advance_time(
+                        self._vloop.time() + parked_state.pending_wait_seconds
+                    )
+                    parked_state.pending_wait_seconds = 0.0
                 self._async_parked_timeout(
-                    waiter.seq, exceptions.TimeoutType.START_TO_CLOSE
+                    waiter.seq,
+                    (
+                        parked_state.async_park_timeout_type
+                        if parked_state is not None
+                        else exceptions.TimeoutType.START_TO_CLOSE
+                    ),
                 )
             elif waiter.kind == "act_hb":
                 self._async_heartbeat_check(waiter.seq)
@@ -2046,7 +2077,9 @@ class Interpreter(_Runtime):
             self._pending_activities.pop(waiter.seq, None)
             return
         if exec_state.in_backoff:
-            # Backoff sleep finished -> next attempt.
+            # Backoff done -> next attempt; charge it to virtual time (no ended_at of its own).
+            self._advance_time(self._vloop.time() + exec_state.pending_wait_seconds)
+            exec_state.pending_wait_seconds = 0.0
             exec_state.attempt += 1
             self._launch_attempt(exec_state)
             return
@@ -2056,15 +2089,37 @@ class Interpreter(_Runtime):
             # raise_complete_async(): the function returned but the activity stays
             # pending until an activity_result envelope resolves it (checkpointed).
             exec_state.async_pending = True
-            if exec_state.start_to_close is not None:
-                elapsed = float(envelope.get("ended_at", 0.0)) - float(
-                    envelope.get("started_at", envelope.get("ended_at", 0.0))
+            # Park min(remaining start_to_close, remaining schedule_to_close); else a schedule_to_close-only async activity waits forever.
+            attempt_elapsed = float(envelope.get("ended_at", 0.0)) - float(
+                envelope.get("started_at", envelope.get("ended_at", 0.0))
+            )
+            s2c_remaining = (
+                exec_state.start_to_close - max(attempt_elapsed, 0.0)
+                if exec_state.start_to_close is not None
+                else None
+            )
+            stc_remaining = (
+                exec_state.schedule_to_close
+                - (self._vloop.time() - exec_state.scheduled_at)
+                if exec_state.schedule_to_close is not None
+                else None
+            )
+            parked, parked_type = activities_mod.effective_deadline(
+                s2c_remaining, stc_remaining
+            )
+            if parked is not None:
+                exec_state.async_park_timeout_type = (
+                    exceptions.TimeoutType.SCHEDULE_TO_CLOSE
+                    if parked_type == "schedule_to_close"
+                    else exceptions.TimeoutType.START_TO_CLOSE
                 )
-                remaining = max(0.05, exec_state.start_to_close - max(elapsed, 0.0))
+                park_seconds = max(0.05, parked)
+                # Charge the park to virtual time when it fires (counts toward a retry's budget).
+                exec_state.pending_wait_seconds = park_seconds
                 self._launch_waiter(
                     "act_s2c",
                     exec_state.seq,
-                    DBOS.sleep_async(remaining),
+                    DBOS.sleep_async(park_seconds),
                 )
             if exec_state.heartbeat_timeout is not None:
                 exec_state.async_hb_seen = False
@@ -2093,6 +2148,7 @@ class Interpreter(_Runtime):
         retry_delay, retry_state = self._retry_decision(exec_state, failure)
         if retry_delay is not None:
             exec_state.in_backoff = True
+            exec_state.pending_wait_seconds = retry_delay
             self._launch_waiter(
                 "activity", exec_state.seq, DBOS.sleep_async(retry_delay)
             )
@@ -2108,7 +2164,7 @@ class Interpreter(_Runtime):
             activity_id=exec_state.activity_id,
             retry_state=retry_state,
         )
-        error.__cause__ = deserialize_failure(failure)
+        error.__cause__ = self._activity_failure_cause(failure, retry_state)
         exec_state.future.set_exception(error)
 
     def _deliver_queued_activity_event(self, waiter: _Waiter) -> None:
@@ -2156,7 +2212,7 @@ class Interpreter(_Runtime):
             activity_id=exec_state.activity_id,
             retry_state=retry_state,
         )
-        error.__cause__ = deserialize_failure(failure)
+        error.__cause__ = self._activity_failure_cause(failure, retry_state)
         exec_state.future.set_exception(error)
 
     def _deliver_child_event(self, waiter: _Waiter) -> None:
@@ -2248,6 +2304,24 @@ class Interpreter(_Runtime):
             elapsed=elapsed,
             schedule_to_close=exec_state.schedule_to_close,
         )
+
+    @staticmethod
+    def _activity_failure_cause(
+        failure: FailureEnvelope, retry_state: Optional[exceptions.RetryState]
+    ) -> BaseException:
+        """Wrap a non-timeout last failure as SCHEDULE_TO_CLOSE when retries stop on the budget (temporalio parity); an already-typed timeout passes through."""
+        cause = deserialize_failure(failure)
+        if retry_state == exceptions.RetryState.TIMEOUT and not isinstance(
+            cause, exceptions.TimeoutError
+        ):
+            wrapper = exceptions.TimeoutError(
+                "activity Schedule-To-Close timeout",
+                type=exceptions.TimeoutType.SCHEDULE_TO_CLOSE,
+                last_heartbeat_details=[],
+            )
+            wrapper.__cause__ = cause
+            return wrapper
+        return cause
 
     # ------------------------------------------------------------------
     # Inbox routing
@@ -2368,6 +2442,7 @@ class Interpreter(_Runtime):
         retry_delay, retry_state = self._retry_decision(exec_state, failure)
         if retry_delay is not None:
             exec_state.in_backoff = True
+            exec_state.pending_wait_seconds = retry_delay
             self._launch_waiter("activity", seq, DBOS.sleep_async(retry_delay))
             return
         del self._pending_activities[seq]
@@ -2381,7 +2456,7 @@ class Interpreter(_Runtime):
             activity_id=exec_state.activity_id,
             retry_state=retry_state,
         )
-        error.__cause__ = deserialize_failure(failure)
+        error.__cause__ = self._activity_failure_cause(failure, retry_state)
         exec_state.future.set_exception(error)
 
     def _retire_parked_timers(self, seq: int) -> None:
@@ -2399,12 +2474,14 @@ class Interpreter(_Runtime):
         if exec_state is None or not exec_state.async_pending:
             return  # resolved (or retired) before the timer fired
         self._retire_parked_timers(seq)
+        if timeout_type == exceptions.TimeoutType.SCHEDULE_TO_CLOSE:
+            message = "activity Schedule-To-Close timeout"
+        elif timeout_type == exceptions.TimeoutType.START_TO_CLOSE:
+            message = "activity Start-To-Close timeout"
+        else:
+            message = "activity Heartbeat timeout"
         timeout_failure = exceptions.TimeoutError(
-            (
-                "activity Start-To-Close timeout"
-                if timeout_type == exceptions.TimeoutType.START_TO_CLOSE
-                else "activity Heartbeat timeout"
-            ),
+            message,
             type=timeout_type,
             last_heartbeat_details=[],
         )
@@ -2933,7 +3010,8 @@ class Interpreter(_Runtime):
             if self._meta.root is not None
             else None
         )
-        start_time = datetime.fromtimestamp(self._start_time)
+        # Tz-aware UTC (temporalio parity), replay-stable via the checkpointed epoch.
+        start_time = datetime.fromtimestamp(self._start_time, timezone.utc)
         return Info(
             attempt=self._meta.attempt,
             continued_run_id=self._continued_from,

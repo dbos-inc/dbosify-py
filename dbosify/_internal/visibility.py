@@ -62,7 +62,13 @@ _STATUS_BY_NAME: Dict[str, WorkflowExecutionStatus] = {
 # Each Temporal status -> the DBOS status string(s) that can hold it. The four
 # ERROR-family statuses all collapse onto DBOS ``ERROR`` and need a post-filter.
 _TEMPORAL_TO_DBOS: Dict[WorkflowExecutionStatus, Tuple[str, ...]] = {
-    WorkflowExecutionStatus.RUNNING: ("PENDING", "ENQUEUED", "DELAYED"),
+    WorkflowExecutionStatus.RUNNING: (
+        "PENDING",
+        "ENQUEUED",
+        "DELAYED",
+        # Stuck-but-not-closed; to_execution_status maps it to RUNNING too.
+        "MAX_RECOVERY_ATTEMPTS_EXCEEDED",
+    ),
     WorkflowExecutionStatus.COMPLETED: ("SUCCESS",),
     WorkflowExecutionStatus.TERMINATED: ("CANCELLED",),
     WorkflowExecutionStatus.FAILED: ("ERROR",),
